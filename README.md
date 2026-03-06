@@ -58,9 +58,13 @@ Restart Claude Desktop to connect.
 
 ### Connect to ChatGPT
 
-1. Go to **Settings > Connected Apps**
-2. Add the MCP server URL: `https://ai-pricing-hub-mcp-9604f763.alpic.live/`
-3. ChatGPT will render interactive widget UIs for each tool
+This repo now includes a ChatGPT App manifest (`app.json`) that maps the existing MCP tools and widgets.
+
+1. Register the app manifest with your ChatGPT Apps SDK flow.
+2. Configure the backend MCP endpoint as: `https://ai-pricing-hub-mcp-9604f763.alpic.live/`
+3. Ensure the 3 UI resources in `app.json` are registered (`ui://widget/*`).
+
+See `docs/chatgpt-app-migration.md` for the full migration mapping.
 
 ### Example Prompts
 
