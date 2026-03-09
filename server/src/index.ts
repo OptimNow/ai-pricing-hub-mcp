@@ -31,7 +31,10 @@ const server = new McpServer(
     description:
       "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
       "Fetches live data from OpenRouter API. Filter by provider, category, capability, " +
-      "price range, or minimum ELO score. Optionally enrich with business metrics for a use case.",
+      "price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
+      "IMPORTANT: Report all prices, costs, and scores EXACTLY as returned. " +
+      "Do NOT add commentary, opinions, or recommendations beyond what the data shows. " +
+      "Present the results as a table and let the user draw conclusions.",
     inputSchema: {
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
       category: z.string().optional().describe("Filter by category: Frontier, Mid-tier, Budget, Open Weights, Image"),
@@ -117,7 +120,8 @@ const server = new McpServer(
   {
     description:
       "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. " +
-      "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets.",
+      "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
+      "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
       modelName: z.string().optional().describe("Model name to estimate costs for (e.g. 'GPT-4o', 'Claude Sonnet 4'). If omitted, shows top models."),
       useCasePreset: z.string().optional().describe(
@@ -223,7 +227,8 @@ const server = new McpServer(
   {
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
-      "Filter by provider, vCPUs, memory, category, processor, use case, or operating system.",
+      "Filter by provider, vCPUs, memory, category, processor, use case, or operating system. " +
+      "IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
       provider: z.string().optional().describe("Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba"),
       category: z.string().optional().describe("Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable"),
