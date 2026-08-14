@@ -1,7 +1,7 @@
 {
   "$schema": "https://chatgpt.com/schemas/app/v1.json",
   "id": "ai-pricing-hub",
-  "name": "AI Pricing Hub",
+  "name": "OptimToken",
   "version": "0.1.0",
   "description": "Compare LLM pricing, estimate workload costs, and benchmark cloud compute prices.",
   "mcp": {
@@ -15,15 +15,40 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "provider": { "type": "string" },
-          "category": { "type": "string" },
-          "capability": { "type": "string" },
-          "maxInputPrice": { "type": "number" },
-          "maxOutputPrice": { "type": "number" },
-          "minElo": { "type": "number" },
-          "useCasePreset": { "type": "string" },
-          "volumePreset": { "type": "string", "enum": ["10k", "100k", "1m"] },
-          "limit": { "type": "number", "minimum": 1, "maximum": 50 }
+          "provider": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "maxInputPrice": {
+            "type": "number"
+          },
+          "maxOutputPrice": {
+            "type": "number"
+          },
+          "minElo": {
+            "type": "number"
+          },
+          "useCasePreset": {
+            "type": "string"
+          },
+          "volumePreset": {
+            "type": "string",
+            "enum": [
+              "10k",
+              "100k",
+              "1m"
+            ]
+          },
+          "limit": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 50
+          }
         },
         "additionalProperties": false
       },
@@ -36,11 +61,21 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "modelName": { "type": "string" },
-          "useCasePreset": { "type": "string" },
-          "customInputTokens": { "type": "number" },
-          "customOutputTokens": { "type": "number" },
-          "monthlyVolume": { "type": "number" }
+          "modelName": {
+            "type": "string"
+          },
+          "useCasePreset": {
+            "type": "string"
+          },
+          "customInputTokens": {
+            "type": "number"
+          },
+          "customOutputTokens": {
+            "type": "number"
+          },
+          "monthlyVolume": {
+            "type": "number"
+          }
         },
         "additionalProperties": false
       },
@@ -53,17 +88,51 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "provider": { "type": "string" },
-          "category": { "type": "string" },
-          "minVCPUs": { "type": "number" },
-          "maxVCPUs": { "type": "number" },
-          "minMemory": { "type": "number" },
-          "maxMemory": { "type": "number" },
-          "os": { "type": "string", "enum": ["Linux", "Windows"] },
-          "processor": { "type": "string" },
-          "useCase": { "type": "string" },
-          "sortBy": { "type": "string", "enum": ["price", "vcpus", "memory", "pricePerVCPU"] },
-          "limit": { "type": "number", "minimum": 1, "maximum": 50 }
+          "provider": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "minVCPUs": {
+            "type": "number"
+          },
+          "maxVCPUs": {
+            "type": "number"
+          },
+          "minMemory": {
+            "type": "number"
+          },
+          "maxMemory": {
+            "type": "number"
+          },
+          "os": {
+            "type": "string",
+            "enum": [
+              "Linux",
+              "Windows"
+            ]
+          },
+          "processor": {
+            "type": "string"
+          },
+          "useCase": {
+            "type": "string"
+          },
+          "sortBy": {
+            "type": "string",
+            "enum": [
+              "price",
+              "vcpus",
+              "memory",
+              "pricePerVCPU"
+            ]
+          },
+          "limit": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 50
+          }
         },
         "additionalProperties": false
       },
