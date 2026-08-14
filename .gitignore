@@ -3,3 +3,6 @@ dist/
 .env*
 .DS_store
 *.tsbuildinfo
+# MCP registry publisher CLI (downloaded locally, not part of the repo)
+mcp-publisher.exe
+mcp-publisher*.tar.gz

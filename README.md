@@ -1,4 +1,4 @@
-# AI Pricing Hub — MCP App
+# OptimToken — MCP App (by OptimNow)
 
 An MCP (Model Context Protocol) app that compares AI/LLM model pricing, estimates costs, and benchmarks cloud compute instances. Works as an interactive tool inside AI conversations on **Claude**, **ChatGPT**, **VS Code**, and other MCP-compatible clients.
 
