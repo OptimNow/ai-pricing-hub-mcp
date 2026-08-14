@@ -28,6 +28,9 @@ const server = new McpServer(
   "compare-llm-models",
   { description: "Compare LLM Models" },
   {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
       "Fetches live data from OpenRouter API. Filter by provider, category, capability, " +
@@ -118,6 +121,9 @@ const server = new McpServer(
   "estimate-llm-cost",
   { description: "Estimate LLM Cost" },
   {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
@@ -225,6 +231,9 @@ const server = new McpServer(
   "compare-compute-pricing",
   { description: "Compare Cloud Compute Pricing" },
   {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
       "Filter by provider, vCPUs, memory, category, processor, use case, or operating system. " +
