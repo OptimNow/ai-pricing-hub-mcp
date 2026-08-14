@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.optimnow/ai-pricing-hub",
+  "description": "Compare LLM API pricing (incl. batch and prompt-cache rates, Arena ELO quality), estimate workload costs for 8 business use cases, and benchmark cloud compute instances across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. By OptimNow.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/OptimNow/ai-pricing-hub-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
+    }
+  ]
+}
