@@ -34,7 +34,17 @@
             "type": "number"
           },
           "useCasePreset": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "supportTicket",
+              "knowledgeQA",
+              "meetingSummary",
+              "marketingContent",
+              "codingTask",
+              "invoiceProcessing",
+              "callSummary",
+              "agentWorkflow"
+            ]
           },
           "volumePreset": {
             "type": "string",
@@ -65,16 +75,32 @@
             "type": "string"
           },
           "useCasePreset": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "supportTicket",
+              "knowledgeQA",
+              "meetingSummary",
+              "marketingContent",
+              "codingTask",
+              "invoiceProcessing",
+              "callSummary",
+              "agentWorkflow"
+            ]
           },
           "customInputTokens": {
-            "type": "number"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
           },
           "customOutputTokens": {
-            "type": "number"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
           },
           "monthlyVolume": {
-            "type": "number"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000
           }
         },
         "additionalProperties": false
@@ -105,13 +131,6 @@
           },
           "maxMemory": {
             "type": "number"
-          },
-          "os": {
-            "type": "string",
-            "enum": [
-              "Linux",
-              "Windows"
-            ]
           },
           "processor": {
             "type": "string"

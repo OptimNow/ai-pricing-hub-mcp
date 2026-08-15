@@ -11,9 +11,11 @@ interface EnrichedModel {
   category: string;
   capabilities: string[];
   eloScore?: number;
-  efficiencyScore?: number;
+  efficiencyScore?: number | null;
   useCaseCost: number;
+  optimizedUseCaseCost: number;
   monthlyBudget: number;
+  optimizedMonthlyBudget: number;
   isFinOpsFriendly?: boolean;
 }
 
@@ -22,13 +24,18 @@ interface CompareOutput {
   useCaseLabel: string;
   volumeLabel: string;
   source: string;
-  totalAvailable: number;
+  matchingCount: number;
+  catalogSize: number;
+  eloAsOf: string;
+  dataAsOf?: string;
+  error?: string;
 }
 
-function formatCost(cents: number): string {
-  if (cents < 0.01) return `$${(cents * 100).toFixed(2)}c`;
-  if (cents < 1) return `$${cents.toFixed(4)}`;
-  return `$${cents.toFixed(2)}`;
+function formatCost(amount: number): string {
+  if (amount === 0) return "$0.00";
+  if (amount < 0.001) return `$${amount.toFixed(6)}`;
+  if (amount < 0.01) return `$${amount.toFixed(4)}`;
+  return `$${amount.toFixed(3)}`;
 }
 
 function formatBudget(amount: number): string {
@@ -44,7 +51,12 @@ function CompareModels() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading models...</div>;
   }
 
-  const { models, useCaseLabel, volumeLabel, source, totalAvailable } = output as CompareOutput;
+  const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, error } =
+    output as unknown as CompareOutput;
+
+  if (error) {
+    return <ErrorCard message={error} />;
+  }
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "800px" }}>
@@ -52,21 +64,65 @@ function CompareModels() {
         LLM Model Comparison
       </h2>
       <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
-        {totalAvailable} models found · Showing {models.length} · {useCaseLabel} · {volumeLabel}/mo
-        <span style={{ marginLeft: "8px", fontSize: "11px", opacity: 0.7 }}>({source})</span>
+        {matchingCount} of {catalogSize} models match · Showing {models.length} · {useCaseLabel} · {volumeLabel}/mo
+        <Badge label={`ELO as of ${eloAsOf}`} />
+        {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
       </p>
 
-      {/* Model Cards */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-        {models.map((m, i) => (
-          <ModelCard key={`${m.provider}-${m.model}-${i}`} model={m} rank={i + 1} />
-        ))}
+      {models.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {models.map((m, i) => (
+            <ModelCard key={`${m.provider}-${m.model}-${i}`} model={m} rank={i + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Badge({ label, warn }: { label: string; warn?: boolean }) {
+  return (
+    <span style={{
+      marginLeft: "8px", fontSize: "11px", borderRadius: "4px", padding: "1px 6px",
+      background: warn ? "#fef3c7" : "#f3f4f6", color: warn ? "#92400e" : "#4b5563",
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
+      <div style={{
+        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
+        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
+      }}>
+        <strong style={{ display: "block", marginBottom: "4px" }}>Could not load model comparison</strong>
+        {message}
       </div>
     </div>
   );
 }
 
+function EmptyState() {
+  return (
+    <div style={{
+      border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
+      textAlign: "center", color: "#6b7280", fontSize: "13px",
+    }}>
+      No results match these filters.
+    </div>
+  );
+}
+
 function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
+  const savingsPct = m.monthlyBudget > 0
+    ? Math.round((1 - m.optimizedMonthlyBudget / m.monthlyBudget) * 100)
+    : 0;
+
   return (
     <div style={{
       border: "1px solid #e5e7eb",
@@ -105,11 +161,21 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
         <MetricCell label="Monthly" value={formatBudget(m.monthlyBudget)} color="#2563eb" />
       </div>
 
+      {/* Optimized Row */}
+      <div style={{ marginTop: "6px", fontSize: "11px", color: "#6b7280" }}>
+        Optimized (caching{savingsPct > 0 ? " + batch where eligible" : ""}):{" "}
+        <strong style={{ color: "#111827" }}>{formatCost(m.optimizedUseCaseCost)}</strong>/req ·{" "}
+        <strong style={{ color: "#111827" }}>{formatBudget(m.optimizedMonthlyBudget)}</strong>/mo
+        {savingsPct > 0 && <span style={{ color: "#16a34a", marginLeft: "4px" }}>−{savingsPct}%</span>}
+      </div>
+
       {/* Bottom Row */}
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "11px", color: "#6b7280" }}>
         <div style={{ display: "flex", gap: "8px" }}>
           {m.eloScore && <span>ELO: {m.eloScore}</span>}
-          {m.efficiencyScore !== undefined && <span>Efficiency: {m.efficiencyScore.toFixed(1)}</span>}
+          {m.efficiencyScore !== undefined && m.efficiencyScore !== null && (
+            <span>Efficiency: {m.efficiencyScore.toFixed(1)}</span>
+          )}
           <span>Context: {m.contextWindow}</span>
         </div>
         <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>

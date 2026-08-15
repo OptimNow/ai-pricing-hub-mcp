@@ -8,6 +8,8 @@ interface CostEntry {
   outputTokens: number;
   perRequest: number;
   monthly: number;
+  perRequestOptimized: number;
+  monthlyOptimized: number;
 }
 
 interface ModelCostItem {
@@ -25,14 +27,18 @@ interface ModelCostItem {
 interface EstimateOutput {
   modelCosts: ModelCostItem[];
   volume: number;
+  source: string;
+  eloAsOf: string;
+  dataAsOf?: string;
+  error?: string;
 }
 
-function formatCost(cents: number): string {
-  if (cents === 0) return "$0";
-  if (cents < 0.001) return `$${cents.toFixed(6)}`;
-  if (cents < 0.01) return `$${cents.toFixed(4)}`;
-  if (cents < 1) return `$${cents.toFixed(4)}`;
-  return `$${cents.toFixed(2)}`;
+function formatCost(amount: number): string {
+  if (amount === 0) return "$0";
+  if (amount < 0.001) return `$${amount.toFixed(6)}`;
+  if (amount < 0.01) return `$${amount.toFixed(4)}`;
+  if (amount < 1) return `$${amount.toFixed(4)}`;
+  return `$${amount.toFixed(2)}`;
 }
 
 function formatMonthly(amount: number): string {
@@ -49,7 +55,11 @@ function EstimateCost() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Estimating costs...</div>;
   }
 
-  const { modelCosts, volume } = output as EstimateOutput;
+  const { modelCosts, volume, source, eloAsOf, dataAsOf, error } = output as unknown as EstimateOutput;
+
+  if (error) {
+    return <ErrorCard message={error} />;
+  }
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "720px" }}>
@@ -58,11 +68,53 @@ function EstimateCost() {
       </h2>
       <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
         {modelCosts.length} model(s) · {volume.toLocaleString()} requests/month
+        {eloAsOf && <Badge label={`ELO as of ${eloAsOf}`} />}
+        {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
       </p>
 
-      {modelCosts.map((mc, idx) => (
-        <ModelCostCard key={`${mc.model.provider}-${mc.model.model}-${idx}`} mc={mc} />
-      ))}
+      {modelCosts.length === 0 ? (
+        <EmptyState />
+      ) : (
+        modelCosts.map((mc, idx) => (
+          <ModelCostCard key={`${mc.model.provider}-${mc.model.model}-${idx}`} mc={mc} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function Badge({ label, warn }: { label: string; warn?: boolean }) {
+  return (
+    <span style={{
+      marginLeft: "8px", fontSize: "11px", borderRadius: "4px", padding: "1px 6px",
+      background: warn ? "#fef3c7" : "#f3f4f6", color: warn ? "#92400e" : "#4b5563",
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
+      <div style={{
+        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
+        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
+      }}>
+        <strong style={{ display: "block", marginBottom: "4px" }}>Could not estimate costs</strong>
+        {message}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div style={{
+      border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
+      textAlign: "center", color: "#6b7280", fontSize: "13px",
+    }}>
+      No results match these filters.
     </div>
   );
 }
@@ -99,6 +151,7 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
             <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Tokens (in+out)</th>
             <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Per Request</th>
             <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Monthly</th>
+            <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Monthly optimized</th>
           </tr>
         </thead>
         <tbody>
@@ -117,6 +170,14 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
                   color: isMin ? "#16a34a" : isMax ? "#dc2626" : "#111827",
                 }}>
                   {formatMonthly(c.monthly)}
+                </td>
+                <td style={{ textAlign: "right", padding: "5px 6px", color: "#6b7280" }}>
+                  {formatMonthly(c.monthlyOptimized)}
+                  {c.monthly > 0 && c.monthlyOptimized < c.monthly && (
+                    <span style={{ color: "#16a34a", fontSize: "10px", marginLeft: "3px" }}>
+                      −{Math.round((1 - c.monthlyOptimized / c.monthly) * 100)}%
+                    </span>
+                  )}
                 </td>
               </tr>
             );

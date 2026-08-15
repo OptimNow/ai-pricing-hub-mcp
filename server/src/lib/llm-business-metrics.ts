@@ -11,27 +11,51 @@ export interface UseCaseProfile {
   shortLabel: string;
   inputTokens: number;
   outputTokens: number;
+  /** Share of input tokens typically served from prompt cache in production
+   *  (system prompt, knowledge base, tool definitions). 0..1 */
+  cacheHitRate: number;
+  /** Whether this workload is typically async and batch-API eligible (-50%) */
+  batchEligible: boolean;
 }
 
 export interface EnrichedLLMModel extends LLMModel {
-  costEfficiency: number | null;
+  efficiencyScore: number | null;
   useCaseCost: number;
+  /** Unit cost assuming prompt caching + batch API where the use case allows it */
+  optimizedUseCaseCost: number;
   monthlyBudget: number;
+  /** Monthly budget at the optimized unit cost */
+  optimizedMonthlyBudget: number;
   volatilityRisk: VolatilityLevel;
   isFinOpsFriendly: boolean;
 }
 
 // ── Constants ──
 
-export const USE_CASE_PROFILES: Record<string, UseCaseProfile> = {
-  supportTicket:     { label: "Support Ticket",     shortLabel: "Support",   inputTokens: 1500,  outputTokens: 500   },
-  knowledgeQA:       { label: "Knowledge Q&A",      shortLabel: "Q&A",       inputTokens: 2000,  outputTokens: 800   },
-  meetingSummary:    { label: "Meeting Summary",     shortLabel: "Meeting",   inputTokens: 10000, outputTokens: 1200  },
-  marketingContent:  { label: "Marketing Content",   shortLabel: "Marketing", inputTokens: 2500,  outputTokens: 1800  },
-  codingTask:        { label: "Coding Task",         shortLabel: "Coding",    inputTokens: 3000,  outputTokens: 2000  },
-  invoiceProcessing: { label: "Invoice Processing",  shortLabel: "Invoice",   inputTokens: 1500,  outputTokens: 600   },
-  callSummary:       { label: "Call Summary",         shortLabel: "Call",      inputTokens: 2000,  outputTokens: 700   },
-  agentWorkflow:     { label: "Agent Workflow",       shortLabel: "Agent",     inputTokens: 6000,  outputTokens: 3000  },
+/** The only accepted `useCasePreset` values — the tool input enums are built
+ *  from this, so a profile can never exist that callers cannot select. */
+export const USE_CASE_KEYS = [
+  "supportTicket",
+  "knowledgeQA",
+  "meetingSummary",
+  "marketingContent",
+  "codingTask",
+  "invoiceProcessing",
+  "callSummary",
+  "agentWorkflow",
+] as const;
+
+export type UseCaseKey = (typeof USE_CASE_KEYS)[number];
+
+export const USE_CASE_PROFILES: Record<UseCaseKey, UseCaseProfile> = {
+  supportTicket:     { label: "Support Ticket",     shortLabel: "Support",   inputTokens: 1500,  outputTokens: 500,   cacheHitRate: 0.6, batchEligible: false },
+  knowledgeQA:       { label: "Knowledge Q&A",      shortLabel: "Q&A",       inputTokens: 2000,  outputTokens: 800,   cacheHitRate: 0.7, batchEligible: false },
+  meetingSummary:    { label: "Meeting Summary",     shortLabel: "Meeting",   inputTokens: 10000, outputTokens: 1200,  cacheHitRate: 0.1, batchEligible: true  },
+  marketingContent:  { label: "Marketing Content",   shortLabel: "Marketing", inputTokens: 2500,  outputTokens: 1800,  cacheHitRate: 0.2, batchEligible: false },
+  codingTask:        { label: "Coding Task",         shortLabel: "Coding",    inputTokens: 3000,  outputTokens: 2000,  cacheHitRate: 0.5, batchEligible: false },
+  invoiceProcessing: { label: "Invoice Processing",  shortLabel: "Invoice",   inputTokens: 1500,  outputTokens: 600,   cacheHitRate: 0.3, batchEligible: true  },
+  callSummary:       { label: "Call Summary",         shortLabel: "Call",      inputTokens: 2000,  outputTokens: 700,   cacheHitRate: 0.1, batchEligible: true  },
+  agentWorkflow:     { label: "Agent Workflow",       shortLabel: "Agent",     inputTokens: 6000,  outputTokens: 3000,  cacheHitRate: 0.7, batchEligible: false },
 };
 
 export const VOLUME_PRESETS: { key: VolumePreset; value: number; label: string }[] = [
@@ -86,6 +110,31 @@ export function parseContextWindow(ctx: string): number {
 /** Cost per single request for a use case profile */
 export function useCaseCost(inputPrice: number, outputPrice: number, profile: UseCaseProfile): number {
   return (profile.inputTokens / 1e6) * inputPrice + (profile.outputTokens / 1e6) * outputPrice;
+}
+
+/** Unit cost assuming the FinOps optimizations this use case allows:
+ *  - batch API pricing when the workload is async (batchEligible)
+ *  - prompt-cache read pricing on the cacheHitRate share of input tokens
+ *  Falls back to list prices when a model doesn't publish batch/cache rates,
+ *  so the optimized cost is never lower than what is actually achievable. */
+export function optimizedUseCaseCost(model: LLMModel, profile: UseCaseProfile): number {
+  const useBatch =
+    profile.batchEligible &&
+    model.batchInputPricePer1M !== undefined &&
+    model.batchOutputPricePer1M !== undefined;
+
+  const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
+  const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
+
+  // Cache reads: published rate only, applied as-is even under batch.
+  // (Some providers also discount cache reads in batch, but we don't have a
+  // published batch-cache rate — using the standard cache rate is the
+  // conservative, defensible choice. No published rate -> no cache discount.)
+  const cacheRead =
+    model.cachedInputPricePer1M !== undefined ? model.cachedInputPricePer1M : baseIn;
+
+  const effectiveIn = cacheRead * profile.cacheHitRate + baseIn * (1 - profile.cacheHitRate);
+  return (profile.inputTokens / 1e6) * effectiveIn + (profile.outputTokens / 1e6) * baseOut;
 }
 
 /** Compute percentile-rank-based value scores for all models.
@@ -187,28 +236,36 @@ export function formatMonthlyBudget(cost: number): string {
 export function enrichModels(
   models: LLMModel[],
   volumePreset: VolumePreset,
-  useCaseKey: string,
+  useCaseKey: UseCaseKey,
 ): EnrichedLLMModel[] {
   const volume = VOLUME_PRESETS.find((p) => p.key === volumePreset)?.value ?? 100_000;
-  const profile = USE_CASE_PROFILES[useCaseKey] ?? USE_CASE_PROFILES.supportTicket;
+  const profile = USE_CASE_PROFILES[useCaseKey];
 
   // 1. Compute percentile-rank value scores
   const valueScores = computeValueScores(models);
 
-  // 2. Find top-30% threshold for FinOps badge
+  // 2. Find top-30% threshold for FinOps badge.
+  // ceil(n*0.3)-1 is the last zero-based index inside the top 30% — floor()
+  // admitted up to 40% of small populations (e.g. 4 of 10 models).
   const validScores = valueScores.filter((v): v is number => v !== null);
-  const top30Threshold = validScores.length > 0
-    ? [...validScores].sort((a, b) => b - a)[Math.floor(validScores.length * 0.3)] ?? 65
-    : 65;
+  const top30Threshold =
+    validScores.length > 0
+      ? [...validScores].sort((a, b) => b - a)[
+          Math.max(0, Math.ceil(validScores.length * 0.3) - 1)
+        ] ?? 65
+      : 65;
 
   // 3. Enrich each model
   return models.map((m, i) => {
     const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
+    const optimized = optimizedUseCaseCost(m, profile);
     return {
       ...m,
-      costEfficiency: valueScores[i],
+      efficiencyScore: valueScores[i],
       useCaseCost: cost,
+      optimizedUseCaseCost: optimized,
       monthlyBudget: cost * volume,
+      optimizedMonthlyBudget: optimized * volume,
       volatilityRisk: getVolatilityRisk(m.model, m.releaseDate, m.category),
       isFinOpsFriendly: checkFinOpsFriendly(m.eloScore, valueScores[i], top30Threshold, m.model),
     } as EnrichedLLMModel;
