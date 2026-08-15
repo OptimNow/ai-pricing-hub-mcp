@@ -127,14 +127,17 @@ function inferAWSCategory(type: string): ComputeCategory {
 }
 
 function inferAzureCategory(type: string): ComputeCategory {
-  if (/^Standard_?B/i.test(type)) return "Burstable";
-  if (/^Standard_?D/i.test(type)) return "General Purpose";
-  if (/^Standard_?F/i.test(type)) return "Compute Optimized";
-  if (/^Standard_?E/i.test(type)) return "Memory Optimized";
-  if (/^Standard_?M/i.test(type)) return "Memory Optimized";
-  if (/^Standard_?L/i.test(type)) return "Storage Optimized";
-  if (/^Standard_?N/i.test(type)) return "GPU / Accelerated";
-  if (/^Standard_?A/i.test(type)) return "General Purpose";
+  // The `Standard_` prefix is optional in the dataset (rows are "NC6s_v3",
+  // not "Standard_NC6s_v3"), so requiring it sent every Azure row to the
+  // "General Purpose" default — including the GPU and memory-optimized ones.
+  if (/^(Standard_)?B/i.test(type)) return "Burstable";
+  if (/^(Standard_)?D/i.test(type)) return "General Purpose";
+  if (/^(Standard_)?F/i.test(type)) return "Compute Optimized";
+  if (/^(Standard_)?E/i.test(type)) return "Memory Optimized";
+  if (/^(Standard_)?M/i.test(type)) return "Memory Optimized";
+  if (/^(Standard_)?L/i.test(type)) return "Storage Optimized";
+  if (/^(Standard_)?N/i.test(type)) return "GPU / Accelerated";
+  if (/^(Standard_)?A/i.test(type)) return "General Purpose";
   return "General Purpose";
 }
 
@@ -227,6 +230,9 @@ function inferAzureProcessor(type: string): ProcessorFamily {
   if (/A100/i.test(type)) return "NVIDIA A100";
   if (/H100/i.test(type)) return "NVIDIA H100";
   if (/A10/i.test(type) && !/A100/i.test(type)) return "NVIDIA A10G";
+  // NCv3 (NC6s_v3, NC12s_v3, NC24s_v3, NC24rs_v3) ships V100s — the family name
+  // never says so, so without this the ^N catch-all below labels them "Other".
+  if (/^(Standard_)?NC\d+r?s_v3/i.test(type)) return "NVIDIA V100";
   if (/^(Standard_)?N/i.test(type)) return "NVIDIA Other"; // NC/ND/NV without specific GPU
   // ARM (Ampere Altra) — types with 'p' like Dps, D2ps, Dpds, Eps, E2ps
   if (/^(Standard_)?[DE]\d*p/i.test(type)) return "Ampere";
