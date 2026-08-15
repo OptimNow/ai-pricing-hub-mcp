@@ -1,4 +1,4 @@
-import type { ComputeInstance, CloudProvider } from "../data/pricing-data.js";
+import { computeInstances, type ComputeInstance, type CloudProvider } from "../data/pricing-data.js";
 
 export type ComputeCategory =
   | "General Purpose"
@@ -38,70 +38,6 @@ export interface EnrichedComputeInstance extends ComputeInstance {
   useCases: ComputeUseCase[];
   processor: ProcessorFamily;
 }
-
-export const ALL_CATEGORIES: ComputeCategory[] = [
-  "General Purpose",
-  "Compute Optimized",
-  "Memory Optimized",
-  "Storage Optimized",
-  "GPU / Accelerated",
-  "Burstable",
-];
-
-export const ALL_USE_CASES: ComputeUseCase[] = [
-  "Web App",
-  "Database",
-  "HPC",
-  "ML & AI",
-  "Dev/Test",
-  "Big Data",
-];
-
-export const ALL_PROCESSORS: ProcessorFamily[] = [
-  "Intel", "AMD",
-  "Graviton", "Trainium", "Inferentia", "Ampere", "Axion", "ARM",
-  "NVIDIA T4", "NVIDIA V100", "NVIDIA A100", "NVIDIA H100", "NVIDIA L4", "NVIDIA A10G", "NVIDIA Other",
-];
-
-export const categoryColors: Record<ComputeCategory, string> = {
-  "General Purpose": "bg-[hsl(210,70%,55%,0.15)] text-[hsl(210,70%,65%)]",
-  "Compute Optimized": "bg-[hsl(35,80%,55%,0.15)] text-[hsl(35,80%,65%)]",
-  "Memory Optimized": "bg-[hsl(280,60%,55%,0.15)] text-[hsl(280,60%,65%)]",
-  "Storage Optimized": "bg-[hsl(170,60%,45%,0.15)] text-[hsl(170,60%,55%)]",
-  "GPU / Accelerated": "bg-[hsl(0,65%,55%,0.15)] text-[hsl(0,65%,65%)]",
-  Burstable: "bg-[hsl(145,60%,45%,0.15)] text-[hsl(145,60%,55%)]",
-};
-
-export const useCaseColors: Record<ComputeUseCase, string> = {
-  "Web App": "bg-[hsl(210,70%,55%,0.15)] text-[hsl(210,70%,65%)]",
-  Database: "bg-[hsl(280,60%,55%,0.15)] text-[hsl(280,60%,65%)]",
-  HPC: "bg-[hsl(0,65%,55%,0.15)] text-[hsl(0,65%,65%)]",
-  "ML & AI": "bg-[hsl(35,80%,55%,0.15)] text-[hsl(35,80%,65%)]",
-  "Dev/Test": "bg-[hsl(145,60%,45%,0.15)] text-[hsl(145,60%,55%)]",
-  "Big Data": "bg-[hsl(170,60%,45%,0.15)] text-[hsl(170,60%,55%)]",
-};
-
-export const processorColors: Record<ProcessorFamily, string> = {
-  // x86
-  Intel: "bg-[hsl(210,80%,55%,0.15)] text-[hsl(210,80%,65%)]",
-  AMD: "bg-[hsl(0,70%,50%,0.15)] text-[hsl(0,70%,60%)]",
-  // ARM
-  Graviton: "bg-[hsl(35,85%,50%,0.15)] text-[hsl(35,85%,60%)]",
-  Ampere: "bg-[hsl(145,60%,45%,0.15)] text-[hsl(145,60%,55%)]",
-  Axion: "bg-[hsl(175,65%,42%,0.15)] text-[hsl(175,65%,55%)]",
-  ARM: "bg-[hsl(120,50%,45%,0.15)] text-[hsl(120,50%,55%)]",
-  // AWS AI Accelerators (Orange)
-  Trainium: "bg-[hsl(30,85%,50%,0.15)] text-[hsl(30,85%,60%)]",
-  Inferentia: "bg-[hsl(25,80%,50%,0.15)] text-[hsl(25,80%,60%)]",
-  // NVIDIA GPUs (Chartreuse — matches OptimNow primary)
-  "NVIDIA T4": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,76%,60%)]",
-  "NVIDIA V100": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,70%,55%)]",
-  "NVIDIA A100": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,76%,60%)]",
-  "NVIDIA H100": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,80%,65%)]",
-  "NVIDIA L4": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,76%,60%)]",
-  "NVIDIA A10G": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,70%,55%)]",
-  "NVIDIA Other": "bg-[hsl(84,76%,60%,0.15)] text-[hsl(84,65%,52%)]",
-};
 
 /* ── Ratio-based category (industry standard vCPU:memory ratios) ── */
 
@@ -337,7 +273,7 @@ export function inferUseCases(
 
 /* ── Bulk enrichment ── */
 
-export function enrichInstances(instances: ComputeInstance[]): EnrichedComputeInstance[] {
+function enrichInstances(instances: ComputeInstance[]): EnrichedComputeInstance[] {
   return instances.map((inst) => {
     const category = inferCategory(inst.provider, inst.instanceType, inst.vCPUs, inst.memory);
     const useCases = inferUseCases(category, inst.vCPUs, inst.memory);
@@ -345,3 +281,7 @@ export function enrichInstances(instances: ComputeInstance[]): EnrichedComputeIn
     return { ...inst, category, useCases, processor };
   });
 }
+
+/** The catalogue is static, so derive it once at module load rather than
+ *  re-inferring every row on each tool call. */
+export const enrichedInstances = enrichInstances(computeInstances);

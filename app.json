@@ -2,8 +2,8 @@
   "$schema": "https://chatgpt.com/schemas/app/v1.json",
   "id": "ai-pricing-hub",
   "name": "OptimToken",
-  "version": "0.1.0",
-  "description": "Compare LLM pricing, estimate workload costs, and benchmark cloud compute prices.",
+  "version": "0.3.0",
+  "description": "Compare LLM API pricing, estimate workload costs, and benchmark cloud compute. By OptimNow.",
   "mcp": {
     "server_url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
   },
@@ -11,29 +11,36 @@
     {
       "name": "compare-llm-models",
       "title": "Compare LLM Models",
-      "description": "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities.",
+      "description": "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. Fetches live data from OpenRouter API. Filter by provider, category, capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. IMPORTANT: Report all prices, costs, and scores EXACTLY as returned. Do NOT add commentary, opinions, or recommendations beyond what the data shows. Present the results as a table and let the user draw conclusions.",
       "input_schema": {
         "type": "object",
         "properties": {
           "provider": {
+            "description": "Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')",
             "type": "string"
           },
           "category": {
+            "description": "Filter by category: Frontier, Mid-tier, Budget, Open Weights, Image",
             "type": "string"
           },
           "capability": {
+            "description": "Filter by capability: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio",
             "type": "string"
           },
           "maxInputPrice": {
+            "description": "Max input price per 1M tokens in USD",
             "type": "number"
           },
           "maxOutputPrice": {
+            "description": "Max output price per 1M tokens in USD",
             "type": "number"
           },
           "minElo": {
+            "description": "Minimum ELO score (quality benchmark from Chatbot Arena)",
             "type": "number"
           },
           "useCasePreset": {
+            "description": "Use case for cost estimation. Default: supportTicket",
             "type": "string",
             "enum": [
               "supportTicket",
@@ -47,6 +54,7 @@
             ]
           },
           "volumePreset": {
+            "description": "Monthly request volume: 10k, 100k, or 1m. Default: 100k",
             "type": "string",
             "enum": [
               "10k",
@@ -55,6 +63,7 @@
             ]
           },
           "limit": {
+            "description": "Max models to return (default: 15)",
             "type": "number",
             "minimum": 1,
             "maximum": 50
@@ -67,14 +76,16 @@
     {
       "name": "estimate-llm-cost",
       "title": "Estimate LLM Cost",
-      "description": "Estimate per-request and monthly costs for AI models.",
+      "description": "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
       "input_schema": {
         "type": "object",
         "properties": {
           "modelName": {
+            "description": "Model name to estimate costs for (e.g. 'GPT-4o', 'Claude Sonnet 4'). If omitted, shows top models.",
             "type": "string"
           },
           "useCasePreset": {
+            "description": "Use case preset. Default: all presets.",
             "type": "string",
             "enum": [
               "supportTicket",
@@ -88,16 +99,19 @@
             ]
           },
           "customInputTokens": {
+            "description": "Custom input tokens per request (overrides preset)",
             "type": "integer",
             "minimum": 1,
             "maximum": 10000000
           },
           "customOutputTokens": {
+            "description": "Custom output tokens per request (overrides preset)",
             "type": "integer",
             "minimum": 1,
             "maximum": 10000000
           },
           "monthlyVolume": {
+            "description": "Custom monthly volume (default: 100,000)",
             "type": "integer",
             "minimum": 1,
             "maximum": 1000000000
@@ -110,35 +124,44 @@
     {
       "name": "compare-compute-pricing",
       "title": "Compare Cloud Compute Pricing",
-      "description": "Compare compute instance pricing across major cloud providers.",
+      "description": "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. Filter by provider, vCPUs, memory, category, processor, or use case. All prices are Linux on-demand list prices in USD. IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
       "input_schema": {
         "type": "object",
         "properties": {
           "provider": {
+            "description": "Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba",
             "type": "string"
           },
           "category": {
+            "description": "Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable",
             "type": "string"
           },
           "minVCPUs": {
+            "description": "Minimum number of vCPUs",
             "type": "number"
           },
           "maxVCPUs": {
+            "description": "Maximum number of vCPUs",
             "type": "number"
           },
           "minMemory": {
+            "description": "Minimum memory in GiB",
             "type": "number"
           },
           "maxMemory": {
+            "description": "Maximum memory in GiB",
             "type": "number"
           },
           "processor": {
+            "description": "Processor filter: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, etc.",
             "type": "string"
           },
           "useCase": {
+            "description": "Use case filter: Web App, Database, HPC, ML & AI, Dev/Test, Big Data",
             "type": "string"
           },
           "sortBy": {
+            "description": "Sort by: price, vcpus, memory, pricePerVCPU. Default: price",
             "type": "string",
             "enum": [
               "price",
@@ -148,6 +171,7 @@
             ]
           },
           "limit": {
+            "description": "Max instances to return (default: 20)",
             "type": "number",
             "minimum": 1,
             "maximum": 50

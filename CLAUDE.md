@@ -9,7 +9,9 @@
 
 ## What This Project Does
 
-An MCP (Model Context Protocol) app that provides AI/LLM model comparison, cost estimation, and cloud compute pricing tools as interactive widgets inside AI conversations (Claude, ChatGPT, VS Code, Goose). Built with Skybridge framework.
+An MCP (Model Context Protocol) app that provides AI/LLM model comparison, cost estimation, and cloud compute pricing tools as read-only React widgets rendered inside AI conversations (Claude, ChatGPT, VS Code, Goose). Built with Skybridge framework.
+
+The widgets render server-computed results; they have no filter controls of their own. Changing a filter means asking the model to call the tool again.
 
 **Origin:** Business logic copied from the standalone web app [cloud-sparkle-compare](https://github.com/jlati/cloud-sparkle-compare) (private). The original app remains untouched.
 
@@ -23,7 +25,7 @@ Language:     TypeScript
 Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
 Deployment:   Alpic Cloud
-Transport:    SSE (Server-Sent Events) at root URL /
+Transport:    streamable-http at root URL / (see server.json)
 Data:         OpenRouter API (live) + static fallback pricing data
 ```
 
@@ -34,28 +36,33 @@ ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
 │       ├── index.ts                  # MCP server — 3 tool/widget definitions
+│       ├── schemas.ts                # Zod input/output schemas + tool descriptions
 │       ├── lib/
-│       │   ├── llm-models.ts         # OpenRouter API fetching + ELO enrichment
+│       │   ├── llm-models.ts         # OpenRouter fetching, ELO map, static fallback
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, cost formatting
-│       │   └── compute-categories.ts  # Compute instance categorization + enrichment
+│       │   ├── pricing-normalize.ts  # OpenRouter price parsing helpers
+│       │   └── compute-categories.ts  # Compute categorization + enrichedInstances
 │       └── data/
-│           ├── pricing-data.ts       # Static fallback LLM pricing + compute instances
-│           └── region-api-map.ts     # Cloud region mappings
+│           └── pricing-data.ts       # Static fallback LLM snapshot + compute instances
 ├── web/
-│   └── src/
-│       ├── helpers.ts                # Skybridge widget helpers
-│       ├── index.css                 # Widget styles
-│       └── widgets/
-│           ├── compare-llm-models/
-│           │   └── index.tsx         # Model comparison table widget
-│           ├── estimate-llm-cost/
-│           │   └── index.tsx         # Cost estimation cards widget
-│           └── compare-compute-pricing/
-│               └── index.tsx         # Compute pricing table widget
+│   ├── src/
+│   │   ├── helpers.ts                # Typed Skybridge hooks (generateHelpers<AppType>)
+│   │   ├── format.ts                 # Cost formatters mirroring the server's
+│   │   ├── index.css                 # CSS custom properties (light + dark palettes)
+│   │   ├── components/               # Shared Card, Badge, Error/Empty states, header
+│   │   └── widgets/
+│   │       ├── compare-llm-models/index.tsx
+│   │       ├── estimate-llm-cost/index.tsx
+│   │       └── compare-compute-pricing/index.tsx
+│   └── vite.config.ts                # Skybridge Vite plugin
+├── scripts/
+│   ├── refresh-llm-fallback.mjs      # Regenerates the static LLM snapshot
+│   └── generate-app-json.mjs         # Renders app.json from the zod schemas
+├── app.json                          # ChatGPT App manifest (GENERATED — do not edit)
+├── server.json                       # MCP registry manifest
 ├── alpic.json                        # Alpic deployment config
-├── package.json
-├── tsconfig.json
-└── vite.config.ts                    # Skybridge Vite plugin
+├── package.json                      # Single source of truth for the version
+└── tsconfig.json
 ```
 
 ---
@@ -67,7 +74,7 @@ ai-pricing-hub-mcp/
 - **Input:** Optional filters (provider, category, capability, price range, min ELO, use-case preset, volume)
 - **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs
 - **Data Source:** OpenRouter API (live) with static fallback
-- **Widget:** Interactive comparison table
+- **Widget:** Comparison cards with per-model efficiency, volatility and FinOps badges
 
 ### Tool 2: `estimate-llm-cost`
 - **Type:** Widget (has UI)
@@ -77,7 +84,7 @@ ai-pricing-hub-mcp/
 
 ### Tool 3: `compare-compute-pricing`
 - **Type:** Widget (has UI)
-- **Input:** Filters (provider, vCPUs, memory, category, processor, use case, OS, sort)
+- **Input:** Filters (provider, vCPUs, memory, category, processor, use case, sort)
 - **Output:** Filtered cloud compute instance comparison across 7 providers
 - **Data Source:** Static pricing data (AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba)
 - **Widget:** Compute pricing table
@@ -88,10 +95,16 @@ ai-pricing-hub-mcp/
 
 ```bash
 npm install
-npm run dev        # Skybridge dev server with DevTools emulator (port 3000)
-npm run build      # Production build
-npm run start      # Start production server
+npm run dev              # Skybridge dev server with DevTools emulator (port 3000)
+npm run typecheck        # tsc --noEmit — gates everything
+npm run build            # Production build, then regenerates app.json
+npm run start            # Start production server
+npm run refresh-fallback # Refresh the static LLM snapshot (see Data Freshness)
 ```
+
+`app.json` is generated by `scripts/generate-app-json.mjs` from the zod schemas in
+`server/src/schemas.ts`. Edit the schemas, not the manifest. The script also fails
+the build if `package.json` and `server.json` disagree on the version.
 
 ### Deployment
 
@@ -99,7 +112,7 @@ npm run start      # Start production server
 npx alpic deploy --yes --project-name ai-pricing-hub-mcp
 ```
 
-Deploys to Alpic Cloud. SSE endpoint is served at root `/`.
+Deploys to Alpic Cloud. The streamable-http endpoint is served at root `/`.
 
 ### Connecting to Claude Desktop
 
@@ -117,10 +130,12 @@ Add to `claude_desktop_config.json`:
 
 1. **All 3 tools use `registerWidget()`** — each has a React widget UI
 2. **OpenRouter API** is the primary data source for LLM models (public, no auth needed)
-3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
+3. **Static fallback** in `data/pricing-data.ts` is wired into `fetchLLMModels()`: a fetch failure, a 15s timeout or a collapsed catalogue (<80 models) serves the snapshot with `source: "static-fallback"`, and the widgets badge it as such
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
-6. **Compute pricing** is static data from 7 cloud providers with category enrichment
+6. **Compute pricing** is static data from 7 cloud providers, enriched once at module load (`enrichedInstances`)
+7. **One version number** — `package.json` is read at runtime for `new McpServer({ version })` and by the app.json generator
+8. **Widget styling** is CSS custom properties only (`web/src/index.css`); no widget hardcodes a colour, so both light and dark hosts render correctly
 
 ---
 
@@ -141,6 +156,16 @@ Each profile defines typical input/output token counts per request.
 ### Volume Presets
 - 10k, 100k, 1m requests/month
 
+### Data Freshness
+
+- Live LLM pricing comes from OpenRouter, cached for 15 min at module level.
+- ELO scores are a hand-maintained map in `llm-models.ts`; `ELO_AS_OF` dates it and
+  every widget shows it as a badge.
+- The static snapshot in `pricing-data.ts` sits between `LLM-FALLBACK-START/END`
+  markers. `npm run refresh-fallback` refetches it from
+  `https://optimtoken.optimnow.io/api/llm-models` and rewrites only that block —
+  a `git diff` after running it should touch nothing else.
+
 ---
 
 ## Constraints
@@ -149,7 +174,9 @@ Each profile defines typical input/output token counts per request.
 - No database — stateless tool execution
 - Compute pricing is static (no live cloud API calls)
 - Brand color: Chartreuse (#ACE849) for OptimNow identity
-- Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
+- Widget UIs consume the typed `useToolInfo<"tool-name">()` hook from Skybridge (not React props);
+  output types flow from the server, so a field rename is a compile error
+- Widgets are display-only — no client-side filtering or re-querying
 
 ---
 

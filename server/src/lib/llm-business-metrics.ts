@@ -2,7 +2,6 @@ import type { LLMModel } from "../data/pricing-data.js";
 
 // ── Types ──
 
-export type ViewMode = "business" | "technical";
 export type VolumePreset = "10k" | "100k" | "1m";
 export type VolatilityLevel = "High" | "Medium" | "Stable" | "Unknown";
 
@@ -64,48 +63,7 @@ export const VOLUME_PRESETS: { key: VolumePreset; value: number; label: string }
   { key: "1m", value: 1_000_000, label: "1M" },
 ];
 
-// ── Helpers ──
-
-export const SIZE_BUCKETS = ["Small (<15B)", "Medium (15-99B)", "Large (100-499B)", "XL (500B+)", "Undisclosed"] as const;
-
-export function parseParamSize(param?: string): number | null {
-  if (!param || param === "Undisclosed") return null;
-  const match = param.replace("~", "").match(/([\d.]+)\s*([BT])/i);
-  if (!match) return null;
-  const num = parseFloat(match[1]);
-  return match[2].toUpperCase() === "T" ? num * 1000 : num;
-}
-
-export function getSizeBucket(param?: string): string {
-  const size = parseParamSize(param);
-  if (size === null) return "Undisclosed";
-  if (size < 15) return "Small (<15B)";
-  if (size < 100) return "Medium (15-99B)";
-  if (size < 500) return "Large (100-499B)";
-  return "XL (500B+)";
-}
-
-export function eloTier(elo?: number): { label: string; className: string; title: string } | null {
-  if (!elo) return null;
-  if (elo >= 1350) return { label: "S", className: "bg-[hsl(0,65%,55%,0.2)] text-[hsl(0,65%,70%)] ring-1 ring-[hsl(0,65%,55%,0.3)]", title: "S-Tier: Elite (ELO 1350+)" };
-  if (elo >= 1280) return { label: "A", className: "bg-[hsl(35,80%,55%,0.2)] text-[hsl(35,80%,70%)] ring-1 ring-[hsl(35,80%,55%,0.3)]", title: "A-Tier: High quality (ELO 1280–1349)" };
-  if (elo >= 1200) return { label: "B", className: "bg-[hsl(210,70%,55%,0.2)] text-[hsl(210,70%,70%)] ring-1 ring-[hsl(210,70%,55%,0.3)]", title: "B-Tier: Good quality (ELO 1200–1279)" };
-  return { label: "C", className: "bg-[hsl(0,0%,50%,0.15)] text-[hsl(0,0%,65%)]", title: "C-Tier: Standard (ELO below 1200)" };
-}
-
 // ── Business metric functions ──
-
-/** Parse context window string like "200K" or "2M" → numeric tokens */
-export function parseContextWindow(ctx: string): number {
-  const match = ctx.match(/([\d.]+)\s*([KMB])?/i);
-  if (!match) return 0;
-  const num = parseFloat(match[1]);
-  const suffix = (match[2] || "").toUpperCase();
-  if (suffix === "K") return num * 1_000;
-  if (suffix === "M") return num * 1_000_000;
-  if (suffix === "B") return num * 1_000_000_000;
-  return num;
-}
 
 /** Cost per single request for a use case profile */
 export function useCaseCost(inputPrice: number, outputPrice: number, profile: UseCaseProfile): number {

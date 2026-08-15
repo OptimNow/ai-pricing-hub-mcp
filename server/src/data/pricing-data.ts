@@ -40,39 +40,6 @@ export interface LLMModel {
 
 /* ── Data sourcing metadata ── */
 export const dataLastUpdated = "2026-08-15";
-export const dataSources: Record<CloudProvider, string> = {
-  AWS: "https://aws.amazon.com/ec2/pricing/on-demand/",
-  Azure: "https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/",
-  GCP: "https://cloud.google.com/compute/vm-instance-pricing",
-  DigitalOcean: "https://www.digitalocean.com/pricing/droplets",
-  OCI: "https://www.oracle.com/cloud/compute/pricing/",
-  OVH: "https://www.ovhcloud.com/en/public-cloud/prices/",
-  Alibaba: "https://www.alibabacloud.com/pricing?product=ecs",
-};
-
-/* ── Region support ── */
-export type ComputeRegion = "US East" | "US West" | "Europe" | "Asia Pacific";
-export const computeRegions: ComputeRegion[] = ["US East", "US West", "Europe", "Asia Pacific"];
-
-/** Maps each generic region to the provider-specific region name */
-export const regionDetails: Record<ComputeRegion, Record<CloudProvider, string>> = {
-  "US East":      { AWS: "us-east-1 (N. Virginia)",    Azure: "East US",        GCP: "us-central1 (Iowa)",      DigitalOcean: "NYC1 (New York)",     OCI: "us-ashburn-1",       OVH: "US-EAST-VA-1",    Alibaba: "us-east-1 (Virginia)" },
-  "US West":      { AWS: "us-west-2 (Oregon)",         Azure: "West US 2",      GCP: "us-west1 (Oregon)",       DigitalOcean: "SFO3 (San Francisco)", OCI: "us-phoenix-1",       OVH: "US-WEST-OR-1",    Alibaba: "us-west-1 (Silicon Valley)" },
-  "Europe":       { AWS: "eu-west-1 (Ireland)",        Azure: "West Europe",    GCP: "europe-west1 (Belgium)",  DigitalOcean: "AMS3 (Amsterdam)",    OCI: "eu-frankfurt-1",     OVH: "EU-WEST-GRA",     Alibaba: "eu-central-1 (Frankfurt)" },
-  "Asia Pacific": { AWS: "ap-southeast-1 (Singapore)", Azure: "Southeast Asia", GCP: "asia-east1 (Taiwan)",     DigitalOcean: "SGP1 (Singapore)",    OCI: "ap-tokyo-1",         OVH: "AP-SOUTH-SG",     Alibaba: "ap-southeast-1 (Singapore)" },
-};
-
-/**
- * Regional price multipliers relative to US East (base = 1.0).
- * Based on typical regional pricing differentials from public pricing pages.
- * Actual prices vary per instance type; these are representative averages.
- */
-export const regionMultipliers: Record<ComputeRegion, Record<CloudProvider, number>> = {
-  "US East":      { AWS: 1.00, Azure: 1.00, GCP: 1.00, DigitalOcean: 1.00, OCI: 1.00, OVH: 1.00, Alibaba: 1.00 },
-  "US West":      { AWS: 1.00, Azure: 1.02, GCP: 1.00, DigitalOcean: 1.00, OCI: 1.00, OVH: 1.00, Alibaba: 1.00 },
-  "Europe":       { AWS: 1.08, Azure: 1.10, GCP: 1.07, DigitalOcean: 1.00, OCI: 1.05, OVH: 1.00, Alibaba: 1.10 },
-  "Asia Pacific": { AWS: 1.15, Azure: 1.18, GCP: 1.12, DigitalOcean: 1.00, OCI: 1.08, OVH: 1.10, Alibaba: 1.05 },
-};
 
 export const computeInstances: ComputeInstance[] = [
   // ── AWS — Intel ──

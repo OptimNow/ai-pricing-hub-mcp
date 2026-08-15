@@ -1,6 +1,6 @@
 # OptimToken — MCP App (by OptimNow)
 
-An MCP (Model Context Protocol) app that compares AI/LLM model pricing, estimates costs, and benchmarks cloud compute instances. Works as an interactive tool inside AI conversations on **Claude**, **ChatGPT**, **VS Code**, and other MCP-compatible clients.
+An MCP (Model Context Protocol) app that compares AI/LLM model pricing, estimates costs, and benchmarks cloud compute instances. Results render as widgets inside AI conversations on **Claude**, **ChatGPT**, **VS Code**, and other MCP-compatible clients. The widgets are display-only — they follow the host's light or dark theme, and changing a filter means asking the model to run the tool again.
 
 Built by [OptimNow](https://www.optimnow.io) with the [Skybridge](https://docs.skybridge.tech/) framework.
 
@@ -14,7 +14,7 @@ Built by [OptimNow](https://www.optimnow.io) with the [Skybridge](https://docs.s
 
 ### Data Sources
 
-- **LLM Models:** Live data from [OpenRouter API](https://openrouter.ai/) enriched with Chatbot Arena ELO scores and FinOps efficiency metrics. Static fallback included for offline use.
+- **LLM Models:** Live data from [OpenRouter API](https://openrouter.ai/) enriched with Chatbot Arena ELO scores and FinOps efficiency metrics. If the fetch fails, times out, or returns an implausibly small catalogue, the server serves a static snapshot instead and labels it `static-fallback` in the widget.
 - **Compute Instances:** Static pricing data covering 7 cloud providers with category enrichment.
 
 ### Use Case Profiles
@@ -38,6 +38,17 @@ npm run dev
 ```
 
 This starts the MCP server with Skybridge DevTools at `http://localhost:3000/`.
+The transport is streamable-http, served at the root URL.
+
+### Other scripts
+
+| Script | What it does |
+|--------|--------------|
+| `npm run typecheck` | `tsc --noEmit` over server and web |
+| `npm run build` | Production build, then regenerates `app.json` from the zod schemas |
+| `npm run refresh-fallback` | Refetches the static LLM snapshot into `server/src/data/pricing-data.ts` |
+
+`app.json` is generated — edit `server/src/schemas.ts` instead.
 
 ### Connect to Claude Desktop
 
@@ -60,7 +71,7 @@ Restart Claude Desktop to connect.
 
 This repo now includes a ChatGPT App manifest (`app.json`) that maps the existing MCP tools and widgets.
 
-1. Register the app manifest with your ChatGPT Apps SDK flow.
+1. Register the app manifest with your ChatGPT Apps SDK flow (run `npm run build` first — `app.json` is generated).
 2. Configure the backend MCP endpoint as: `https://ai-pricing-hub-mcp-9604f763.alpic.live/`
 3. Ensure the 3 UI resources in `app.json` are registered (`ui://widget/*`).
 

@@ -1,12 +1,12 @@
 {
   "name": "ai-pricing-hub-mcp",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Alpic MCP Server Template",
+  "description": "Compare LLM API pricing, estimate workload costs, and benchmark cloud compute. By OptimNow.",
   "type": "module",
   "scripts": {
     "dev": "skybridge dev",
-    "build": "skybridge build",
+    "build": "skybridge build && node scripts/generate-app-json.mjs",
     "typecheck": "tsc --noEmit",
     "start": "skybridge start",
     "deploy": "alpic deploy",
@@ -17,7 +17,6 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "skybridge": ">=0.32.0 <1.0.0",
-    "vite": "^7.3.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -26,8 +25,8 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
     "alpic": "^1.91.6",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
   },
   "engines": {
     "node": ">=24.14.0"

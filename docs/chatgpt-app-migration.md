@@ -41,9 +41,9 @@ When registering with the ChatGPT Apps SDK:
 
 ## Maintenance checklist
 
-Any time a tool schema changes in `server/src/index.ts`:
+Any time a tool schema changes:
 
-1. Update the Zod schema in MCP server code.
-2. Update the matching tool `input_schema` in `app.json`.
-3. Validate with `npm run build`.
-4. Re-register/redeploy the ChatGPT App manifest.
+1. Update the Zod schema in `server/src/schemas.ts`.
+2. Run `npm run build` — it regenerates `app.json` from those schemas.
+   Never hand-edit `app.json`; the next build overwrites it.
+3. Re-register/redeploy the ChatGPT App manifest.

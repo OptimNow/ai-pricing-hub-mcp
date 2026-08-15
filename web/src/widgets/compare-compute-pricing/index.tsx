@@ -1,80 +1,60 @@
 import "@/index.css";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
+import { Badge, EmptyState, ErrorState, LoadingState, WidgetHeader, WidgetShell } from "../../components/index.js";
 
-interface ComputeInstance {
-  provider: string;
-  instanceType: string;
-  vCPUs: number;
-  memory: number;
-  processor: string;
-  category: string;
-  os: string;
-  onDemandHourly: number | null;
-  onDemandMonthly: number | null;
-  spot: number | null;
-  reserved1yr: number | null;
-  reserved3yr: number | null;
-  useCases: string[];
-}
+type ComputeOutput = NonNullable<ReturnType<typeof useToolInfo<"compare-compute-pricing">>["output"]>;
+type ComputeInstance = ComputeOutput["instances"][number];
 
-interface ComputeOutput {
-  instances: ComputeInstance[];
-  matchingCount: number;
-  catalogSize: number;
-  error?: string;
-}
-
-const providerColors: Record<string, string> = {
-  AWS: "#FF9900",
-  Azure: "#0078D4",
-  GCP: "#4285F4",
-  DigitalOcean: "#0080FF",
-  OCI: "#C74634",
-  OVH: "#000E9C",
-  Alibaba: "#FF6A00",
+/** Brand hues live in index.css so each has a light and a dark variant: the
+ *  as-published colours (OVH navy, AWS orange) fail contrast on one side. */
+const providerVars: Record<string, string> = {
+  AWS: "--provider-aws",
+  Azure: "--provider-azure",
+  GCP: "--provider-gcp",
+  DigitalOcean: "--provider-digitalocean",
+  OCI: "--provider-oci",
+  OVH: "--provider-ovh",
+  Alibaba: "--provider-alibaba",
 };
 
 function ComputePricing() {
-  const { output } = useToolInfo();
+  const { output } = useToolInfo<"compare-compute-pricing">();
 
   if (!output) {
-    return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading pricing...</div>;
+    return <LoadingState label="Loading pricing..." />;
   }
 
-  const { instances, matchingCount, catalogSize, error } = output as unknown as ComputeOutput;
+  const { instances, matchingCount, catalogSize, error } = output;
 
   if (error) {
-    return <ErrorCard message={error} />;
+    return (
+      <WidgetShell maxWidth={860}>
+        <ErrorState title="Could not load compute pricing" message={error} />
+      </WidgetShell>
+    );
   }
 
   if (instances.length === 0) {
     return (
-      <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
-        <div style={{
-          border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
-          textAlign: "center", color: "#6b7280", fontSize: "13px",
-        }}>
-          No results match these filters.
-        </div>
-      </div>
+      <WidgetShell maxWidth={860}>
+        <EmptyState />
+      </WidgetShell>
     );
   }
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "860px" }}>
-      <h2 style={{ fontSize: "18px", fontWeight: 700, marginBottom: "4px" }}>
-        Cloud Compute Pricing
-      </h2>
-      <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
-        {matchingCount} of {catalogSize} instances match · Showing {instances.length} · Linux on-demand
-      </p>
+    <WidgetShell maxWidth={860}>
+      <WidgetHeader
+        title="Cloud Compute Pricing"
+        subtitle={`${matchingCount} of ${catalogSize} instances match · Showing ${instances.length} · Linux on-demand`}
+      />
 
       {/* Table */}
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", fontSize: "12px", borderCollapse: "collapse" }}>
           <thead>
-            <tr style={{ borderBottom: "2px solid #e5e7eb" }}>
+            <tr style={{ borderBottom: "2px solid var(--border)" }}>
               <th style={thStyle}>#</th>
               <th style={{ ...thStyle, textAlign: "left" }}>Provider</th>
               <th style={{ ...thStyle, textAlign: "left" }}>Instance</th>
@@ -94,51 +74,38 @@ function ComputePricing() {
           </tbody>
         </table>
       </div>
-    </div>
-  );
-}
-
-function ErrorCard({ message }: { message: string }) {
-  return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
-      <div style={{
-        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
-        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
-      }}>
-        <strong style={{ display: "block", marginBottom: "4px" }}>Could not load compute pricing</strong>
-        {message}
-      </div>
-    </div>
+    </WidgetShell>
   );
 }
 
 const thStyle: React.CSSProperties = {
   textAlign: "right",
   padding: "6px 8px",
-  color: "#6b7280",
+  color: "var(--text-muted)",
   fontWeight: 500,
   whiteSpace: "nowrap",
 };
 
 const tdStyle: React.CSSProperties = {
   padding: "6px 8px",
-  borderBottom: "1px solid #f3f4f6",
+  borderBottom: "1px solid var(--border-subtle)",
   whiteSpace: "nowrap",
 };
 
 function InstanceRow({ inst, rank }: { inst: ComputeInstance; rank: number }) {
-  const color = providerColors[inst.provider] || "#374151";
+  const color = `var(${providerVars[inst.provider] ?? "--text"})`;
   const savings = inst.spot && inst.onDemandHourly
     ? Math.round((1 - inst.spot / inst.onDemandHourly) * 100)
     : null;
 
   return (
     <tr>
-      <td style={{ ...tdStyle, textAlign: "right", color: "#9ca3af" }}>{rank}</td>
+      <td style={{ ...tdStyle, textAlign: "right", color: "var(--text-faint)" }}>{rank}</td>
       <td style={{ ...tdStyle, textAlign: "left" }}>
         <span style={{
           fontWeight: 600, color,
-          background: `${color}15`, padding: "1px 6px", borderRadius: "3px",
+          background: `color-mix(in srgb, ${color} 14%, transparent)`,
+          padding: "1px 6px", borderRadius: "3px",
         }}>
           {inst.provider}
         </span>
@@ -148,11 +115,11 @@ function InstanceRow({ inst, rank }: { inst: ComputeInstance; rank: number }) {
       </td>
       <td style={{ ...tdStyle, textAlign: "right" }}>{inst.vCPUs}</td>
       <td style={{ ...tdStyle, textAlign: "right" }}>{inst.memory} GiB</td>
-      <td style={{ ...tdStyle, textAlign: "left", fontSize: "11px", color: "#6b7280" }}>{inst.processor}</td>
+      <td style={{ ...tdStyle, textAlign: "left", fontSize: "11px", color: "var(--text-muted)" }}>{inst.processor}</td>
       <td style={{ ...tdStyle, textAlign: "right", fontWeight: 600 }}>
         ${inst.onDemandHourly?.toFixed(4)}
       </td>
-      <td style={{ ...tdStyle, textAlign: "right", fontWeight: 600, color: "#2563eb" }}>
+      <td style={{ ...tdStyle, textAlign: "right", fontWeight: 600, color: "var(--brand-text)" }}>
         ${inst.onDemandMonthly?.toFixed(2)}
       </td>
       <td style={{ ...tdStyle, textAlign: "right" }}>
@@ -160,22 +127,17 @@ function InstanceRow({ inst, rank }: { inst: ComputeInstance; rank: number }) {
           <span>
             ${inst.spot.toFixed(4)}
             {savings !== null && (
-              <span style={{ color: "#16a34a", fontSize: "10px", marginLeft: "3px" }}>
+              <span style={{ color: "var(--positive)", fontSize: "10px", marginLeft: "3px" }}>
                 -{savings}%
               </span>
             )}
           </span>
         ) : (
-          <span style={{ color: "#d1d5db" }}>—</span>
+          <span style={{ color: "var(--text-faint)" }}>—</span>
         )}
       </td>
       <td style={{ ...tdStyle, textAlign: "left" }}>
-        <span style={{
-          fontSize: "10px", background: "#f3f4f6", color: "#374151",
-          padding: "1px 6px", borderRadius: "3px",
-        }}>
-          {inst.category}
-        </span>
+        <Badge label={inst.category} inline />
       </td>
     </tr>
   );
