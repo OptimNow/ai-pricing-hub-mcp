@@ -66,6 +66,20 @@ function hasPublishableTokenPricing(input, output) {
   return true;
 }
 
+/** The API dropped "Open Weights" as a category in schemaVersion 2.0 — openness
+ *  is a separate axis now, derived from the licence — but a deployment still
+ *  serving 1.0 would reintroduce a category the LLMCategory union no longer has,
+ *  and the snapshot would stop compiling. Re-derive the price tier with the same
+ *  thresholds api/llm-models.ts uses, so the snapshot is valid either way. */
+function normalizeCategory(model) {
+  if (model.category !== "Open Weights") return model.category;
+  const inPrice = model.inputPricePer1M;
+  const outPrice = model.outputPricePer1M;
+  if (outPrice >= 15 || inPrice >= 10) return "Frontier";
+  if (outPrice >= 2) return "Mid-tier";
+  return "Budget";
+}
+
 async function fetchJsonWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -110,10 +124,11 @@ if (!Array.isArray(rawModels)) {
   process.exit(1);
 }
 
-const models = rawModels.filter((m) =>
-  hasPublishableTokenPricing(m.inputPricePer1M, m.outputPricePer1M),
-);
+const models = rawModels
+  .filter((m) => hasPublishableTokenPricing(m.inputPricePer1M, m.outputPricePer1M))
+  .map((m) => ({ ...m, category: normalizeCategory(m) }));
 const skipped = rawModels.length - models.length;
+const retiered = rawModels.filter((m) => m.category === "Open Weights").length;
 
 const source = readFileSync(DATA_FILE, "utf8");
 const startIdx = source.indexOf(START);
@@ -146,7 +161,9 @@ if (committedCount > 0 && process.env.ALLOW_CATALOGUE_SHRINK !== "1") {
 }
 console.log(
   `Guard passed: ${models.length} models fetched, ${committedCount ?? "unknown"} committed` +
-    (skipped > 0 ? `, ${skipped} skipped for unpublishable pricing.` : "."),
+    (skipped > 0 ? `, ${skipped} skipped for unpublishable pricing` : "") +
+    (retiered > 0 ? `, ${retiered} re-tiered from the retired "Open Weights" category` : "") +
+    ".",
 );
 
 const today = new Date().toISOString().slice(0, 10);

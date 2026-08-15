@@ -7,11 +7,13 @@ import {
   USE_CASE_PROFILES,
   VOLUME_PRESETS,
   enrichModels,
+  summarizeFinOpsBadge,
   useCaseCost,
   optimizedUseCaseCost,
   formatMicroCost,
   formatMonthlyBudget,
 } from "./lib/llm-business-metrics.js";
+import { OPENNESS_VALUES } from "./lib/openness.js";
 import type { UseCaseProfile, VolumePreset } from "./lib/llm-business-metrics.js";
 import { computeInstances } from "./data/pricing-data.js";
 import { enrichInstances } from "./lib/compute-categories.js";
@@ -39,6 +41,7 @@ const modelShape = {
 
 const enrichedModelSchema = z.object({
   ...modelShape,
+  openness: z.string(),
   efficiencyScore: z.number().nullable(),
   useCaseCost: z.number(),
   optimizedUseCaseCost: z.number(),
@@ -57,6 +60,16 @@ const compareModelsOutputSchema = {
   catalogSize: z.number(),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
+  // What the badge's percentile gates land on for this catalogue, so "top 40%"
+  // can be restated as a concrete ELO and price instead of taken on faith.
+  finopsBadge: z
+    .object({
+      qualifying: z.number(),
+      ranked: z.number(),
+      minElo: z.number().nullable(),
+      maxBlendedPrice: z.number().nullable(),
+    })
+    .optional(),
   error: z.string().optional(),
 };
 
@@ -132,15 +145,17 @@ const server = new McpServer(
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
-      "Fetches live data from OpenRouter API. Filter by provider, category, capability, " +
-      "price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
+      "Fetches live data from OpenRouter API. Filter by provider, price tier (category), openness, " +
+      "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
+      "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
       "Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. " +
       "IMPORTANT: Report all prices, costs, and scores EXACTLY as returned. " +
       "Do NOT add commentary, opinions, or recommendations beyond what the data shows. " +
       "Present the results as a table and let the user draw conclusions.",
     inputSchema: {
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
-      category: z.string().optional().describe("Filter by category: Frontier, Mid-tier, Budget, Open Weights, Image"),
+      category: z.string().optional().describe("Filter by price tier: Frontier, Mid-tier, Budget, Image"),
+      openness: z.enum(OPENNESS_VALUES as [string, ...string[]]).optional().describe("Filter by self-hostability, derived from the licence: Open source, Open weights, Proprietary, Unknown"),
       capability: z.string().optional().describe("Filter by capability: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
       maxInputPrice: z.number().optional().describe("Max input price per 1M tokens in USD"),
       maxOutputPrice: z.number().optional().describe("Max output price per 1M tokens in USD"),
@@ -151,7 +166,7 @@ const server = new McpServer(
     },
     outputSchema: compareModelsOutputSchema,
   },
-  async ({ provider, category, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, limit }) => {
+  async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, limit }) => {
     const emptyOutput = {
       models: [],
       useCaseLabel: "",
@@ -180,8 +195,9 @@ const server = new McpServer(
       // and filtering afterwards keeps the FinOps Friendly badge meaning the same
       // thing regardless of which filters the caller happened to apply.
       const enriched = enrichModels(allModels, vol, ucKey);
+      const finopsBadge = summarizeFinOpsBadge(enriched);
       const filtered = filterModels(enriched, {
-        provider, category, capability, maxInputPrice, maxOutputPrice, minElo,
+        provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo,
       });
 
       const maxCount = limit || 15;
@@ -193,7 +209,8 @@ const server = new McpServer(
       // Build text summary for LLM consumption
       const lines = results.map((m, i) =>
         `${i + 1}. ${m.provider} ${m.model} — ` +
-        `Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M` +
+        `${m.category}, ${m.openness}` +
+        `, Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M` +
         (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
         `, ${useCaseLabel} cost: ${formatMicroCost(m.useCaseCost)}/req` +
         ` (optimized: ${formatMicroCost(m.optimizedUseCaseCost)}/req)` +
@@ -212,13 +229,17 @@ const server = new McpServer(
           catalogSize: allModels.length,
           eloAsOf,
           dataAsOf,
+          finopsBadge,
         },
         content: [
           {
             type: "text",
             text: `${filtered.length} of ${allModels.length} models match (showing top ${results.length}). ` +
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
-              `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n\n` +
+              `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
+              `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
+              `≤ $${finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, plus a top-30% efficiency score ` +
+              `and a stable release — ${finopsBadge.qualifying} of ${finopsBadge.ranked} ranked models qualify.\n\n` +
               lines.join("\n"),
           },
         ],

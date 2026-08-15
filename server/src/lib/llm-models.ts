@@ -11,6 +11,7 @@
 import { llmModels, dataLastUpdated } from "../data/pricing-data.js";
 import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.js";
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
+import { opennessOf } from "./openness.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
 
@@ -366,7 +367,25 @@ const KNOWN_RELEASE_DATES: Record<string, string> = {
   "minimax/minimax-m2.5-lightning": "2026-02",
 };
 
-// ── License mapping (prefix-based) ──
+// ── License mapping ──
+
+/** Per-model licences, checked before the org-wide prefixes below.
+ *
+ *  The prefix table assumes a lab ships everything under one licence. That is
+ *  false for any lab publishing a mix, and it silently freezes a lab that moved
+ *  to open weights after the table was written. Prefer an exact-id entry here
+ *  over widening a prefix, and say what was checked.
+ *
+ *  The licence drives the openness axis (see ./openness.ts), so a wrong value
+ *  here is not cosmetic: it tells a reader they may or may not self-host a
+ *  model. */
+const LICENSE_OVERRIDES: [string, string][] = [
+  // Kimi K2 published its weights under a Modified MIT licence (MIT plus an
+  // attribution requirement above a deployment threshold), so the blanket
+  // moonshotai/ -> Proprietary below was wrong for the entire K2 line.
+  // K3 is deliberately not covered: its terms have not been verified.
+  ["moonshotai/kimi-k2", "Modified MIT"],
+];
 
 const LICENSE_PREFIXES: [string, string][] = [
   ["openai/", "Proprietary"],
@@ -401,6 +420,9 @@ const LICENSE_PREFIXES: [string, string][] = [
 ];
 
 function inferLicense(modelId: string): string | undefined {
+  for (const [prefix, license] of LICENSE_OVERRIDES) {
+    if (modelId.startsWith(prefix)) return license;
+  }
   for (const [prefix, license] of LICENSE_PREFIXES) {
     if (modelId.startsWith(prefix)) return license;
   }
@@ -518,10 +540,20 @@ function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
   return caps;
 }
 
+/** Price tier only. Openness is a separate axis, derived from the licence in
+ *  ./openness.ts.
+ *
+ *  There used to be an "Open Weights" category here, short-circuiting the price
+ *  tiers for anything from a known open lab. It made openness and price
+ *  mutually exclusive: an open model could be labelled open OR priced, never
+ *  both, so 28 open-licensed models sat in Mid-tier and Budget with no way to
+ *  find them, and open models were sorted against a different Frontier
+ *  threshold ($10) than proprietary ones ($15). Do not reintroduce it: the
+ *  question "what does it cost" and the question "whose hardware can run it"
+ *  need to be answerable independently. */
 function inferCategory(model: OpenRouterModel): LLMCategory {
   const outPrice = parseFloat(model.pricing.completion) * 1e6;
   const inPrice = parseFloat(model.pricing.prompt) * 1e6;
-  const id = model.id.toLowerCase();
   const outputMods = model.architecture.output_modalities || [];
 
   // Image generation models. Matches the "Image Gen" capability rule: any model
@@ -533,19 +565,6 @@ function inferCategory(model: OpenRouterModel): LLMCategory {
     return "Image";
   }
 
-  // Open-weights indicators
-  const openWeightsProviders = ["meta-llama", "deepseek", "alibaba", "qwen", "nvidia", "microsoft"];
-  const openWeightsIndicators = ["llama", "gemma", "mixtral", "phi-", "qwen", "nemotron", "dbrx", "yi-", "gpt-oss"];
-  if (
-    openWeightsProviders.includes(model.id.split("/")[0]) ||
-    openWeightsIndicators.some((i) => id.includes(i))
-  ) {
-    // But some open-weights models are frontier-priced
-    if (outPrice >= 10) return "Frontier";
-    return "Open Weights";
-  }
-
-  // Price-based for proprietary models
   if (outPrice >= 15 || inPrice >= 10) return "Frontier";
   if (outPrice >= 2) return "Mid-tier";
   return "Budget";
@@ -716,6 +735,8 @@ export function filterModels<T extends LLMModel>(
   filters?: {
     provider?: string;
     category?: string;
+    /** Self-hostability, derived from the licence — orthogonal to `category` */
+    openness?: string;
     capability?: string;
     maxInputPrice?: number;
     maxOutputPrice?: number;
@@ -726,6 +747,9 @@ export function filterModels<T extends LLMModel>(
   return models.filter((m) => {
     if (filters.provider && m.provider.toLowerCase() !== filters.provider.toLowerCase()) return false;
     if (filters.category && m.category.toLowerCase() !== filters.category.toLowerCase()) return false;
+    // Derived rather than read off the model, so this works on a plain LLMModel
+    // as well as on an enriched one.
+    if (filters.openness && opennessOf(m.license).toLowerCase() !== filters.openness.toLowerCase()) return false;
     if (filters.capability && !m.capabilities.some(c => c.toLowerCase() === filters.capability!.toLowerCase())) return false;
     if (filters.maxInputPrice !== undefined && m.inputPricePer1M > filters.maxInputPrice) return false;
     if (filters.maxOutputPrice !== undefined && m.outputPricePer1M > filters.maxOutputPrice) return false;

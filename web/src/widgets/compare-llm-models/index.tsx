@@ -8,7 +8,10 @@ interface EnrichedModel {
   inputPricePer1M: number;
   outputPricePer1M: number;
   contextWindow: string;
+  /** Price tier only */
   category: string;
+  /** Self-hostability, derived from the licence — independent of the tier */
+  openness?: string;
   capabilities: string[];
   eloScore?: number;
   efficiencyScore?: number | null;
@@ -28,6 +31,12 @@ interface CompareOutput {
   catalogSize: number;
   eloAsOf: string;
   dataAsOf?: string;
+  finopsBadge?: {
+    qualifying: number;
+    ranked: number;
+    minElo: number | null;
+    maxBlendedPrice: number | null;
+  };
   error?: string;
 }
 
@@ -51,7 +60,7 @@ function CompareModels() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading models...</div>;
   }
 
-  const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, error } =
+  const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, finopsBadge, error } =
     output as unknown as CompareOutput;
 
   if (error) {
@@ -68,6 +77,17 @@ function CompareModels() {
         <Badge label={`ELO as of ${eloAsOf}`} />
         {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
       </p>
+
+      {finopsBadge && finopsBadge.ranked > 0 && (
+        // The badge gates on percentiles, which move with the market. Stating
+        // where they land today is what makes the badge auditable rather than
+        // something the reader has to take on trust.
+        <p style={{ fontSize: "11px", color: "#6b7280", marginTop: "-8px", marginBottom: "16px" }}>
+          FinOps Friendly today: ELO ≥ {finopsBadge.minElo ?? "n/a"}, blended list price ≤ $
+          {finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, top-30% efficiency, stable release —{" "}
+          {finopsBadge.qualifying} of {finopsBadge.ranked} ranked models qualify.
+        </p>
+      )}
 
       {models.length === 0 ? (
         <EmptyState />
@@ -137,20 +157,39 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
           <span style={{ fontWeight: 600, fontSize: "14px" }}>{m.provider}</span>
           <span style={{ color: "#6b7280", fontSize: "14px", marginLeft: "4px" }}>{m.model}</span>
           {m.isFinOpsFriendly && (
-            <span style={{
-              marginLeft: "8px", fontSize: "11px", background: "#dcfce7",
-              color: "#166534", padding: "1px 6px", borderRadius: "4px",
-            }}>
+            <span
+              title="Top 40% on Arena ELO, top 30% on efficiency, cheapest 70% on list price, and a stable release"
+              style={{
+                marginLeft: "8px", fontSize: "11px", background: "#dcfce7",
+                color: "#166534", padding: "1px 6px", borderRadius: "4px",
+              }}
+            >
               FinOps Friendly
             </span>
           )}
         </div>
-        <span style={{
-          fontSize: "11px", background: "#f3f4f6", color: "#374151",
-          padding: "2px 8px", borderRadius: "4px",
-        }}>
-          {m.category}
-        </span>
+        {/* Two independent axes: what it costs, and whose hardware can run it */}
+        <div style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
+          <span style={{
+            fontSize: "11px", background: "#f3f4f6", color: "#374151",
+            padding: "2px 8px", borderRadius: "4px",
+          }}>
+            {m.category}
+          </span>
+          {m.openness && m.openness !== "Unknown" && (
+            <span
+              title="Self-hostability, derived from the model's licence"
+              style={{
+                fontSize: "11px",
+                background: m.openness === "Proprietary" ? "#f3f4f6" : "#ecfdf5",
+                color: m.openness === "Proprietary" ? "#6b7280" : "#047857",
+                padding: "2px 8px", borderRadius: "4px",
+              }}
+            >
+              {m.openness}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Metrics Row */}

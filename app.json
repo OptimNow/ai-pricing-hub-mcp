@@ -21,6 +21,10 @@
           "category": {
             "type": "string"
           },
+          "openness": {
+            "type": "string",
+            "enum": ["Open source", "Open weights", "Proprietary", "Unknown"]
+          },
           "capability": {
             "type": "string"
           },
