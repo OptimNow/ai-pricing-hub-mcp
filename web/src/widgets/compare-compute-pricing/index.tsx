@@ -20,7 +20,9 @@ interface ComputeInstance {
 
 interface ComputeOutput {
   instances: ComputeInstance[];
-  totalAvailable: number;
+  matchingCount: number;
+  catalogSize: number;
+  error?: string;
 }
 
 const providerColors: Record<string, string> = {
@@ -40,7 +42,24 @@ function ComputePricing() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading pricing...</div>;
   }
 
-  const { instances, totalAvailable } = output as ComputeOutput;
+  const { instances, matchingCount, catalogSize, error } = output as unknown as ComputeOutput;
+
+  if (error) {
+    return <ErrorCard message={error} />;
+  }
+
+  if (instances.length === 0) {
+    return (
+      <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
+        <div style={{
+          border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
+          textAlign: "center", color: "#6b7280", fontSize: "13px",
+        }}>
+          No results match these filters.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "860px" }}>
@@ -48,7 +67,7 @@ function ComputePricing() {
         Cloud Compute Pricing
       </h2>
       <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
-        {totalAvailable} instances found · Showing {instances.length}
+        {matchingCount} of {catalogSize} instances match · Showing {instances.length} · Linux on-demand
       </p>
 
       {/* Table */}
@@ -74,6 +93,20 @@ function ComputePricing() {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
+      <div style={{
+        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
+        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
+      }}>
+        <strong style={{ display: "block", marginBottom: "4px" }}>Could not load compute pricing</strong>
+        {message}
       </div>
     </div>
   );

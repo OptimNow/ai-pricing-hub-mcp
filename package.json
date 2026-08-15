@@ -7,8 +7,10 @@
   "scripts": {
     "dev": "skybridge dev",
     "build": "skybridge build",
+    "typecheck": "tsc --noEmit",
     "start": "skybridge start",
-    "deploy": "alpic deploy"
+    "deploy": "alpic deploy",
+    "refresh-fallback": "node scripts/refresh-llm-fallback.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
