@@ -27,6 +27,21 @@ export const estimateCostInputSchema = {
   monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Custom monthly volume (default: 100,000)"),
 };
 
+export const sideBySideInputSchema = {
+  models: z.array(z.string()).min(2).max(4)
+    .describe("2 to 4 model names to place side by side. Each is matched as a substring of the model or provider name (e.g. ['GPT-4o', 'Claude Sonnet 4'])."),
+  volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+};
+
+export const recommendInputSchema = {
+  useCasePreset: z.enum(USE_CASE_KEYS).describe("The workload to rank models for"),
+  volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+  maxMonthlyBudget: z.number().positive().optional().describe("Maximum monthly spend in USD, checked against the LIST-price monthly cost (not the optimized one)"),
+  minElo: z.number().optional().describe("Minimum Chatbot Arena ELO score"),
+  requiredCapability: z.string().optional().describe("Capability the model must have: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
+  openWeightsOnly: z.boolean().optional().describe("Only consider models under a non-proprietary licence"),
+};
+
 export const computePricingInputSchema = {
   provider: z.string().optional().describe("Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba"),
   category: z.string().optional().describe("Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable"),
@@ -84,6 +99,16 @@ export const compareModelsOutputSchema = {
   error: z.string().optional(),
 };
 
+/** The four booleans say *why* a saving exists (or doesn't): eligibility is a
+ *  property of the workload, "applied" additionally needs the model to publish
+ *  the rate. Shipping them beats shipping a bare 0%. */
+const leverShape = {
+  batchEligible: z.boolean(),
+  cacheEligible: z.boolean(),
+  batchApplied: z.boolean(),
+  cacheApplied: z.boolean(),
+};
+
 export const estimateCostOutputSchema = {
   modelCosts: z.array(
     z.object({
@@ -97,11 +122,98 @@ export const estimateCostOutputSchema = {
           monthly: z.number(),
           perRequestOptimized: z.number(),
           monthlyOptimized: z.number(),
+          savingsPct: z.number(),
+          ...leverShape,
         }),
       ),
     }),
   ),
   volume: z.number(),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  error: z.string().optional(),
+};
+
+const useCaseCostSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  perRequest: z.number(),
+  perRequestOptimized: z.number(),
+  monthly: z.number(),
+  monthlyOptimized: z.number(),
+  savingsPct: z.number(),
+  ...leverShape,
+});
+
+export const sideBySideOutputSchema = {
+  models: z.array(z.object({ ...modelShape, useCaseCosts: z.array(useCaseCostSchema) })),
+  /** One entry per requested name, in the order asked, including the ones that
+   *  produced no column — a caller must never have to guess which name was dropped. */
+  resolution: z.array(
+    z.object({
+      query: z.string(),
+      status: z.enum(["exact", "unique", "ambiguous", "not-found", "duplicate"]),
+      resolved: z.string().optional(),
+      alternatives: z.array(z.string()),
+    }),
+  ),
+  volume: z.number(),
+  volumeLabel: z.string(),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  error: z.string().optional(),
+};
+
+/** Constraint outcomes are formatted strings so a caller can render them without
+ *  re-deriving units; `satisfied` is the machine-readable half. */
+const constraintCheckSchema = z.object({
+  constraint: z.string(),
+  required: z.string(),
+  actual: z.string(),
+  satisfied: z.boolean(),
+});
+
+const recommendationSchema = z.object({
+  rank: z.number(),
+  provider: z.string(),
+  model: z.string(),
+  category: z.string(),
+  contextWindow: z.string(),
+  capabilities: z.array(z.string()),
+  license: z.string().optional(),
+  eloScore: z.number().nullable(),
+  efficiencyScore: z.number().nullable(),
+  efficiencyRank: z.number().nullable(),
+  rankedOutOf: z.number(),
+  perRequest: z.number(),
+  perRequestOptimized: z.number(),
+  monthlyBudget: z.number(),
+  monthlyOptimizedBudget: z.number(),
+  savingsPct: z.number(),
+  isFinOpsFriendly: z.boolean(),
+  volatilityRisk: z.string(),
+  /** Monthly list cost relative to the first entry of the same list, in percent. */
+  costDeltaVsTopPct: z.number(),
+  constraints: z.array(constraintCheckSchema),
+});
+
+export const recommendOutputSchema = {
+  recommendations: z.array(recommendationSchema),
+  /** Populated only when nothing satisfied every constraint: the closest rows,
+   *  each carrying the constraint it failed. */
+  nearMisses: z.array(recommendationSchema),
+  overConstrained: z.boolean(),
+  useCaseLabel: z.string(),
+  volumeLabel: z.string(),
+  volume: z.number(),
+  candidateCount: z.number(),
+  rankedCount: z.number(),
+  catalogSize: z.number(),
+  roiCalculatorUrl: z.string(),
   source: z.string(),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
@@ -155,6 +267,29 @@ export const TOOL_META = {
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
       "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
   },
+  "compare-models-side-by-side": {
+    title: "Compare Models Side by Side",
+    description:
+      "Put 2 to 4 named AI/LLM models side by side across all 8 business use cases, " +
+      "with cost per request and monthly cost at list price and at the optimized price " +
+      "(prompt caching, plus the batch API where the workload allows it). " +
+      "The `resolution` array says how each requested name was matched — report any " +
+      "not-found, ambiguous or duplicate entry to the user verbatim. " +
+      "IMPORTANT: Report all costs EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
+  },
+  "recommend-llm-model": {
+    title: "Recommend an LLM Model",
+    description:
+      "Rank AI/LLM models for one workload and volume under optional constraints " +
+      "(max monthly budget, minimum ELO, required capability, open weights only) and return the top 3. " +
+      "The output is FACTS ONLY — efficiency rank, ELO, list and optimized monthly cost, FinOps Friendly flag, " +
+      "volatility risk, and a per-constraint satisfied/violated breakdown. Write the narrative yourself from those facts. " +
+      "When no model satisfies every constraint, `overConstrained` is true and `nearMisses` holds the closest models " +
+      "with the specific constraint each one failed. " +
+      "`roiCalculatorUrl` is a deep link to the OptimNow AI ROI Calculator carrying this scenario — " +
+      "offer it to the user as a clickable link in your reply, since the in-widget link may be blocked by the host's iframe sandbox. " +
+      "IMPORTANT: Report all figures EXACTLY as returned. Do NOT invent reasons the data does not contain.",
+  },
   "compare-compute-pricing": {
     title: "Compare Cloud Compute Pricing",
     description:
@@ -170,5 +305,7 @@ export const TOOL_META = {
 export const TOOL_INPUT_SCHEMAS = {
   "compare-llm-models": compareModelsInputSchema,
   "estimate-llm-cost": estimateCostInputSchema,
+  "compare-models-side-by-side": sideBySideInputSchema,
+  "recommend-llm-model": recommendInputSchema,
   "compare-compute-pricing": computePricingInputSchema,
 };

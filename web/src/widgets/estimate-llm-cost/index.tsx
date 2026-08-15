@@ -1,13 +1,14 @@
 import "@/index.css";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
-import { formatBudget, formatCost, savingsPct } from "../../format.js";
+import { formatBudget, formatCost } from "../../format.js";
 import {
   Card, EmptyState, ErrorState, FreshnessBadges, LoadingState, WidgetHeader, WidgetShell,
 } from "../../components/index.js";
 
 type EstimateOutput = NonNullable<ReturnType<typeof useToolInfo<"estimate-llm-cost">>["output"]>;
 type ModelCostItem = EstimateOutput["modelCosts"][number];
+type CostEntry = ModelCostItem["costs"][number];
 
 function EstimateCost() {
   const { output } = useToolInfo<"estimate-llm-cost">();
@@ -48,17 +49,24 @@ function EstimateCost() {
   );
 }
 
-const thStyle: React.CSSProperties = {
-  textAlign: "right",
-  padding: "4px 6px",
-  color: "var(--text-muted)",
-  fontWeight: 500,
-};
+/** Which lever produced the saving — or why there isn't one. Mirrors
+ *  leverSummary in server/src/index.ts so the widget and the text the model
+ *  reads never disagree about what happened. */
+function leverSummary(c: CostEntry): string {
+  const applied = [c.cacheApplied ? "caching" : "", c.batchApplied ? "batch API" : ""].filter(Boolean);
+  if (applied.length > 0) return applied.join(" + ");
+  if (!c.cacheEligible && !c.batchEligible) {
+    return "this workload has no cacheable prefix and is not batch-eligible";
+  }
+  const missing = [c.cacheEligible ? "cache-read" : "", c.batchEligible ? "batch" : ""].filter(Boolean);
+  return `this model publishes no ${missing.join(" or ")} rate`;
+}
 
 function ModelCostCard({ mc }: { mc: ModelCostItem }) {
   const m = mc.model;
-  const minCost = Math.min(...mc.costs.map(c => c.monthly));
-  const maxCost = Math.max(...mc.costs.map(c => c.monthly));
+  const monthlies = mc.costs.map(c => c.monthly);
+  const minCost = Math.min(...monthlies);
+  const maxCost = Math.max(...monthlies);
 
   return (
     <Card>
@@ -76,55 +84,17 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
         </div>
       </div>
 
-      {/* Cost Table */}
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", fontSize: "12px", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              <th style={{ ...thStyle, textAlign: "left" }}>Use Case</th>
-              <th style={thStyle}>Tokens (in+out)</th>
-              <th style={thStyle}>Per Request</th>
-              <th style={thStyle}>Monthly</th>
-              <th style={thStyle}>Monthly optimized</th>
-            </tr>
-          </thead>
-          <tbody>
-            {mc.costs.map((c) => {
-              const isMin = mc.costs.length > 1 && c.monthly === minCost;
-              const isMax = mc.costs.length > 1 && c.monthly === maxCost;
-              const saved = savingsPct(c.monthly, c.monthlyOptimized);
-              return (
-                <tr key={c.useCase} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-                  <td style={{ padding: "5px 6px", fontWeight: 500 }}>{c.useCase}</td>
-                  <td style={{ textAlign: "right", padding: "5px 6px", color: "var(--text-muted)" }}>
-                    {c.inputTokens.toLocaleString()} + {c.outputTokens.toLocaleString()}
-                  </td>
-                  <td style={{ textAlign: "right", padding: "5px 6px" }}>{formatCost(c.perRequest)}</td>
-                  <td style={{
-                    textAlign: "right", padding: "5px 6px", fontWeight: 600,
-                    color: isMin ? "var(--positive)" : isMax ? "var(--negative)" : "var(--text)",
-                  }}>
-                    {formatBudget(c.monthly)}
-                  </td>
-                  <td style={{ textAlign: "right", padding: "5px 6px", color: "var(--text-muted)" }}>
-                    {formatBudget(c.monthlyOptimized)}
-                    {saved > 0 && (
-                      <span style={{ color: "var(--positive)", fontSize: "10px", marginLeft: "3px" }}>
-                        −{saved}%
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      {/* Paired bars: list vs what caching + batch actually get you */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {mc.costs.map(c => (
+          <SavingsRow key={c.useCase} cost={c} scaleMax={maxCost} />
+        ))}
       </div>
 
       {/* Budget Range */}
       {mc.costs.length > 1 && (
         <div style={{
-          marginTop: "8px", fontSize: "11px", color: "var(--text-muted)",
+          marginTop: "10px", fontSize: "11px", color: "var(--text-muted)",
           padding: "6px 8px", background: "var(--surface-subtle)", borderRadius: "4px",
         }}>
           Monthly range: <strong style={{ color: "var(--positive)" }}>{formatBudget(minCost)}</strong>
@@ -133,6 +103,65 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
         </div>
       )}
     </Card>
+  );
+}
+
+const trackStyle: React.CSSProperties = {
+  flex: 1,
+  height: "9px",
+  background: "var(--surface-subtle)",
+  borderRadius: "5px",
+  overflow: "hidden",
+};
+
+function Bar({ width, fill }: { width: number; fill: string }) {
+  return (
+    <div style={trackStyle}>
+      {/* 1.5% floor keeps a near-zero cost visible as a sliver rather than nothing */}
+      <div style={{ width: `${Math.max(width, 1.5)}%`, height: "100%", background: fill, borderRadius: "5px" }} />
+    </div>
+  );
+}
+
+function SavingsRow({ cost: c, scaleMax }: { cost: CostEntry; scaleMax: number }) {
+  const pct = (v: number) => (scaleMax > 0 ? (v / scaleMax) * 100 : 0);
+  const saved = c.savingsPct > 0;
+
+  return (
+    <div style={{ fontSize: "12px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}>
+        <span style={{ fontWeight: 500 }}>{c.useCase}</span>
+        <span style={{ color: "var(--text-muted)", fontSize: "11px" }}>
+          {c.inputTokens.toLocaleString()} in + {c.outputTokens.toLocaleString()} out ·{" "}
+          {formatCost(c.perRequest)}/req
+        </span>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "3px" }}>
+        <span style={{ width: "58px", color: "var(--text-faint)", fontSize: "10px" }}>List</span>
+        <Bar width={pct(c.monthly)} fill="var(--text-faint)" />
+        <span style={{ width: "62px", textAlign: "right", fontWeight: 600 }}>{formatBudget(c.monthly)}</span>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <span style={{ width: "58px", color: "var(--text-faint)", fontSize: "10px" }}>Optimized</span>
+        <Bar width={pct(c.monthlyOptimized)} fill={saved ? "var(--brand)" : "var(--border-dashed)"} />
+        <span style={{ width: "62px", textAlign: "right", fontWeight: 600, color: saved ? "var(--brand-text)" : "var(--text-muted)" }}>
+          {formatBudget(c.monthlyOptimized)}
+        </span>
+      </div>
+
+      <div style={{ marginLeft: "66px", marginTop: "2px", fontSize: "10px", color: "var(--text-muted)" }}>
+        {saved ? (
+          <>
+            <strong style={{ color: "var(--positive)" }}>save {c.savingsPct}%</strong>{" "}
+            with {leverSummary(c)}
+          </>
+        ) : (
+          <>Same as list price — {leverSummary(c)}</>
+        )}
+      </div>
+    </div>
   );
 }
 

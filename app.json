@@ -122,6 +122,94 @@
       "ui_resource": "ui://widget/estimate-llm-cost"
     },
     {
+      "name": "compare-models-side-by-side",
+      "title": "Compare Models Side by Side",
+      "description": "Put 2 to 4 named AI/LLM models side by side across all 8 business use cases, with cost per request and monthly cost at list price and at the optimized price (prompt caching, plus the batch API where the workload allows it). The `resolution` array says how each requested name was matched — report any not-found, ambiguous or duplicate entry to the user verbatim. IMPORTANT: Report all costs EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "minItems": 2,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "2 to 4 model names to place side by side. Each is matched as a substring of the model or provider name (e.g. ['GPT-4o', 'Claude Sonnet 4'])."
+          },
+          "volumePreset": {
+            "description": "Monthly request volume: 10k, 100k, or 1m. Default: 100k",
+            "type": "string",
+            "enum": [
+              "10k",
+              "100k",
+              "1m"
+            ]
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "additionalProperties": false
+      },
+      "ui_resource": "ui://widget/compare-models-side-by-side"
+    },
+    {
+      "name": "recommend-llm-model",
+      "title": "Recommend an LLM Model",
+      "description": "Rank AI/LLM models for one workload and volume under optional constraints (max monthly budget, minimum ELO, required capability, open weights only) and return the top 3. The output is FACTS ONLY — efficiency rank, ELO, list and optimized monthly cost, FinOps Friendly flag, volatility risk, and a per-constraint satisfied/violated breakdown. Write the narrative yourself from those facts. When no model satisfies every constraint, `overConstrained` is true and `nearMisses` holds the closest models with the specific constraint each one failed. `roiCalculatorUrl` is a deep link to the OptimNow AI ROI Calculator carrying this scenario — offer it to the user as a clickable link in your reply, since the in-widget link may be blocked by the host's iframe sandbox. IMPORTANT: Report all figures EXACTLY as returned. Do NOT invent reasons the data does not contain.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "useCasePreset": {
+            "type": "string",
+            "enum": [
+              "supportTicket",
+              "knowledgeQA",
+              "meetingSummary",
+              "marketingContent",
+              "codingTask",
+              "invoiceProcessing",
+              "callSummary",
+              "agentWorkflow"
+            ],
+            "description": "The workload to rank models for"
+          },
+          "volumePreset": {
+            "description": "Monthly request volume: 10k, 100k, or 1m. Default: 100k",
+            "type": "string",
+            "enum": [
+              "10k",
+              "100k",
+              "1m"
+            ]
+          },
+          "maxMonthlyBudget": {
+            "description": "Maximum monthly spend in USD, checked against the LIST-price monthly cost (not the optimized one)",
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "minElo": {
+            "description": "Minimum Chatbot Arena ELO score",
+            "type": "number"
+          },
+          "requiredCapability": {
+            "description": "Capability the model must have: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio",
+            "type": "string"
+          },
+          "openWeightsOnly": {
+            "description": "Only consider models under a non-proprietary licence",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "useCasePreset"
+        ],
+        "additionalProperties": false
+      },
+      "ui_resource": "ui://widget/recommend-llm-model"
+    },
+    {
       "name": "compare-compute-pricing",
       "title": "Compare Cloud Compute Pricing",
       "description": "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. Filter by provider, vCPUs, memory, category, processor, or use case. All prices are Linux on-demand list prices in USD. IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
@@ -190,6 +278,14 @@
     {
       "uri": "ui://widget/estimate-llm-cost",
       "source": "web/src/widgets/estimate-llm-cost/index.tsx"
+    },
+    {
+      "uri": "ui://widget/compare-models-side-by-side",
+      "source": "web/src/widgets/compare-models-side-by-side/index.tsx"
+    },
+    {
+      "uri": "ui://widget/recommend-llm-model",
+      "source": "web/src/widgets/recommend-llm-model/index.tsx"
     },
     {
       "uri": "ui://widget/compare-compute-pricing",

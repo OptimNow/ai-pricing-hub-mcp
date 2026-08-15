@@ -733,3 +733,41 @@ export function filterModels<T extends LLMModel>(
     return true;
   });
 }
+
+/** Substring match on model or provider name, shared by every tool that takes a
+ *  free-text model name. An exact model-name hit is promoted to the front so
+ *  "GPT-4o" resolves to GPT-4o and not to GPT-4o-mini. */
+export function matchModels<T extends LLMModel>(models: T[], query: string, limit = 5): T[] {
+  const search = query.trim().toLowerCase();
+  if (!search) return [];
+  const matches = models.filter(
+    (m) => m.model.toLowerCase().includes(search) || m.provider.toLowerCase().includes(search),
+  );
+  const exact = matches.filter((m) => m.model.toLowerCase() === search);
+  if (exact.length === 0) return matches.slice(0, limit);
+  return [...exact, ...matches.filter((m) => m.model.toLowerCase() !== search)].slice(0, limit);
+}
+
+export type ResolutionStatus = "exact" | "unique" | "ambiguous" | "not-found" | "duplicate";
+
+export interface ModelResolution<T> {
+  query: string;
+  status: ResolutionStatus;
+  matched?: T;
+  /** The other rows the query also hit, so an ambiguous pick can be reported
+   *  rather than silently made. */
+  alternatives: string[];
+}
+
+/** Resolve one free-text name to a single row, recording how confident that was. */
+export function resolveModel<T extends LLMModel>(models: T[], query: string): ModelResolution<T> {
+  const matches = matchModels(models, query, 6);
+  if (matches.length === 0) return { query, status: "not-found", alternatives: [] };
+  const exact = matches[0].model.toLowerCase() === query.trim().toLowerCase();
+  return {
+    query,
+    status: exact ? "exact" : matches.length > 1 ? "ambiguous" : "unique",
+    matched: matches[0],
+    alternatives: matches.slice(1).map((m) => `${m.provider} ${m.model}`),
+  };
+}
