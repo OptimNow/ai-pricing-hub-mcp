@@ -7,10 +7,11 @@
   "scripts": {
     "dev": "skybridge dev",
     "build": "skybridge build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "start": "skybridge start",
     "deploy": "alpic deploy",
-    "refresh-fallback": "node scripts/refresh-llm-fallback.mjs"
+    "refresh-fallback": "node scripts/refresh-llm-fallback.mjs",
+    "test": "node --import tsx --test \"server/src/**/*.test.ts\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -22,6 +23,7 @@
   },
   "devDependencies": {
     "@skybridge/devtools": ">=0.32.0 <1.0.0",
+    "@types/node": "24.13.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",

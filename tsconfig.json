@@ -5,5 +5,9 @@
     "outDir": "dist"
   },
 
-  "include": ["server/src", "web/src"]
+  "include": ["server/src", "web/src"],
+
+  // Tests are type-checked by tsconfig.test.json rather than compiled into the
+  // deployed artifact. `npm run typecheck` runs both configs.
+  "exclude": ["**/*.test.ts"]
 }

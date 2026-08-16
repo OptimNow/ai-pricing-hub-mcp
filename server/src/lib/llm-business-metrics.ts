@@ -322,12 +322,16 @@ export function formatMonthlyBudget(cost: number): string {
  *  floor formatMicroCost() uses. Monthly budgets are dollars, so 2 is cents. */
 export const PER_REQUEST_DECIMALS = 6;
 export const MONTHLY_DECIMALS = 2;
+/** Per-1M prices are cheap enough at the bottom of the catalogue ($0.01/1M) that
+ *  6 places is ample, and they are derived too: blendedPrice() mixes input and
+ *  output at 30/70, which is noisy for roughly 40% of the catalogue. */
+export const PRICE_DECIMALS = 6;
 
 /** Drop IEEE-754 representation noise from a cost that is about to be
  *  serialised into structuredContent.
  *
  *  useCaseCost() is arithmetically right; the binary float it returns is what
- *  is ugly. 3000/1e6 × $15 + 2000/1e6 × $120 is exactly 0.45, yet lands on
+ *  is ugly. 3000/1e6 × $30 + 2000/1e6 × $180 is exactly 0.45, yet lands on
  *  0.44999999999999996, and ×100,000 on 44999.99999999999. Every tool here
  *  tells the calling model to report figures EXACTLY as returned, so that noise
  *  is printed verbatim to an end user.
@@ -341,6 +345,11 @@ export function roundCost(cost: number, decimals: number): number {
 
 export const roundPerRequestCost = (cost: number): number => roundCost(cost, PER_REQUEST_DECIMALS);
 export const roundMonthlyCost = (cost: number): number => roundCost(cost, MONTHLY_DECIMALS);
+export const roundPricePer1M = (price: number): number => roundCost(price, PRICE_DECIMALS);
+
+/** Null-tolerant variant, for the optional figures on the badge summary. */
+export const roundPricePer1MOrNull = (price: number | null): number | null =>
+  price === null ? null : roundPricePer1M(price);
 
 // ── Enrichment pipeline ──
 
