@@ -18,6 +18,67 @@ import type { UseCaseProfile, VolumePreset } from "./lib/llm-business-metrics.js
 import { computeInstances } from "./data/pricing-data.js";
 import { enrichInstances } from "./lib/compute-categories.js";
 
+// ─── Optimization provenance ────────────────────────────────────────
+
+/** Where the cache/batch assumptions behind an optimized figure came from. */
+type OptimizationBasis = "preset" | "caller-supplied" | "none-supplied";
+
+/** Which of the two discounts this model actually publishes a rate for. */
+function publishedRates(m: LLMModel): { cache: boolean; batch: boolean } {
+  return {
+    cache: m.cachedInputPricePer1M !== undefined,
+    batch: m.batchInputPricePer1M !== undefined && m.batchOutputPricePer1M !== undefined,
+  };
+}
+
+/** Say in words what the optimized figure assumed, because the number alone
+ *  cannot. `optimized === list` has two very different causes — the discounts
+ *  were modelled and none were reachable, or none were assumed at all — and a
+ *  consumer that cannot tell them apart reports "no savings available" for a
+ *  workload that has plenty. */
+function optimizationNote(m: LLMModel, profile: UseCaseProfile, basis: OptimizationBasis): string {
+  const published = publishedRates(m);
+
+  if (basis === "none-supplied") {
+    const available = [
+      published.cache ? "a prompt-cache read rate" : "",
+      published.batch ? "batch API pricing" : "",
+    ].filter(Boolean);
+    return available.length > 0
+      ? "No caching or batch assumptions were supplied, so the optimized figures repeat list price. " +
+        `That is a missing input, not a finding: this model publishes ${available.join(" and ")}. ` +
+        "Pass cacheHitRate and/or batchEligible to model the discounts this workload can reach."
+      : "No caching or batch assumptions were supplied, so the optimized figures repeat list price. " +
+        "This model also publishes neither a cache-read nor a batch rate, so there is nothing to " +
+        "model for it.";
+  }
+
+  const applied = [
+    profile.cacheHitRate > 0 && published.cache
+      ? `a ${Math.round(profile.cacheHitRate * 100)}% prompt-cache hit rate`
+      : "",
+    profile.batchEligible && published.batch ? "batch API pricing" : "",
+  ].filter(Boolean);
+
+  // Asked for but not priced. Naming only what was applied would let a caller
+  // who requested both levers read a one-lever discount as the full answer.
+  const unavailable = [
+    profile.cacheHitRate > 0 && !published.cache ? "cache-read" : "",
+    profile.batchEligible && !published.batch ? "batch" : "",
+  ].filter(Boolean);
+
+  if (applied.length > 0) {
+    return `Optimized price applies ${applied.join(" and ")}.` +
+      (unavailable.length > 0
+        ? ` The requested ${unavailable.join(" and ")} discount is not included — this model publishes no such rate.`
+        : "");
+  }
+
+  return unavailable.length > 0
+    ? `Optimized price equals list price: this model publishes no ${unavailable.join(" or ")} rate.`
+    : "Optimized price equals list price: no caching or batch discount was assumed for this workload.";
+}
+
 // ─── Output schemas ─────────────────────────────────────────────────
 // Mirror the structuredContent each tool returns, error paths included, so the
 // widgets and any downstream consumer get a contract instead of a guess.
@@ -86,6 +147,13 @@ const estimateCostOutputSchema = {
           monthly: z.number(),
           perRequestOptimized: z.number(),
           monthlyOptimized: z.number(),
+          // The discount assumptions behind perRequestOptimized, and where they
+          // came from. Without them, an optimized figure equal to list price is
+          // unreadable — see optimizationNote().
+          cacheHitRate: z.number(),
+          batchEligible: z.boolean(),
+          optimizationBasis: z.enum(["preset", "caller-supplied", "none-supplied"]),
+          optimizationNote: z.string(),
         }),
       ),
     }),
@@ -270,19 +338,51 @@ const server = new McpServer(
       "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
+      "The presets carry researched cache-hit and batch assumptions; a custom token shape carries none unless you " +
+      "pass cacheHitRate/batchEligible, so read optimizationNote before describing a workload as un-optimizable. " +
       "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
       modelName: z.string().optional().describe("Model name to estimate costs for (e.g. 'GPT-4o', 'Claude Sonnet 4'). If omitted, shows top models."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case preset. Default: all presets."),
       customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request (overrides preset)"),
       customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request (overrides preset)"),
+      cacheHitRate: z.number().min(0).max(1).optional().describe(
+        "Share of input tokens served from the prompt cache, 0-1 — e.g. 0.6 for a stable system prompt and " +
+        "tool definitions re-sent on every call. Requires customInputTokens/customOutputTokens; the presets " +
+        "carry their own. Omitting it means no caching is assumed, NOT that none is achievable."
+      ),
+      batchEligible: z.boolean().optional().describe(
+        "Whether this workload is async and can go through the batch API (typically -50%). Requires " +
+        "customInputTokens/customOutputTokens; the presets carry their own. Omitting it means no batch " +
+        "discount is assumed, NOT that the workload is ineligible."
+      ),
       monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Custom monthly volume (default: 100,000)"),
     },
     outputSchema: estimateCostOutputSchema,
   },
-  async ({ modelName, useCasePreset, customInputTokens, customOutputTokens, monthlyVolume }) => {
+  async ({ modelName, useCasePreset, customInputTokens, customOutputTokens, cacheHitRate, batchEligible, monthlyVolume }) => {
     const volume = monthlyVolume || 100_000;
     const emptyOutput = { modelCosts: [], volume, source: "error", eloAsOf: "" };
+
+    const customTokens = customInputTokens !== undefined && customOutputTokens !== undefined;
+    const leversSupplied = cacheHitRate !== undefined || batchEligible !== undefined;
+
+    // The levers describe a *custom* workload. Each preset already carries its
+    // own researched cache-hit rate and batch eligibility, and one override
+    // would rewrite all eight rows from a single number. Refusing is louder
+    // than ignoring, and silently ignoring an input is the failure mode this
+    // whole pair of arguments exists to remove.
+    if (leversSupplied && !customTokens) {
+      const message =
+        "cacheHitRate and batchEligible describe a custom workload, so they need both " +
+        "customInputTokens and customOutputTokens alongside them. The use-case presets carry " +
+        "their own cache-hit and batch assumptions and cannot be overridden.";
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
 
     try {
       const { models: allModels, source, eloAsOf, dataAsOf } = await fetchLLMModels();
@@ -328,9 +428,18 @@ const server = new McpServer(
         monthly: number;
         perRequestOptimized: number;
         monthlyOptimized: number;
+        cacheHitRate: number;
+        batchEligible: boolean;
+        optimizationBasis: OptimizationBasis;
+        optimizationNote: string;
       };
 
-      const entry = (m: LLMModel, useCase: string, profile: UseCaseProfile): CostEntry => {
+      const entry = (
+        m: LLMModel,
+        useCase: string,
+        profile: UseCaseProfile,
+        basis: OptimizationBasis,
+      ): CostEntry => {
         const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
         const optimized = optimizedUseCaseCost(m, profile);
         return {
@@ -341,28 +450,35 @@ const server = new McpServer(
           monthly: cost * volume,
           perRequestOptimized: optimized,
           monthlyOptimized: optimized * volume,
+          cacheHitRate: profile.cacheHitRate,
+          batchEligible: profile.batchEligible,
+          optimizationBasis: basis,
+          optimizationNote: optimizationNote(m, profile, basis),
         };
       };
 
       const modelCosts: { model: LLMModel; costs: CostEntry[] }[] = targetModels.map(m => {
         const costs: CostEntry[] = [];
 
-        if (customInputTokens !== undefined && customOutputTokens !== undefined) {
-          // No caching or batch assumption on a custom shape: we know nothing
-          // about how repetitive or async the caller's workload is.
+        if (customTokens) {
+          // A custom shape carries no discount assumptions of its own, so take
+          // the caller's when they gave any and assume nothing otherwise.
+          // Defaulting to some average cache-hit rate would invent a fact about
+          // their workload; optimizationBasis records which of the two it was.
           const profile: UseCaseProfile = {
             label: "Custom", shortLabel: "Custom",
-            inputTokens: customInputTokens, outputTokens: customOutputTokens,
-            cacheHitRate: 0, batchEligible: false,
+            inputTokens: customInputTokens!, outputTokens: customOutputTokens!,
+            cacheHitRate: cacheHitRate ?? 0,
+            batchEligible: batchEligible ?? false,
           };
-          costs.push(entry(m, "Custom", profile));
+          costs.push(entry(m, "Custom", profile, leversSupplied ? "caller-supplied" : "none-supplied"));
         } else if (useCasePreset) {
           const profile = USE_CASE_PROFILES[useCasePreset];
-          costs.push(entry(m, profile.label, profile));
+          costs.push(entry(m, profile.label, profile, "preset"));
         } else {
           for (const key of USE_CASE_KEYS) {
             const profile = USE_CASE_PROFILES[key];
-            costs.push(entry(m, profile.label, profile));
+            costs.push(entry(m, profile.label, profile, "preset"));
           }
         }
 
@@ -374,7 +490,8 @@ const server = new McpServer(
         const costLines = costs.map(c =>
           `  ${c.useCase}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo ` +
           `(optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo) ` +
-          `(${c.inputTokens} in + ${c.outputTokens} out tokens)`
+          `(${c.inputTokens} in + ${c.outputTokens} out tokens)\n` +
+          `    ${c.optimizationNote}`
         );
         return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)\n${costLines.join("\n")}`;
       });

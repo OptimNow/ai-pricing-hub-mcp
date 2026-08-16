@@ -10,6 +10,10 @@ interface CostEntry {
   monthly: number;
   perRequestOptimized: number;
   monthlyOptimized: number;
+  cacheHitRate: number;
+  batchEligible: boolean;
+  optimizationBasis: "preset" | "caller-supplied" | "none-supplied";
+  optimizationNote: string;
 }
 
 interface ModelCostItem {
@@ -123,6 +127,7 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
   const m = mc.model;
   const minCost = Math.min(...mc.costs.map(c => c.monthly));
   const maxCost = Math.max(...mc.costs.map(c => c.monthly));
+  const unexplained = mc.costs.filter(c => c.monthlyOptimized >= c.monthly);
 
   return (
     <div style={{
@@ -173,10 +178,14 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
                 </td>
                 <td style={{ textAlign: "right", padding: "5px 6px", color: "#6b7280" }}>
                   {formatMonthly(c.monthlyOptimized)}
-                  {c.monthly > 0 && c.monthlyOptimized < c.monthly && (
+                  {c.monthly > 0 && c.monthlyOptimized < c.monthly ? (
                     <span style={{ color: "#16a34a", fontSize: "10px", marginLeft: "3px" }}>
                       −{Math.round((1 - c.monthlyOptimized / c.monthly) * 100)}%
                     </span>
+                  ) : (
+                    /* A repeated number reads as "nothing to save here". Say why
+                       it repeated instead — the note below the table explains. */
+                    <span style={{ color: "#9ca3af", fontSize: "10px", marginLeft: "3px" }}>= list*</span>
                   )}
                 </td>
               </tr>
@@ -184,6 +193,27 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
           })}
         </tbody>
       </table>
+
+      {/* Why an optimized figure repeated the list price. Only the rows that
+          show no saving need explaining; annotating all eight presets when
+          seven of them do save would bury the one that matters. */}
+      {unexplained.length > 0 && (
+        <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "4px" }}>
+          {unexplained.map((c) => (
+            <div
+              key={c.useCase}
+              style={{
+                fontSize: "11px", lineHeight: 1.45, borderRadius: "4px", padding: "6px 8px",
+                border: c.optimizationBasis === "none-supplied" ? "1px solid #fde68a" : "1px solid #e5e7eb",
+                background: c.optimizationBasis === "none-supplied" ? "#fffbeb" : "#f9fafb",
+                color: c.optimizationBasis === "none-supplied" ? "#92400e" : "#6b7280",
+              }}
+            >
+              <strong>* {c.useCase}:</strong> {c.optimizationNote}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Budget Range */}
       {mc.costs.length > 1 && (
