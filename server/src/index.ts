@@ -14,6 +14,7 @@ import {
   formatMonthlyBudget,
   roundPerRequestCost,
   roundMonthlyCost,
+  roundPricePer1MOrNull,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
 import type { UseCaseProfile, VolumePreset } from "./lib/llm-business-metrics.js";
@@ -239,7 +240,13 @@ const server = new McpServer(
           catalogSize: allModels.length,
           eloAsOf,
           dataAsOf,
-          finopsBadge,
+          // maxBlendedPrice is derived (input×0.3 + output×0.7), so it carries
+          // the same float noise the costs did — just less visibly, since only
+          // one value surfaces per call.
+          finopsBadge: {
+            ...finopsBadge,
+            maxBlendedPrice: roundPricePer1MOrNull(finopsBadge.maxBlendedPrice),
+          },
         },
         content: [
           {

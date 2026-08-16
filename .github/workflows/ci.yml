@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the engines field in package.json.
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      # Type-checks the server and widgets, then the test files separately —
+      # tests are excluded from the build config so they stay out of dist.
+      - run: npm run typecheck
+
+      # Offline and deterministic: no network, no server to boot.
+      - run: npm test
+
+      - run: npm run build
