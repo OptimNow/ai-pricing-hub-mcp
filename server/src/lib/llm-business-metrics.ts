@@ -315,6 +315,33 @@ export function formatMonthlyBudget(cost: number): string {
   return `$${cost.toFixed(4)}`;
 }
 
+// ── Serialisation helpers ──
+
+/** Decimal places a cost keeps when it crosses the wire as JSON.
+ *  Per-request costs are routinely sub-cent, so they keep 6 places — the same
+ *  floor formatMicroCost() uses. Monthly budgets are dollars, so 2 is cents. */
+export const PER_REQUEST_DECIMALS = 6;
+export const MONTHLY_DECIMALS = 2;
+
+/** Drop IEEE-754 representation noise from a cost that is about to be
+ *  serialised into structuredContent.
+ *
+ *  useCaseCost() is arithmetically right; the binary float it returns is what
+ *  is ugly. 3000/1e6 × $15 + 2000/1e6 × $120 is exactly 0.45, yet lands on
+ *  0.44999999999999996, and ×100,000 on 44999.99999999999. Every tool here
+ *  tells the calling model to report figures EXACTLY as returned, so that noise
+ *  is printed verbatim to an end user.
+ *
+ *  Round here and nowhere else. The raw values feed sorting and percentile
+ *  ranking, where rounding would manufacture ties. */
+export function roundCost(cost: number, decimals: number): number {
+  if (!Number.isFinite(cost)) return cost;
+  return Number(cost.toFixed(decimals));
+}
+
+export const roundPerRequestCost = (cost: number): number => roundCost(cost, PER_REQUEST_DECIMALS);
+export const roundMonthlyCost = (cost: number): number => roundCost(cost, MONTHLY_DECIMALS);
+
 // ── Enrichment pipeline ──
 
 /** Enrich filtered models with business metrics for the selected use case */
