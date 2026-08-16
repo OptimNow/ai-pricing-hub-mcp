@@ -9,6 +9,8 @@ import {
   useCaseCost,
   formatMicroCost,
   formatMonthlyBudget,
+  roundPerRequestCost,
+  roundMonthlyCost,
 } from "./lib/llm-business-metrics.js";
 import type { VolumePreset } from "./lib/llm-business-metrics.js";
 import { computeInstances } from "./data/pricing-data.js";
@@ -90,7 +92,13 @@ const server = new McpServer(
 
       return {
         structuredContent: {
-          models: results,
+          // Costs are rounded on the way out only; `enriched` keeps the raw
+          // floats that the ranking above depends on.
+          models: results.map(m => ({
+            ...m,
+            useCaseCost: roundPerRequestCost(m.useCaseCost),
+            monthlyBudget: roundMonthlyCost(m.monthlyBudget),
+          })),
           useCaseLabel,
           volumeLabel,
           source,
@@ -205,7 +213,16 @@ const server = new McpServer(
 
       return {
         structuredContent: {
-          modelCosts,
+          // Costs are rounded on the way out only; `modelCosts` keeps the raw
+          // floats the text summary above formats.
+          modelCosts: modelCosts.map(({ model, costs }) => ({
+            model,
+            costs: costs.map(c => ({
+              ...c,
+              perRequest: roundPerRequestCost(c.perRequest),
+              monthly: roundMonthlyCost(c.monthly),
+            })),
+          })),
           volume,
         },
         content: [
