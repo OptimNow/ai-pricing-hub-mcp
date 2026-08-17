@@ -1,8 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fetchLLMModels, resetLLMModelCache } from "./llm-models.js";
-import { fetchComputeInstances, resetComputePricingCache } from "./compute-pricing.js";
-import { optimtokenUrl, OPTIMTOKEN_BASE_URL } from "./optimtoken-api.js";
+import {
+  fetchComputeInstances,
+  resetComputePricingCache,
+  primeComputePricingCache,
+  setComputeTimeoutForTest,
+  UPSTREAM_TIMEOUT_MS,
+  MEASURED_COLD_REBUILD_MS,
+} from "./compute-pricing.js";
+import {
+  optimtokenUrl,
+  OPTIMTOKEN_BASE_URL,
+  fetchOptimtokenJson,
+  UpstreamFetchError,
+} from "./optimtoken-api.js";
 import { opennessOf } from "./openness.js";
 
 /**
@@ -128,23 +140,55 @@ function sitePricingResponse(overrides: Record<string, unknown> = {}) {
 
 // ── fetch stubbing ──────────────────────────────────────────────────
 
-type Responder = (url: string) => { status?: number; body?: unknown; throws?: boolean };
+type Responder = (url: string) => {
+  status?: number;
+  body?: unknown;
+  throws?: boolean;
+  /** Hold the response open this long. Combined with the caller's own
+   *  AbortSignal this is what makes a real timeout reproducible in a test. */
+  delayMs?: number;
+  /** Resolve with a body that is not valid JSON. */
+  badJson?: boolean;
+};
 
 const realFetch = globalThis.fetch;
 const requested: string[] = [];
 
 function stubFetch(responder: Responder) {
   requested.length = 0;
-  globalThis.fetch = (async (input: unknown) => {
+  globalThis.fetch = (async (input: unknown, init?: { signal?: AbortSignal }) => {
     const url = String(input);
     requested.push(url);
     const r = responder(url);
     if (r.throws) throw new Error("network down");
+
+    // Honour the caller's abort, the way a real fetch does. Without this the
+    // timeout path — the one that broke in production — is untestable, because
+    // the stub would always answer before any deadline could pass.
+    if (r.delayMs) {
+      await new Promise<void>((resolve, reject) => {
+        const signal = init?.signal;
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, r.delayMs);
+        function onAbort() {
+          clearTimeout(timer);
+          reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+        }
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+
     const status = r.status ?? 200;
     return {
       ok: status >= 200 && status < 300,
       status,
-      json: async () => r.body,
+      json: async () => {
+        if (r.badJson) throw new SyntaxError("Unexpected token < in JSON at position 0");
+        return r.body;
+      },
     };
   }) as unknown as typeof fetch;
 }
@@ -158,6 +202,7 @@ function restoreFetch() {
 function reset() {
   resetLLMModelCache();
   resetComputePricingCache();
+  setComputeTimeoutForTest(null);
 }
 
 const isSite = (url: string) => url.startsWith(OPTIMTOKEN_BASE_URL);
@@ -424,4 +469,176 @@ test("the compute snapshot admits it ignored the region filter", async (t) => {
   // the outage.
   assert.match(result.provenance.notice ?? "", /NOT applied/);
   assert.ok(result.provenance.dataAsOf);
+});
+
+// ── The regression: tier 2 while upstream is reachable ──────────────
+//
+// This is the defect these tests exist for. `/api/pricing` takes ~50.5s to
+// rebuild a cold edge entry (measured 2026-08-17: 50.8s / 50.5s / 50.5s)
+// against `/api/llm-models`' 209ms, because the site assembles six provider
+// APIs inside a `maxDuration: 60` function. The compute budget was 20s — tuned
+// for the small endpoint — so a cold entry could not reach tier 1 at all, and
+// the tool served the snapshot on every call while reporting only that the
+// site "was unreachable". It was reachable. We were not waiting for it.
+
+test("the compute budget covers a cold upstream rebuild", () => {
+  // The guard against re-tuning this budget to the LLM endpoint's profile. If
+  // someone trims it back under the cold path, tier 1 becomes unreachable again
+  // and every response quietly degrades — which is exactly how this shipped.
+  assert.ok(
+    UPSTREAM_TIMEOUT_MS > MEASURED_COLD_REBUILD_MS,
+    `compute budget ${UPSTREAM_TIMEOUT_MS}ms must exceed the measured ${MEASURED_COLD_REBUILD_MS}ms cold rebuild`,
+  );
+});
+
+test("a slow-but-reachable upstream reaches tier 1 instead of degrading", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  // 400ms upstream, 5s budget — the same ratio as 50.5s upstream against the
+  // 55s budget, and the inverse of the 50.5s-against-20s that broke.
+  setComputeTimeoutForTest(5_000);
+  stubFetch(url => (isSite(url) ? { body: sitePricingResponse(), delayMs: 400 } : { throws: true }));
+
+  const result = await fetchComputeInstances("us-east");
+
+  assert.equal(result.provenance.tier, 1, "upstream answered inside the budget — this must not be a fallback");
+  assert.equal(result.source, "optimtoken");
+  assert.equal(result.provenance.fallbackReason, undefined, "tier 1 has no fallback to explain");
+});
+
+test("an upstream slower than the budget falls back AND says it was a timeout", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  setComputeTimeoutForTest(300);
+  stubFetch(url => (isSite(url) ? { body: sitePricingResponse(), delayMs: 5_000 } : { throws: true }));
+
+  const result = await fetchComputeInstances("us-east");
+
+  assert.equal(result.provenance.tier, 2, "the fallback itself is correct behaviour and stays");
+  // The part that was missing. "Unreachable" is equally true of a dead host and
+  // of a budget that is simply too short, and those need opposite fixes.
+  assert.match(
+    result.provenance.fallbackReason ?? "",
+    /^timeout/,
+    "a fallback must name which failure it absorbed, not just that it absorbed one",
+  );
+  assert.match(result.provenance.fallbackReason ?? "", /300ms budget/, "and the budget it gave up on");
+});
+
+test("each failure mode is classified distinctly, not flattened to 'unreachable'", async (t) => {
+  t.after(restoreFetch);
+
+  const cases: [string, ReturnType<Responder>, RegExp][] = [
+    ["a non-2xx status", { status: 503 }, /^http-status.*status=503/],
+    ["a dead host", { throws: true }, /^transport/],
+    ["HTML where JSON was promised", { badJson: true }, /^parse/],
+    ["valid JSON that is not an object", { body: 42 }, /^not-object/],
+    ["a 200 whose catalogue collapsed", { body: { instances: [], meta: {} } }, /^guard/],
+  ];
+
+  for (const [name, response, expected] of cases) {
+    reset();
+    stubFetch(url => (isSite(url) ? response : { throws: true }));
+    const result = await fetchComputeInstances("us-east");
+
+    assert.equal(result.provenance.tier, 2, `${name}: still falls back`);
+    assert.match(result.provenance.fallbackReason ?? "", expected, `${name}: classified wrongly`);
+  }
+});
+
+test("a timeout is told apart from a connection failure", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  // Both surface as a rejected fetch; only one means "upstream is alive but
+  // slower than we waited", and only that one is fixed by waiting longer.
+  stubFetch(() => ({ delayMs: 5_000 }));
+  await assert.rejects(
+    () => fetchOptimtokenJson("api/pricing", { timeoutMs: 200 }),
+    (error: unknown) => {
+      assert.ok(error instanceof UpstreamFetchError);
+      assert.equal(error.kind, "timeout");
+      assert.ok(error.elapsedMs >= 150, "a timeout must report how long it actually waited");
+      return true;
+    },
+  );
+
+  reset();
+  stubFetch(() => ({ throws: true }));
+  await assert.rejects(
+    () => fetchOptimtokenJson("api/pricing", { timeoutMs: 5_000 }),
+    (error: unknown) => {
+      assert.ok(error instanceof UpstreamFetchError);
+      assert.equal(error.kind, "transport", "a reset connection is not a timeout");
+      return true;
+    },
+  );
+});
+
+// ── Tier 2 filters it cannot honour ─────────────────────────────────
+
+test("tier 2 names the filters it accepted but could not apply", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(() => ({ throws: true }));
+
+  const { provenance } = await fetchComputeInstances("asia-pacific");
+
+  // A consumer reading `instances` sees a well-formed array and no sign that
+  // the region it asked for was dropped on the floor. The prose notice does say
+  // so, but a narrow query returning `[]` is exactly the case where nobody
+  // reads the prose.
+  assert.deepEqual(provenance.unappliedFilters, ["region"]);
+  assert.equal(provenance.catalogueIsSubset, true, "137 rows against ~5,800 is a subset, and must say so");
+  assert.equal(provenance.region, "asia-pacific", "what was asked for is still reported");
+});
+
+test("tier 1 claims no unapplied filters", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: sitePricingResponse() } : { throws: true }));
+
+  const { provenance } = await fetchComputeInstances("europe");
+
+  assert.equal(provenance.unappliedFilters, undefined);
+  assert.equal(provenance.catalogueIsSubset, undefined);
+});
+
+// ── Serving stale beats making someone wait 50s ──────────────────────
+
+test("a stale memo answers immediately and refreshes behind the caller", async (t) => {
+  t.after(restoreFetch);
+  reset();
+
+  const stale = {
+    instances: [{ provider: "AWS" as const, instanceType: "m7i.large", os: "Linux" as const, vCPUs: 2, memory: 8,
+      onDemandHourly: 0.1, onDemandMonthly: 73, spot: null, savingsPlan1yr: null,
+      savingsPlan3yr: null, reserved1yr: null, reserved3yr: null }],
+    source: "optimtoken" as const,
+    provenance: {
+      tier: 1 as const, source: "optimtoken" as const, label: "stale entry", region: "us-east" as const,
+      staticPriceColumns: [], unavailablePriceColumns: [],
+    },
+  };
+  // Older than the 60-minute TTL, well inside the 12-hour stale window.
+  primeComputePricingCache("us-east", stale, Date.now() - 2 * 60 * 60 * 1000);
+
+  let refreshStarted = false;
+  stubFetch(url => {
+    if (isSite(url)) { refreshStarted = true; return { body: sitePricingResponse(), delayMs: 50 }; }
+    return { throws: true };
+  });
+
+  const result = await fetchComputeInstances("us-east");
+
+  // An hour-old compute list price is almost certainly still right — these move
+  // on a scale of weeks — and is unambiguously better than a snapshot from a
+  // different month. Making the caller wait 50s for the refresh is the worse
+  // trade, so the refresh happens behind them.
+  assert.equal(result.provenance.tier, 1);
+  assert.equal(result.provenance.label, "stale entry", "the memo answered, not a fresh fetch");
+  assert.ok(
+    (result.provenance.servedFromCacheAgeMs ?? 0) > 60 * 60 * 1000,
+    "serving a stale entry must be visible in provenance, not silent",
+  );
+  assert.ok(refreshStarted, "a stale read must trigger the background refresh");
 });
