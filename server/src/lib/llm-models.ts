@@ -12,10 +12,19 @@ import { llmModels, dataLastUpdated } from "../data/pricing-data.js";
 import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.js";
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
 import { opennessOf } from "./openness.js";
+import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
 
-export type ModelSource = "openrouter" | "static-fallback";
+/**
+ * Which tier of the fallback chain served the response.
+ *
+ * `"openrouter"` and `"static-fallback"` keep the exact meaning they have
+ * always had — direct OpenRouter, and the frozen snapshot — so the widgets'
+ * `source === "static-fallback"` check and anything downstream reading this
+ * field keep working. `"optimtoken"` is the new preferred tier.
+ */
+export type ModelSource = "optimtoken" | "openrouter" | "static-fallback";
 
 interface OpenRouterModel {
   id: string;
@@ -392,6 +401,13 @@ const LICENSE_PREFIXES: [string, string][] = [
   ["anthropic/", "Proprietary"],
   ["google/gemini", "Proprietary"],
   ["google/gemma", "Gemma"],
+  // Longest-prefix-first: Llama 4 carries its own licence string, which the
+  // site emits and ./openness.ts buckets separately. Leaving these to the
+  // meta-llama/ catch-all would label them "Llama 3.x" here and "Llama 4" on
+  // the site — the exact kind of same-model-two-answers drift this file warns
+  // about at the top.
+  ["meta-llama/llama-4", "Llama 4"],
+  ["meta-llama/llama-guard-4", "Llama 4"],
   ["meta-llama/", "Llama 3.x"],
   ["deepseek/", "Apache 2.0"],
   ["mistralai/mistral-nemo", "Apache 2.0"],
@@ -662,12 +678,65 @@ const MIN_PLAUSIBLE_CATALOGUE = 80;
 /** Upstream must answer within this, well inside the platform's own ceiling. */
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
-/** How long a successful catalogue is reused before we ask OpenRouter again. */
+/** How long a successful catalogue is reused before we ask upstream again. */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
 // Best-effort only: on Alpic's serverless runtime this survives just as long as
 // the warm instance does, and a cold start simply refetches.
-let cache: { data: LLMModel[]; fetchedAt: number } | null = null;
+let cache: { result: LLMFetchResult; fetchedAt: number } | null = null;
+
+/** Drop the memo. Tests drive the tiers by stubbing fetch, so they need to be
+ *  able to ask again rather than get the previous tier's answer back. */
+export function resetLLMModelCache(): void {
+  cache = null;
+}
+
+/**
+ * Where a set of prices came from, and whether anyone has checked them.
+ *
+ * This is the whole point of preferring the site: OpenRouter intermittently
+ * publishes a model at exactly half its vendor's list rate across every price
+ * field at once, and the corrections for that live in the site's
+ * PRICE_OVERRIDES table, verified against the vendors' own pricing pages. A
+ * response that fell back past the site is serving uncorrected figures, and has
+ * to say so — a silent downgrade of correctness is worse than an outage,
+ * because the caller quotes the number either way.
+ */
+export interface LLMProvenance {
+  /** 1 = site API, 2 = direct OpenRouter, 3 = static snapshot. */
+  tier: 1 | 2 | 3;
+  source: ModelSource;
+  /** One-line human description of the tier that served. */
+  label: string;
+  /** True only on tier 1, where the site's price corrections have been applied. */
+  pricesVerified: boolean;
+  /** When upstream assembled the data it served (site `meta.timestamp`). */
+  upstreamTimestamp?: string;
+  /** The site's own liveness flag: "openrouter" when live, "error" when it fell
+   *  back to its own static data. */
+  upstreamSource?: string;
+  upstreamSchemaVersion?: string;
+  /** Catalogue size upstream reports, before our filters. */
+  catalogTotal?: number;
+  eloAsOf: string;
+  dataAsOf?: string;
+  /** Loud warning when the prices are not the site's corrected ones. */
+  notice?: string;
+}
+
+export interface LLMFetchResult {
+  models: LLMModel[];
+  source: ModelSource;
+  eloAsOf: string;
+  dataAsOf?: string;
+  provenance: LLMProvenance;
+}
+
+const UNVERIFIED_PRICING_NOTICE =
+  "UNVERIFIED PRICING: these figures come straight from OpenRouter and have NOT " +
+  "been through optimtoken.optimnow.io's price corrections. OpenRouter " +
+  "intermittently publishes a model at exactly half its vendor's list rate on " +
+  "every field at once. Treat these as unverified upstream figures.";
 
 /** The static snapshot, run through the same pricing guard as live data. */
 function staticFallback(): LLMModel[] {
@@ -676,16 +745,123 @@ function staticFallback(): LLMModel[] {
   );
 }
 
-export async function fetchLLMModels(): Promise<{
-  models: LLMModel[];
-  source: ModelSource;
-  eloAsOf: string;
-  dataAsOf?: string;
-}> {
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
-    return { models: cache.data, source: "openrouter", eloAsOf: ELO_AS_OF };
+// ── Tier 1: the site API ────────────────────────────────────────────
+
+interface SiteModelsResponse {
+  models?: unknown;
+  meta?: {
+    schemaVersion?: string;
+    total?: number;
+    catalogTotal?: number;
+    source?: string;
+    timestamp?: string;
+    eloAsOf?: string;
+  };
+}
+
+/**
+ * Validate one row from the site.
+ *
+ * The site's schema is the same shape as `LLMModel`, but "same shape today" is
+ * not a guarantee, and a row that silently loses its prices would serve a $0
+ * model. Anything that fails here is dropped rather than coerced; if enough
+ * rows drop, the catalogue floor below hands over to the next tier.
+ */
+function coerceSiteModel(row: unknown): LLMModel | null {
+  if (row === null || typeof row !== "object") return null;
+  const m = row as Record<string, unknown>;
+
+  if (typeof m.provider !== "string" || !m.provider) return null;
+  if (typeof m.model !== "string" || !m.model) return null;
+  if (typeof m.inputPricePer1M !== "number" || typeof m.outputPricePer1M !== "number") return null;
+  if (!hasPublishableTokenPricing(m.inputPricePer1M, m.outputPricePer1M)) return null;
+
+  const optionalNumber = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+  return {
+    provider: m.provider,
+    model: m.model,
+    parameters: typeof m.parameters === "string" ? m.parameters : undefined,
+    inputPricePer1M: m.inputPricePer1M,
+    outputPricePer1M: m.outputPricePer1M,
+    batchInputPricePer1M: optionalNumber(m.batchInputPricePer1M),
+    batchOutputPricePer1M: optionalNumber(m.batchOutputPricePer1M),
+    cachedInputPricePer1M: optionalNumber(m.cachedInputPricePer1M),
+    contextWindow: typeof m.contextWindow === "string" ? m.contextWindow : "",
+    // The site owns the taxonomy: its `category` is the price tier
+    // (Frontier | Mid-tier | Budget | Image) and its `license` drives our
+    // openness axis. Neither is re-derived here — deriving it locally is what
+    // put a retired "Open Weights" category and an unrecognised "Llama 4"
+    // licence into this repo in the first place.
+    category: (typeof m.category === "string" ? m.category : "Budget") as LLMCategory,
+    capabilities: Array.isArray(m.capabilities)
+      ? (m.capabilities.filter((c): c is LLMCapability => typeof c === "string") as LLMCapability[])
+      : [],
+    releaseDate: typeof m.releaseDate === "string" ? m.releaseDate : undefined,
+    eloScore: optionalNumber(m.eloScore),
+    license: typeof m.license === "string" ? m.license : undefined,
+  };
+}
+
+async function fetchFromSite(): Promise<LLMFetchResult> {
+  const payload = await fetchOptimtokenJson<SiteModelsResponse>("api/llm-models", {
+    timeoutMs: UPSTREAM_TIMEOUT_MS,
+  });
+
+  if (!Array.isArray(payload.models)) {
+    throw new Error(
+      `Site payload had no "models" array (saw ${typeof payload.models}). Refusing to serve an empty catalogue.`,
+    );
   }
 
+  const meta = payload.meta ?? {};
+
+  // The site's refresh scripts abort unless meta.source says "openrouter";
+  // anything else means the site is itself serving its own static fallback, so
+  // it is no more authoritative than our tier 2 and carries no fresh
+  // corrections. Treat it as a tier-1 failure rather than pass it off as live.
+  if (meta.source !== "openrouter") {
+    throw new Error(
+      `Site reported meta.source="${meta.source ?? "undefined"}" rather than "openrouter" — it is serving its own fallback, not live corrected data.`,
+    );
+  }
+
+  const models = sortModels(
+    (payload.models as unknown[]).map(coerceSiteModel).filter((m): m is LLMModel => m !== null),
+  );
+
+  if (models.length < MIN_PLAUSIBLE_CATALOGUE) {
+    throw new Error(
+      `Only ${models.length} models survived validation (minimum ${MIN_PLAUSIBLE_CATALOGUE}) out of ${(payload.models as unknown[]).length} site entries.`,
+    );
+  }
+
+  // The site publishes the ELO vintage it actually used; prefer it over our
+  // local constant, which only describes the tier-2 enrichment table.
+  const eloAsOf = typeof meta.eloAsOf === "string" && meta.eloAsOf ? meta.eloAsOf : ELO_AS_OF;
+
+  return {
+    models,
+    source: "optimtoken",
+    eloAsOf,
+    provenance: {
+      tier: 1,
+      source: "optimtoken",
+      label: `optimtoken.optimnow.io (${OPTIMTOKEN_BASE_URL}) — price-corrected`,
+      pricesVerified: true,
+      upstreamTimestamp: meta.timestamp,
+      upstreamSource: meta.source,
+      upstreamSchemaVersion: meta.schemaVersion,
+      catalogTotal: typeof meta.catalogTotal === "number" ? meta.catalogTotal : undefined,
+      eloAsOf,
+    },
+  };
+}
+
+// ── Tier 2: direct OpenRouter (kept — a working second tier) ─────────
+
+async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
@@ -715,18 +891,77 @@ export async function fetchLLMModels(): Promise<{
       );
     }
 
-    cache = { data: models, fetchedAt: Date.now() };
-    return { models, source: "openrouter", eloAsOf: ELO_AS_OF };
-  } catch (error) {
-    console.error("[llm-models] OpenRouter fetch failed, serving static snapshot:", error);
     return {
-      models: staticFallback(),
-      source: "static-fallback",
+      models,
+      source: "openrouter",
       eloAsOf: ELO_AS_OF,
-      dataAsOf: dataLastUpdated,
+      provenance: {
+        tier: 2,
+        source: "openrouter",
+        label: "openrouter.ai direct — list prices as published, uncorrected",
+        pricesVerified: false,
+        eloAsOf: ELO_AS_OF,
+        notice: UNVERIFIED_PRICING_NOTICE,
+      },
     };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// ── Tier 3: the frozen snapshot ─────────────────────────────────────
+
+function fetchFromSnapshot(): LLMFetchResult {
+  return {
+    models: staticFallback(),
+    source: "static-fallback",
+    eloAsOf: ELO_AS_OF,
+    dataAsOf: dataLastUpdated,
+    provenance: {
+      tier: 3,
+      source: "static-fallback",
+      label: `static snapshot committed ${dataLastUpdated} — no network`,
+      pricesVerified: false,
+      eloAsOf: ELO_AS_OF,
+      dataAsOf: dataLastUpdated,
+      notice:
+        `STALE PRICING: both live sources were unreachable, so these figures come from a ` +
+        `snapshot taken on ${dataLastUpdated} and may be out of date.`,
+    },
+  };
+}
+
+/**
+ * Fetch the model catalogue, degrading site -> direct OpenRouter -> snapshot.
+ *
+ * Every tier reports what it is in `provenance`, and the two lower tiers carry
+ * an explicit notice that their prices are unverified. A caller instructed to
+ * report prices exactly as returned must be able to tell corrected figures from
+ * uncorrected ones.
+ */
+export async function fetchLLMModels(): Promise<LLMFetchResult> {
+  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
+    return cache.result;
+  }
+
+  try {
+    const result = await fetchFromSite();
+    cache = { result, fetchedAt: Date.now() };
+    return result;
+  } catch (siteError) {
+    console.error("[llm-models] site API failed, falling back to direct OpenRouter:", siteError);
+
+    try {
+      const result = await fetchFromOpenRouter();
+      cache = { result, fetchedAt: Date.now() };
+      return result;
+    } catch (openRouterError) {
+      console.error("[llm-models] OpenRouter fetch failed, serving static snapshot:", openRouterError);
+      // Deliberately not cached: the snapshot is the answer of last resort, and
+      // memoising it would keep serving stale data for the full TTL after the
+      // network recovered.
+      return fetchFromSnapshot();
+    }
   }
 }
 

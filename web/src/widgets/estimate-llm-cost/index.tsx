@@ -30,6 +30,14 @@ interface EstimateOutput {
   source: string;
   eloAsOf: string;
   dataAsOf?: string;
+  provenance?: {
+    tier: number;
+    label: string;
+    /** False whenever the site's price corrections were not applied. */
+    pricesVerified: boolean;
+    upstreamTimestamp?: string;
+    notice?: string;
+  };
   error?: string;
 }
 
@@ -55,7 +63,7 @@ function EstimateCost() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Estimating costs...</div>;
   }
 
-  const { modelCosts, volume, source, eloAsOf, dataAsOf, error } = output as unknown as EstimateOutput;
+  const { modelCosts, volume, source, eloAsOf, dataAsOf, provenance, error } = output as unknown as EstimateOutput;
 
   if (error) {
     return <ErrorCard message={error} />;
@@ -70,6 +78,14 @@ function EstimateCost() {
         {modelCosts.length} model(s) · {volume.toLocaleString()} requests/month
         {eloAsOf && <Badge label={`ELO as of ${eloAsOf}`} />}
         {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
+        {/* Every figure on this card is derived from the prices below, so an
+            uncorrected price silently halves the whole monthly estimate. */}
+        {provenance && !provenance.pricesVerified && source !== "static-fallback" && (
+          <Badge label="unverified prices — not price-corrected" warn />
+        )}
+        {provenance?.upstreamTimestamp && (
+          <Badge label={`data as of ${provenance.upstreamTimestamp.slice(0, 10)}`} />
+        )}
       </p>
 
       {modelCosts.length === 0 ? (

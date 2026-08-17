@@ -18,8 +18,14 @@ import {
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
 import type { UseCaseProfile, VolumePreset } from "./lib/llm-business-metrics.js";
-import { computeInstances } from "./data/pricing-data.js";
 import { enrichInstances } from "./lib/compute-categories.js";
+import { outputSchema } from "./lib/output-schema.js";
+import {
+  PRICING_REGIONS,
+  DEFAULT_PRICING_REGION,
+  fetchComputeInstances,
+} from "./lib/compute-pricing.js";
+import type { PricingRegion } from "./lib/compute-pricing.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
 // Mirror the structuredContent each tool returns, error paths included, so the
@@ -54,6 +60,50 @@ const enrichedModelSchema = z.object({
   isFinOpsFriendly: z.boolean(),
 });
 
+/**
+ * Where the figures came from and whether anyone has checked them.
+ *
+ * Added because a caller had no way to date a number it was being told to quote
+ * verbatim. `pricesVerified` is the load-bearing field: it is true only when
+ * optimtoken.optimnow.io served the response, which is the only tier where the
+ * vendor-verified price corrections have been applied.
+ */
+const llmProvenanceSchema = z.object({
+  tier: z.number(),
+  source: z.string(),
+  label: z.string(),
+  pricesVerified: z.boolean(),
+  upstreamTimestamp: z.string().optional(),
+  upstreamSource: z.string().optional(),
+  upstreamSchemaVersion: z.string().optional(),
+  catalogTotal: z.number().optional(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  notice: z.string().optional(),
+});
+
+/** As above, plus the per-provider and per-column detail only compute has.
+ *  `staticPriceColumns` is `priceTypes` pre-walked: the columns served from
+ *  constants rather than a live provider API, which is the distinction that
+ *  decides whether a commitment-rate comparison can be audited. */
+const computeProvenanceSchema = z.object({
+  tier: z.number(),
+  source: z.string(),
+  label: z.string(),
+  region: z.string(),
+  upstreamTimestamp: z.string().optional(),
+  upstreamSchemaVersion: z.string().optional(),
+  catalogTotal: z.number().optional(),
+  sources: z.record(z.string(), z.string()).optional(),
+  sourceRegions: z.record(z.string(), z.string()).optional(),
+  priceTypes: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+  staticPriceColumns: z.array(z.string()),
+  unavailablePriceColumns: z.array(z.string()),
+  upstreamErrors: z.array(z.string()).optional(),
+  dataAsOf: z.string().optional(),
+  notice: z.string().optional(),
+});
+
 const compareModelsOutputSchema = {
   models: z.array(enrichedModelSchema),
   useCaseLabel: z.string(),
@@ -73,6 +123,7 @@ const compareModelsOutputSchema = {
       maxBlendedPrice: z.number().nullable(),
     })
     .optional(),
+  provenance: llmProvenanceSchema.optional(),
   error: z.string().optional(),
 };
 
@@ -97,6 +148,7 @@ const estimateCostOutputSchema = {
   source: z.string(),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
+  provenance: llmProvenanceSchema.optional(),
   error: z.string().optional(),
 };
 
@@ -122,6 +174,8 @@ const computePricingOutputSchema = {
   ),
   matchingCount: z.number(),
   catalogSize: z.number(),
+  source: z.string(),
+  provenance: computeProvenanceSchema.optional(),
   error: z.string().optional(),
 };
 
@@ -167,7 +221,7 @@ const server = new McpServer(
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
     },
-    outputSchema: compareModelsOutputSchema,
+    outputSchema: outputSchema(compareModelsOutputSchema),
   },
   async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, limit }) => {
     const emptyOutput = {
@@ -181,7 +235,7 @@ const server = new McpServer(
     };
 
     try {
-      const { models: allModels, source, eloAsOf, dataAsOf } = await fetchLLMModels();
+      const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
         return {
@@ -240,6 +294,7 @@ const server = new McpServer(
           catalogSize: allModels.length,
           eloAsOf,
           dataAsOf,
+          provenance,
           // maxBlendedPrice is derived (input×0.3 + output×0.7), so it carries
           // the same float noise the costs did — just less visibly, since only
           // one value surfaces per call.
@@ -251,7 +306,12 @@ const server = new McpServer(
         content: [
           {
             type: "text",
-            text: `${filtered.length} of ${allModels.length} models match (showing top ${results.length}). ` +
+            // The notice leads: a caller told to report prices exactly as
+            // returned must see "unverified" before it sees the prices.
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              `${filtered.length} of ${allModels.length} models match (showing top ${results.length}). ` +
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
               `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
@@ -295,14 +355,14 @@ const server = new McpServer(
       customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request (overrides preset)"),
       monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Custom monthly volume (default: 100,000)"),
     },
-    outputSchema: estimateCostOutputSchema,
+    outputSchema: outputSchema(estimateCostOutputSchema),
   },
   async ({ modelName, useCasePreset, customInputTokens, customOutputTokens, monthlyVolume }) => {
     const volume = monthlyVolume || 100_000;
     const emptyOutput = { modelCosts: [], volume, source: "error", eloAsOf: "" };
 
     try {
-      const { models: allModels, source, eloAsOf, dataAsOf } = await fetchLLMModels();
+      const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
         return {
@@ -326,6 +386,7 @@ const server = new McpServer(
               source,
               eloAsOf,
               dataAsOf,
+              provenance,
               error: `No models found matching "${modelName}".`,
             },
             content: [{ type: "text", text: `No models found matching "${modelName}".` }],
@@ -414,11 +475,15 @@ const server = new McpServer(
           source,
           eloAsOf,
           dataAsOf,
+          provenance,
         },
         content: [
           {
             type: "text",
-            text: `Cost estimates for ${targetModels.length} model(s) at ${volume.toLocaleString()} requests/month:\n\n` + lines.join("\n\n"),
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n\n` +
+              `Cost estimates for ${targetModels.length} model(s) at ${volume.toLocaleString()} requests/month:\n\n` + lines.join("\n\n"),
           },
         ],
         isError: false,
@@ -446,10 +511,15 @@ const server = new McpServer(
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
-      "Filter by provider, vCPUs, memory, category, processor, or use case. " +
+      "Filter by region, provider, vCPUs, memory, category, processor, or use case. " +
       "All prices are Linux on-demand list prices in USD. " +
+      "Not every price column is live: `provenance.priceTypes` says which of each provider's price " +
+      "columns come from a live API, which are static constants, and which are unavailable, and " +
+      "`provenance.staticPriceColumns` lists the non-live ones outright. When you report a savings " +
+      "plan or reserved rate that appears there, say that it is a static estimate. " +
       "IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
+      region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
       provider: z.string().optional().describe("Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba"),
       category: z.string().optional().describe("Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable"),
       minVCPUs: z.number().optional().describe("Minimum number of vCPUs"),
@@ -461,11 +531,22 @@ const server = new McpServer(
       sortBy: z.enum(["price", "vcpus", "memory", "pricePerVCPU"]).optional().describe("Sort by: price, vcpus, memory, pricePerVCPU. Default: price"),
       limit: z.number().min(1).max(50).optional().describe("Max instances to return (default: 20)"),
     },
-    outputSchema: computePricingOutputSchema,
+    outputSchema: outputSchema(computePricingOutputSchema),
   },
-  async ({ provider, category, minVCPUs, maxVCPUs, minMemory, maxMemory, processor, useCase, sortBy, limit }) => {
+  async ({ region, provider, category, minVCPUs, maxVCPUs, minMemory, maxMemory, processor, useCase, sortBy, limit }) => {
+    // Matches the other two tools: the shape returned when nothing upstream was
+    // reached, so there is no provenance to report.
+    const emptyOutput = { instances: [], matchingCount: 0, catalogSize: 0, source: "error" };
+
     try {
-      const enriched = enrichInstances(computeInstances);
+      // The whole regional catalogue, filtered here rather than upstream: the
+      // site caches per query string, so narrowing the URL would trade a warm
+      // edge hit for a cold rebuild — and "the 20 cheapest matches" is only
+      // correct when computed over everything.
+      const { instances: catalogue, source, provenance } = await fetchComputeInstances(
+        (region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION,
+      );
+      const enriched = enrichInstances(catalogue);
 
       const filtered = enriched.filter(inst => {
         if (provider && inst.provider.toLowerCase() !== provider.toLowerCase()) return false;
@@ -510,11 +591,19 @@ const server = new McpServer(
           instances: results,
           matchingCount: filtered.length,
           catalogSize: enriched.length,
+          source,
+          provenance,
         },
         content: [
           {
             type: "text",
-            text: `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              (provenance.unavailablePriceColumns.length
+                ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
+                : "") +
+              `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
               `Linux on-demand list prices.\n\n` + lines.join("\n"),
           },
         ],
@@ -524,7 +613,7 @@ const server = new McpServer(
       const message = errorMessage(error);
       console.error("[compare-compute-pricing] failed:", error);
       return {
-        structuredContent: { instances: [], matchingCount: 0, catalogSize: 0, error: message },
+        structuredContent: { ...emptyOutput, error: message },
         content: [{ type: "text", text: `Error comparing compute pricing: ${message}` }],
         isError: true,
       };

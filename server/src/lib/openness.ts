@@ -31,6 +31,13 @@ const OPEN_SOURCE_LICENSES = new Set(["Apache 2.0", "MIT"]);
  *  requirement. Self-hostable, but the terms need reading before production. */
 const OPEN_WEIGHTS_LICENSES = new Set([
   "Llama 3.x",
+  // Meta split the Llama licence line: the site now labels Llama 4 models
+  // "Llama 4", distinct from "Llama 3.x". Both publish weights under an
+  // acceptable-use policy plus a monthly-active-user threshold, so both land in
+  // the same bucket — but the *string* is new, and an unrecognised string falls
+  // through to "Unknown". Before this entry, asking the site for its catalogue
+  // reported Llama 4 Maverick, Scout and Guard as unknown-licence.
+  "Llama 4",
   "Gemma",
   "Qwen",
   "Mistral",
