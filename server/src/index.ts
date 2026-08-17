@@ -100,6 +100,14 @@ const computeProvenanceSchema = z.object({
   staticPriceColumns: z.array(z.string()),
   unavailablePriceColumns: z.array(z.string()),
   upstreamErrors: z.array(z.string()).optional(),
+  // Tier-2 diagnostics. `fallbackReason` says why tier 1 was missed, classified
+  // and timed; `unappliedFilters` names the arguments this tier accepted and
+  // then could not honour, so a consumer reading only `instances` is not left
+  // to infer that from an empty array.
+  fallbackReason: z.string().optional(),
+  unappliedFilters: z.array(z.string()).optional(),
+  catalogueIsSubset: z.boolean().optional(),
+  servedFromCacheAgeMs: z.number().optional(),
   dataAsOf: z.string().optional(),
   notice: z.string().optional(),
 });
@@ -577,6 +585,19 @@ const server = new McpServer(
       const maxCount = limit || 20;
       const results = filtered.slice(0, maxCount);
 
+      // On tier 2 the catalogue is a 137-row subset with no region dimension,
+      // so a narrow query ("cheapest AWS GPU instances") can come back empty
+      // purely as an artefact of the fallback. The provenance notice says so in
+      // prose, which a consumer reading `instances` alone never sees — and an
+      // empty array is exactly the case where it most needs saying.
+      const unapplied = provenance.unappliedFilters ?? [];
+      const subsetCaveat =
+        provenance.tier === 2 && filtered.length === 0
+          ? `\nNOTE: this is the ${enriched.length}-row static snapshot, not the ~5,800-instance ` +
+            `live catalogue, so "no match" here does not mean no such instance exists.` +
+            (unapplied.length ? ` Filters accepted but NOT applied: ${unapplied.join(", ")}.` : "")
+          : "";
+
       // Build text summary
       const lines = results.map((inst, i) =>
         `${i + 1}. ${inst.provider} ${inst.instanceType} — ` +
@@ -604,7 +625,7 @@ const server = new McpServer(
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
                 : "") +
               `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
-              `Linux on-demand list prices.\n\n` + lines.join("\n"),
+              `Linux on-demand list prices.${subsetCaveat}\n\n` + lines.join("\n"),
           },
         ],
         isError: false,
