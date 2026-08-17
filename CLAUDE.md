@@ -11,7 +11,7 @@
 
 An MCP (Model Context Protocol) app that provides AI/LLM model comparison, cost estimation, and cloud compute pricing tools as interactive widgets inside AI conversations (Claude, ChatGPT, VS Code, Goose). Built with Skybridge framework.
 
-**Origin:** Business logic copied from the standalone web app [cloud-sparkle-compare](https://github.com/jlati/cloud-sparkle-compare) (private). The original app remains untouched.
+**Origin:** Business logic copied from the standalone web app `cloud-sparkle-compare` (private). Note the local checkout name does not match its remote: it pushes to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (default branch `main`), while this repo is [OptimNow/ai-pricing-hub-mcp](https://github.com/OptimNow/ai-pricing-hub-mcp) (default branch `master`).
 
 ---
 
@@ -23,7 +23,7 @@ Language:     TypeScript
 Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
 Deployment:   Alpic Cloud
-Transport:    SSE (Server-Sent Events) at root URL /
+Transport:    streamable-http at root URL / (per server.json `remotes[].type`)
 Data:         optimtoken.optimnow.io API (source of truth)
               → direct OpenRouter (LLM only, uncorrected)
               → static fallback in data/pricing-data.ts
@@ -45,7 +45,11 @@ second host.
 | Tool | Tier 1 | Tier 2 | Tier 3 |
 |---|---|---|---|
 | LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
-| Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
+| Compute tool | `GET /api/pricing?region=` | static snapshot (137 rows) | — |
+
+The compute chain has **two** tiers, not three — there is no direct-provider
+equivalent of OpenRouter — so its snapshot is `provenance.tier === 2`, matching
+what `fetchFromSnapshot()` sets in `lib/compute-pricing.ts`.
 
 **Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
 published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
@@ -64,33 +68,47 @@ ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
 │       ├── index.ts                  # MCP server — 3 tool/widget definitions
+│       ├── serialisation-contract.test.ts # structuredContent shape + rounding contract
 │       ├── lib/
-│       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
+│       │   ├── optimtoken-api.ts     # Base URL constant, shared fetch, failure classification
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch + ELO enrichment
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
-│       │   └── compute-categories.ts  # Compute instance categorization + enrichment
+│       │   ├── compute-categories.ts # Compute instance categorization + enrichment
+│       │   ├── data-sources.test.ts  # Fallback-chain tiers, timeouts, provenance
+│       │   ├── llm-business-metrics.test.ts
+│       │   └── output-schema.test.ts
 │       └── data/
 │           ├── pricing-data.ts       # Static fallback LLM pricing + compute instances
 │           └── region-api-map.ts     # Cloud region mappings
 ├── web/
-│   └── src/
-│       ├── helpers.ts                # Skybridge widget helpers
-│       ├── index.css                 # Widget styles
-│       └── widgets/
-│           ├── compare-llm-models/
-│           │   └── index.tsx         # Model comparison table widget
-│           ├── estimate-llm-cost/
-│           │   └── index.tsx         # Cost estimation cards widget
-│           └── compare-compute-pricing/
-│               └── index.tsx         # Compute pricing table widget
+│   ├── src/
+│   │   ├── helpers.ts                # Skybridge widget helpers
+│   │   ├── index.css                 # Widget styles
+│   │   └── widgets/
+│   │       ├── compare-llm-models/
+│   │       │   └── index.tsx         # Model comparison table widget
+│   │       ├── estimate-llm-cost/
+│   │       │   └── index.tsx         # Cost estimation cards widget
+│   │       └── compare-compute-pricing/
+│   │           └── index.tsx         # Compute pricing table widget
+│   └── vite.config.ts                # Skybridge Vite plugin (widget build — NOT at repo root)
+├── scripts/
+│   ├── refresh-llm-fallback.mjs      # Re-snapshots the static LLM list (npm run refresh-fallback)
+│   └── check-serialisation-precision.mjs
+├── docs/
+│   ├── chatgpt-app-migration.md
+│   └── chatgpt-app-smoke-tests.md
+├── .github/workflows/ci.yml          # typecheck → test → build, on PR and push to master
 ├── alpic.json                        # Alpic deployment config
+├── app.json                          # Connector manifest — bound to structuredContent shape
+├── server.json                       # MCP registry manifest
 ├── package.json
-├── tsconfig.json
-└── vite.config.ts                    # Skybridge Vite plugin
+├── tsconfig.json                     # Build config — excludes *.test.ts
+└── tsconfig.test.json                # Type-checks the tests, noEmit
 ```
 
 ---
@@ -113,8 +131,8 @@ ai-pricing-hub-mcp/
 ### Tool 3: `compare-compute-pricing`
 - **Type:** Widget (has UI)
 - **Input:** `region` (us-east | us-west | europe | asia-pacific, default us-east) plus filters (provider, vCPUs, memory, category, processor, use case, sort). No OS filter: the tool serves Linux only, and the upstream Windows rows are filtered out.
-- **Output:** Filtered cloud compute instance comparison across 7 providers, plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable
-- **Data Source:** `GET /api/pricing` (~6,000 instances) with the 137-row static array as fallback only
+- **Output:** Filtered cloud compute instance comparison across 7 providers, plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable. On tier 2 it also carries `fallbackReason` (the classified upstream failure, with elapsed time), `unappliedFilters` (`["region"]` — the snapshot has no region dimension) and `catalogueIsSubset`.
+- **Data Source:** `GET /api/pricing` — ~4,800–6,000 instances depending on region (us-east ~6,050, asia-pacific ~4,800) — with the 137-row static array as fallback only
 - **Widget:** Compute pricing table
 
 ---
@@ -124,17 +142,34 @@ ai-pricing-hub-mcp/
 ```bash
 npm install
 npm run dev        # Skybridge dev server with DevTools emulator (port 3000)
+npm run typecheck  # tsc on server+widgets, then on the tests separately
+npm test           # node --test over server/src/**/*.test.ts — offline, no server
 npm run build      # Production build
 npm run start      # Start production server
 ```
 
+`.github/workflows/ci.yml` runs `typecheck` → `test` → `build` on every PR and on
+push to `master`, on Node 24 to match the `engines` field. Run all three locally
+before pushing; the tests are deterministic and need no network.
+
 ### Deployment
 
 ```bash
-npx alpic deploy --yes --project-name ai-pricing-hub-mcp
+npx alpic deploy
 ```
 
-Deploys to Alpic Cloud. SSE endpoint is served at root `/`.
+Deploys to Alpic Cloud. The MCP endpoint is served at root `/`, registered as
+`streamable-http` in `server.json`.
+
+`.alpic/project.json` already links this checkout to project `ai-pricing-hub-mcp`
+/ environment **Production**, so a bare `alpic deploy` targets prod — run it
+without `--yes` and read the confirmation. Do **not** pass `--project-name`: that
+flag names a *new* project and will fork a second one. `npx alpic login` first if
+`npx alpic whoami` says you are not authenticated.
+
+Deploys the working directory, not a branch — so deploying from a feature branch
+ships code that is not on `master`, and a later deploy from `master` will roll it
+back.
 
 ### Connecting to Claude Desktop
 
@@ -154,10 +189,10 @@ Add to `claude_desktop_config.json`:
 2. **optimtoken.optimnow.io is the source of truth** for both LLM and compute pricing. Direct OpenRouter is kept as a working second tier for LLM models only, never as the preferred one.
 3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
 3b. **Provenance ships with every response.** `structuredContent.provenance` carries the upstream timestamp, which tier served, and — for compute — `sources`, `sourceRegions` and `priceTypes`. AWS Savings Plans and GCP CUDs are `static` upstream (us-east-1 constants scaled by a region multiplier); serving those beside live on-demand rates without saying which is which gives a FinOps answer nobody can audit. `provenance.staticPriceColumns` pre-walks `priceTypes` so the non-live columns are one field away.
-3c. **Tool `outputSchema`s must go through `outputSchema()`** in `lib/output-schema.ts`. The MCP SDK's `toJsonSchemaCompat()` defaults its target to `draft-7` (still true at SDK 1.30.0), and hosts that validate 2020-12 only — Claude Code among them — reject such a tool *before its handler runs*. Passing a pre-built JSON Schema object is not an alternative: `AnySchema` is Zod-only, so a plain object makes `normalizeObjectSchema()` return `undefined` and the schema is silently dropped.
+3c. **Tool `outputSchema`s must go through `outputSchema()`** in `lib/output-schema.ts`. The MCP SDK's `toJsonSchemaCompat()` defaults its target to `draft-7` (still true at the pinned `^1.27.1`, resolving to 1.27.1), and hosts that validate 2020-12 only — Claude Code among them — reject such a tool *before its handler runs*. Passing a pre-built JSON Schema object is not an alternative: `AnySchema` is Zod-only, so a plain object makes `normalizeObjectSchema()` return `undefined` and the schema is silently dropped.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
-6. **Compute pricing** is static data from 7 cloud providers with category enrichment
+6. **Compute pricing is live from `/api/pricing`**, ~4,800–6,000 instances across 7 providers (AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba), with `compute-categories.ts` enrichment applied locally to the site's rows. The 137-row static array is the fallback only — it was the primary source before the tier-1 switch, and describing it as the source of truth is how a silent degradation to it goes unnoticed.
 7. **Price tier and openness are separate axes.** `category` is Frontier / Mid-tier / Budget / Image and answers "what does it cost". `openness` (derived from the licence in `openness.ts`) answers "whose hardware can run it". They used to be folded together as an "Open Weights" category, which forced every open model to give up one label to earn the other — do not reintroduce it.
 8. **The FinOps Friendly badge gates on percentiles, not fixed numbers:** top 40% on ELO, top 30% on efficiency, cheapest 70% on list price, and a stable release. The tool also returns what those percentiles land on today (`finopsBadge.minElo`, `finopsBadge.maxBlendedPrice`) so the badge is auditable.
 
@@ -236,7 +271,7 @@ Each profile defines typical input/output token counts per request.
 - **The two endpoints need different timeouts, and conflating them is a shipped bug.** Measured 2026-08-17: `/api/llm-models` is 209 ms cold / 31 ms warm; `/api/pricing` is **50.5 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget, which is *shorter than the cold path always takes* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is now 55 s and guarded by a test against `MEASURED_COLD_REBUILD_MS`. Do not "tune it down" to match the LLM side.
 - **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s: an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
 - **Do not rename or drop `structuredContent` fields.** `app.json` and the `ui://widget/*` resources are bound to the current shape. Add fields; do not reshape.
-- Brand color: Chartreuse (#ACE849) for OptimNow identity
+- Brand color is Chartreuse `#ACE849` for OptimNow identity, but **the widgets do not currently use it** — `web/src/` ships a neutral grey palette with Tailwind-style accents (`#16a34a` for positive, `#6b7280` for muted). Treat the chartreuse as the target if someone brands the widgets, not as a description of what is there.
 - Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
 
 ---
@@ -249,3 +284,8 @@ Each profile defines typical input/output token counts per request.
 - `react`, `react-dom` — Widget UI rendering
 - `vite` — Build tooling
 - `alpic` — Deployment CLI (devDependency)
+- `tsx` — TypeScript loader; `npm test` runs `node --import tsx --test` (devDependency)
+- `typescript`, `@skybridge/devtools`, `@types/*` (devDependencies)
+
+Node **>= 24.14** per `engines`, matched by CI. A lower local Node still runs
+`tsx` and the tests, but do not assume it matches the deployed runtime.
