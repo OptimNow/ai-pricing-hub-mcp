@@ -22,6 +22,17 @@ interface ComputeOutput {
   instances: ComputeInstance[];
   matchingCount: number;
   catalogSize: number;
+  source?: string;
+  provenance?: {
+    tier: number;
+    label: string;
+    region: string;
+    upstreamTimestamp?: string;
+    /** "Provider.column" entries served from constants rather than a live API. */
+    staticPriceColumns: string[];
+    unavailablePriceColumns: string[];
+    notice?: string;
+  };
   error?: string;
 }
 
@@ -42,7 +53,7 @@ function ComputePricing() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading pricing...</div>;
   }
 
-  const { instances, matchingCount, catalogSize, error } = output as unknown as ComputeOutput;
+  const { instances, matchingCount, catalogSize, source, provenance, error } = output as unknown as ComputeOutput;
 
   if (error) {
     return <ErrorCard message={error} />;
@@ -66,9 +77,26 @@ function ComputePricing() {
       <h2 style={{ fontSize: "18px", fontWeight: 700, marginBottom: "4px" }}>
         Cloud Compute Pricing
       </h2>
-      <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
+      <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}>
         {matchingCount} of {catalogSize} instances match · Showing {instances.length} · Linux on-demand
+        {provenance ? ` · ${provenance.region}` : ""}
+        {provenance?.upstreamTimestamp ? ` · as of ${provenance.upstreamTimestamp.slice(0, 10)}` : ""}
       </p>
+
+      {/* The commitment columns are the ones a FinOps reader acts on, and some
+          of them are us-east-1 constants scaled by a region multiplier rather
+          than a live rate. Showing them beside live on-demand prices without
+          saying which is which is what makes an answer unauditable. */}
+      {(source === "static-fallback" || (provenance?.staticPriceColumns.length ?? 0) > 0) && (
+        <p style={{
+          fontSize: "12px", marginBottom: "16px", padding: "8px 10px",
+          background: "#fef3c7", color: "#92400e", borderRadius: "6px",
+        }}>
+          {source === "static-fallback"
+            ? provenance?.notice ?? "Serving a static snapshot — prices may be stale."
+            : `Not live, served from constants: ${provenance!.staticPriceColumns.join(", ")}.`}
+        </p>
+      )}
 
       {/* Table */}
       <div style={{ overflowX: "auto" }}>

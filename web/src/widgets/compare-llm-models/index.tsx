@@ -31,6 +31,14 @@ interface CompareOutput {
   catalogSize: number;
   eloAsOf: string;
   dataAsOf?: string;
+  provenance?: {
+    tier: number;
+    label: string;
+    /** False whenever the site's price corrections were not applied. */
+    pricesVerified: boolean;
+    upstreamTimestamp?: string;
+    notice?: string;
+  };
   finopsBadge?: {
     qualifying: number;
     ranked: number;
@@ -60,7 +68,7 @@ function CompareModels() {
     return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading models...</div>;
   }
 
-  const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, finopsBadge, error } =
+  const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, provenance, finopsBadge, error } =
     output as unknown as CompareOutput;
 
   if (error) {
@@ -76,6 +84,15 @@ function CompareModels() {
         {matchingCount} of {catalogSize} models match · Showing {models.length} · {useCaseLabel} · {volumeLabel}/mo
         <Badge label={`ELO as of ${eloAsOf}`} />
         {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
+        {/* Tier 2 is the one that looks healthy and isn't: live data, straight
+            from OpenRouter, without the site's price corrections. Without this
+            badge a half-priced model is indistinguishable from a real one. */}
+        {provenance && !provenance.pricesVerified && source !== "static-fallback" && (
+          <Badge label="unverified prices — not price-corrected" warn />
+        )}
+        {provenance?.upstreamTimestamp && (
+          <Badge label={`data as of ${provenance.upstreamTimestamp.slice(0, 10)}`} />
+        )}
       </p>
 
       {finopsBadge && finopsBadge.ranked > 0 && (

@@ -24,8 +24,38 @@ Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
 Deployment:   Alpic Cloud
 Transport:    SSE (Server-Sent Events) at root URL /
-Data:         OpenRouter API (live) + static fallback pricing data
+Data:         optimtoken.optimnow.io API (source of truth)
+              → direct OpenRouter (LLM only, uncorrected)
+              → static fallback in data/pricing-data.ts
 ```
+
+### Data sources and the fallback chain
+
+`https://optimtoken.optimnow.io` is the single source of truth for both LLM and
+compute pricing. It is the deployed face of `cloud-sparkle-compare`, and it is
+where pricing *correctness* lives: a committed price archive, a `PRICE_OVERRIDES`
+table verified against vendor pricing pages, and `scripts/check-price-anomalies.mjs`,
+which alarms on the ×0.5 / ×2.0 ratio breaks OpenRouter intermittently serves.
+This app has no archive and cannot build one, so it asks rather than re-derives.
+
+The base URL is one constant, `OPTIMTOKEN_BASE_URL` in `lib/optimtoken-api.ts`,
+overridable with the `OPTIMTOKEN_API_BASE_URL` env var. Do not hard-code a
+second host.
+
+| Tool | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|
+| LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
+| Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
+
+**Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
+published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
+derived monthly figure. Every response therefore carries a `provenance` object
+with `pricesVerified`, and the lower tiers set a `notice` that leads the text
+output. A fallback must never silently downgrade correctness.
+
+Tier 1 is only accepted when the site reports `meta.source === "openrouter"` —
+anything else means the site is itself serving its own fallback and carries no
+fresh corrections.
 
 ### Project Structure
 
@@ -35,7 +65,10 @@ ai-pricing-hub-mcp/
 │   └── src/
 │       ├── index.ts                  # MCP server — 3 tool/widget definitions
 │       ├── lib/
-│       │   ├── llm-models.ts         # OpenRouter API fetching + ELO enrichment
+│       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
+│       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
+│       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
+│       │   ├── llm-models.ts         # 3-tier model fetch + ELO enrichment
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
@@ -68,7 +101,7 @@ ai-pricing-hub-mcp/
 - **Type:** Widget (has UI)
 - **Input:** Optional filters (provider, category = price tier, openness, capability, price range, min ELO, use-case preset, volume)
 - **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs, and the concrete thresholds behind the FinOps Friendly badge
-- **Data Source:** OpenRouter API (live) with static fallback
+- **Data Source:** optimtoken API → direct OpenRouter → static fallback
 - **Widget:** Interactive comparison table
 
 ### Tool 2: `estimate-llm-cost`
@@ -79,9 +112,9 @@ ai-pricing-hub-mcp/
 
 ### Tool 3: `compare-compute-pricing`
 - **Type:** Widget (has UI)
-- **Input:** Filters (provider, vCPUs, memory, category, processor, use case, sort). No OS filter: the dataset is 100% Linux, so offering one only ever returned zero rows.
-- **Output:** Filtered cloud compute instance comparison across 7 providers
-- **Data Source:** Static pricing data (AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba)
+- **Input:** `region` (us-east | us-west | europe | asia-pacific, default us-east) plus filters (provider, vCPUs, memory, category, processor, use case, sort). No OS filter: the tool serves Linux only, and the upstream Windows rows are filtered out.
+- **Output:** Filtered cloud compute instance comparison across 7 providers, plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable
+- **Data Source:** `GET /api/pricing` (~6,000 instances) with the 137-row static array as fallback only
 - **Widget:** Compute pricing table
 
 ---
@@ -118,8 +151,10 @@ Add to `claude_desktop_config.json`:
 ## Key Design Decisions
 
 1. **All 3 tools use `registerWidget()`** — each has a React widget UI
-2. **OpenRouter API** is the primary data source for LLM models (public, no auth needed)
+2. **optimtoken.optimnow.io is the source of truth** for both LLM and compute pricing. Direct OpenRouter is kept as a working second tier for LLM models only, never as the preferred one.
 3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
+3b. **Provenance ships with every response.** `structuredContent.provenance` carries the upstream timestamp, which tier served, and — for compute — `sources`, `sourceRegions` and `priceTypes`. AWS Savings Plans and GCP CUDs are `static` upstream (us-east-1 constants scaled by a region multiplier); serving those beside live on-demand rates without saying which is which gives a FinOps answer nobody can audit. `provenance.staticPriceColumns` pre-walks `priceTypes` so the non-live columns are one field away.
+3c. **Tool `outputSchema`s must go through `outputSchema()`** in `lib/output-schema.ts`. The MCP SDK's `toJsonSchemaCompat()` defaults its target to `draft-7` (still true at SDK 1.30.0), and hosts that validate 2020-12 only — Claude Code among them — reject such a tool *before its handler runs*. Passing a pre-built JSON Schema object is not an alternative: `AnySchema` is Zod-only, so a plain object makes `normalizeObjectSchema()` return `undefined` and the schema is silently dropped.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
 6. **Compute pricing** is static data from 7 cloud providers with category enrichment
@@ -130,7 +165,29 @@ Add to `claude_desktop_config.json`:
 
 ## Keeping in sync with cloud-sparkle-compare
 
-The LLM logic here is a **manual port** of [cloud-sparkle-compare](https://github.com/OptimNow/cloud-sparkle-compare) — `api/llm-models.ts`, `src/lib/llm-business-metrics.ts`, `src/lib/openness.ts`, `src/lib/pricing-normalize.ts`. No code is shared, so drift is the default state: that repo ships daily, this one does not.
+The surface that could drift has shrunk, but it has not gone.
+
+**No longer a concern.** The taxonomy (`category`, `license`) and the corrected
+prices now arrive from the site on tier 1 rather than being re-derived here.
+That closes the class of bug that produced a retired `Open Weights` category and
+an unrecognised `Llama 4` licence in this repo — both of which had already
+diverged before the switch.
+
+**Still a manual port, and still able to drift:**
+
+- `lib/llm-business-metrics.ts` — the cost formulas, efficiency scoring, use-case
+  profiles and FinOps badge. The site does not expose these, so this app computes
+  them. Kept **character-identical** to the original's; the coherence test is that
+  both apps produce the same cost to the cent for the same model and use case.
+- `lib/openness.ts` — the licence → self-hostability buckets. The site sends the
+  licence *string*; the bucketing is local, so a new licence string upstream
+  silently becomes `Unknown` here until it is added. This is exactly how `Llama 4`
+  broke.
+- `lib/llm-models.ts` tier 2 — the whole OpenRouter transform (ELO table,
+  categories, exclusions, licence prefixes) is a port and only runs when the site
+  is unreachable, so its drift is invisible until the day it matters.
+- `lib/compute-categories.ts` — instance categorisation, processor and use-case
+  inference. Applied locally to the site's rows.
 
 Two things keep the two honest:
 
@@ -144,10 +201,21 @@ Before adding LLM business logic here, check whether `cloud-sparkle-compare` alr
 ## Data Flow
 
 ```
-OpenRouter API → fetchLLMModels() → filterModels() → enrichModels() → structuredContent
-                       ↓ (fallback)
-              pricing-data.ts (static)
+optimtoken /api/llm-models → fetchLLMModels() → enrichModels() → filterModels() → structuredContent
+        ↓ (tier 2, uncorrected)                                          + provenance
+openrouter.ai/api/v1/models
+        ↓ (tier 3)
+pricing-data.ts (static snapshot)
+
+optimtoken /api/pricing?region= → fetchComputeInstances() → enrichInstances() → filter/sort
+        ↓ (tier 2)                                                      → structuredContent
+pricing-data.ts computeInstances                                          + provenance
 ```
+
+Note the ordering on the LLM path: `enrichModels()` runs over the **full**
+catalogue before `filterModels()`, because the efficiency score and the FinOps
+badge are percentile ranks. Filtering first would make the badge mean something
+different depending on which filters the caller happened to pass.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
@@ -162,9 +230,10 @@ Each profile defines typical input/output token counts per request.
 
 ## Constraints
 
-- No API keys required — OpenRouter public endpoint, no auth
+- No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
 - No database — stateless tool execution
-- Compute pricing is static (no live cloud API calls)
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and ~50s on a MISS, and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes.
+- **Do not rename or drop `structuredContent` fields.** `app.json` and the `ui://widget/*` resources are bound to the current shape. Add fields; do not reshape.
 - Brand color: Chartreuse (#ACE849) for OptimNow identity
 - Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
 

@@ -120,6 +120,111 @@ test("the pass-through list has not gone stale", () => {
   }
 });
 
+/**
+ * Provenance is only useful if it actually ships.
+ *
+ * These are source-level checks for the same reason the money checks above are:
+ * the failure mode is a field that quietly stops being emitted during a
+ * refactor, which no runtime test of the lib layer would catch — the fetchers
+ * would still return provenance, the handlers would just stop forwarding it.
+ */
+
+/** The bodies of the three `structuredContent: { ... }` blocks in the handlers. */
+function structuredContentBlocks(): string[] {
+  return [...source.matchAll(/structuredContent:\s*\{/g)].map(m => {
+    // Walk braces from the opening one so nested objects are included whole.
+    let depth = 0;
+    const start = source.indexOf("{", m.index!);
+    for (let i = start; i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+    }
+    return source.slice(start);
+  });
+}
+
+test("all three tools declare provenance in their output schema", () => {
+  for (const schema of [
+    "compareModelsOutputSchema",
+    "estimateCostOutputSchema",
+    "computePricingOutputSchema",
+  ]) {
+    const start = schemaRegion.indexOf(`const ${schema} = {`);
+    assert.ok(start > -1, `${schema} not found`);
+    const body = schemaRegion.slice(start, schemaRegion.indexOf("\n};", start));
+    assert.match(
+      body,
+      /^\s+provenance:\s*\w+ProvenanceSchema/m,
+      `${schema} no longer declares provenance — callers lose the ability to date a figure they quote`,
+    );
+  }
+});
+
+test("every structuredContent that reached upstream carries provenance", () => {
+  const blocks = structuredContentBlocks();
+  assert.ok(blocks.length > 0, "sanity: no structuredContent blocks found");
+
+  // A block is allowed to omit provenance only when it never got an answer from
+  // upstream — those are the bare error returns, which spread emptyOutput and
+  // add nothing but `error`. Anything that reports data, or reports an error
+  // *after* a successful fetch, has provenance available and must forward it.
+  const reachedUpstream = blocks.filter(
+    b => !/^\{\s*\.\.\.emptyOutput,\s*error:[^,}]+\}$/.test(b.trim().replace(/\s+/g, " ")),
+  );
+
+  assert.equal(
+    reachedUpstream.length,
+    4,
+    `expected 4 upstream-backed outputs (3 successes + the no-match path), saw ${reachedUpstream.length}`,
+  );
+  for (const block of reachedUpstream) {
+    assert.match(
+      block,
+      /\bprovenance\b/,
+      `a structuredContent block omits provenance:\n${block.slice(0, 200)}`,
+    );
+  }
+});
+
+test("the compute output exposes per-column price provenance", () => {
+  // priceTypes is what separates a live on-demand rate from a static Savings
+  // Plan constant. Losing it turns an auditable answer into an unauditable one.
+  const start = schemaRegion.indexOf("const computeProvenanceSchema");
+  assert.ok(start > -1, "computeProvenanceSchema not found");
+  const body = schemaRegion.slice(start, schemaRegion.indexOf("\n});", start));
+
+  for (const field of ["priceTypes", "staticPriceColumns", "unavailablePriceColumns", "sources", "sourceRegions"]) {
+    assert.match(body, new RegExp(`^\\s+${field}:`, "m"), `computeProvenanceSchema no longer exposes ${field}`);
+  }
+});
+
+test("the LLM provenance keeps the verified-pricing flag", () => {
+  const start = schemaRegion.indexOf("const llmProvenanceSchema");
+  assert.ok(start > -1, "llmProvenanceSchema not found");
+  const body = schemaRegion.slice(start, schemaRegion.indexOf("\n});", start));
+
+  // Without this, a tier-2 response is indistinguishable from a tier-1 one and
+  // the caller quotes uncorrected OpenRouter prices as if they were checked.
+  assert.match(body, /^\s+pricesVerified:\s*z\.boolean\(\)/m);
+  assert.match(body, /^\s+upstreamTimestamp:/m);
+  assert.match(body, /^\s+notice:/m);
+});
+
+test("all three tools emit a 2020-12 outputSchema", () => {
+  // Passing a bare Zod raw shape makes the SDK declare draft-07, which hosts
+  // reject before the handler runs — the bug that made every tool here
+  // uncallable from Claude Code. See lib/output-schema.ts.
+  const declarations = [...source.matchAll(/outputSchema:\s*([^,\n]+)/g)].map(m => m[1].trim());
+  assert.equal(declarations.length, 3, `expected 3 outputSchema declarations, saw ${declarations.length}`);
+  for (const declaration of declarations) {
+    assert.match(
+      declaration,
+      /^outputSchema\(/,
+      `outputSchema must be wrapped by outputSchema() or the host rejects the tool: saw "${declaration}"`,
+    );
+  }
+});
+
 test("rounding is applied where structuredContent is built, not in the cost functions", () => {
   const metrics = readFileSync(
     fileURLToPath(new URL("./lib/llm-business-metrics.ts", import.meta.url)),
