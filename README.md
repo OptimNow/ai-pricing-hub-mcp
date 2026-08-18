@@ -1,122 +1,153 @@
-# OptimToken — MCP App (by OptimNow)
+# OptimToken MCP
 
-An MCP (Model Context Protocol) app that compares AI/LLM model pricing and quality, recommends a model under a budget, estimates workload costs, and benchmarks cloud compute instances. Works as an interactive tool inside AI conversations on **Claude**, **ChatGPT**, **VS Code**, and other MCP-compatible clients.
+> Built by [OptimNow](https://optimnow.io). Ask an AI assistant what a model or an
+> instance actually costs, and get a dated, sourced figure instead of a number the
+> model remembers from its training data.
 
-Every response carries a `provenance` block saying which data tier answered, when it was fetched, and — for LLM prices — whether the vendor-verified corrections were applied. A fallback never silently downgrades correctness.
+[![CI](https://github.com/OptimNow/ai-pricing-hub-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/OptimNow/ai-pricing-hub-mcp/actions/workflows/ci.yml)
+[![MCP Server](https://img.shields.io/badge/MCP-Server-7C3AED)](https://modelcontextprotocol.io/)
+[![ChatGPT Apps](https://img.shields.io/badge/ChatGPT-Apps%20SDK-10A37F?logo=openai&logoColor=white)](https://platform.openai.com/docs/apps)
+[![Node](https://img.shields.io/badge/Node-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Prices](https://img.shields.io/badge/prices-OptimToken-ACE849?labelColor=2C2C2C)](https://optimtoken.optimnow.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/OptimNow/ai-pricing-hub-mcp?style=flat)](https://github.com/OptimNow/ai-pricing-hub-mcp/stargazers)
 
-Built by [OptimNow](https://www.optimnow.io) with the [Skybridge](https://docs.skybridge.tech/) framework.
+---
+
+## Connect in 30 seconds
+
+The server is hosted, so there is nothing to install.
+
+```
+https://ai-pricing-hub-mcp-9604f763.alpic.live/
+```
+
+| Client | How to add it |
+|---|---|
+| <img src="https://img.shields.io/badge/-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Claude Code" height="22"/> | `claude mcp add --transport http optimtoken https://ai-pricing-hub-mcp-9604f763.alpic.live/` |
+| <img src="https://img.shields.io/badge/-Claude.ai%20%2F%20Desktop-D97757?logo=anthropic&logoColor=white" alt="Claude.ai / Desktop" height="22"/> | **Settings → Connectors → Add custom connector**, paste the URL above |
+| <img src="https://img.shields.io/badge/-ChatGPT-10A37F?logo=openai&logoColor=white" alt="ChatGPT" height="22"/> | **Settings → Connectors → Add**, paste the URL. Comparisons render as interactive widgets |
+| <img src="https://img.shields.io/badge/-Cursor-000000?logo=cursor&logoColor=white" alt="Cursor" height="22"/> <img src="https://img.shields.io/badge/-Windsurf-3DDC91?logoColor=white" alt="Windsurf" height="22"/> <img src="https://img.shields.io/badge/-VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" height="22"/> | Add an HTTP MCP server entry pointing at the URL |
+
+Then just ask:
+
+> *"We send 200k support tickets a month at about 1,500 input tokens each. Which model gives me the best quality per euro, and what would it cost?"*
+
+---
+
+## Why this exists
+
+Model prices change weekly, and a language model's idea of them is frozen at its
+training cutoff. Ask one what Claude or GPT costs and you get a confident answer that
+was true some months ago, with no date attached and no way to tell. The same applies to
+cloud instance rates, which additionally vary by region in ways nobody memorises.
+
+This server replaces recall with a lookup:
+
+- **Live prices, not remembered ones.** Every LLM figure comes from the
+  [OptimToken](https://optimtoken.optimnow.io) catalogue, which tracks 250+ models and
+  refreshes daily.
+- **Corrected prices.** OptimToken keeps a committed price archive, a verified overrides
+  table checked against vendor pricing pages, and an anomaly check that alarms on the
+  half-price and double-price breaks upstream feeds occasionally publish. This server
+  asks that catalogue rather than re-deriving prices itself.
+- **Cost per request, not cost per million tokens.** Price-per-token comparisons hide
+  the thing you actually pay for. The tools apply your token shape, your cache hit rate
+  and batch eligibility, and return a figure per request and per month.
+- **Every answer carries its provenance.** Which tier served it, and whether the prices
+  were verified.
+
+---
 
 ## Tools
 
-| Tool | Use it when | Widget |
-|------|-------------|--------|
-| `compare-llm-models` | You want to **see the field** — browse and filter the whole catalogue by price, ELO, efficiency, capability, openness | Ranked cards, with a cost-vs-ELO scatter toggle |
-| `recommend-llm-model` | You want **an answer** — the best model for one workload under a budget / ELO / capability constraint | Three podium cards with a per-constraint checklist |
-| `compare-models-side-by-side` | You want **2-4 named models** weighed against each other across all 8 use cases | Use-case × model cost matrix |
-| `estimate-llm-cost` | You have **exact numbers** — your own token counts and monthly volume | List-vs-optimized savings bars |
-| `compare-compute-pricing` | You want cloud **compute** instances across AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba | Filterable pricing table |
+| Tool | What it answers |
+|---|---|
+| **`compare-llm-models`** | "Which model should we use?" Ranks models on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. |
+| **`estimate-llm-cost`** | "What will this cost us per month?" Per-request and monthly cost for a given volume, token shape, cache hit rate and batch eligibility. |
+| **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category. |
 
-The first four all answer questions about LLMs, so each tool's description says
-when to pick a sibling instead — that routing is what makes a calling model
-choose correctly.
+All three are read-only and take no credentials. Nothing you send is stored.
 
-### Data Sources
+**Use case profiles** ship with realistic token shapes, so you do not have to invent them:
+Support Ticket, Knowledge Q&A, Meeting Summary, Marketing Content, Coding Task,
+Invoice Processing, Call Summary, Agent Workflow.
 
-Both tool families read from `optimtoken.optimnow.io`, which is where pricing
-*correctness* lives: a committed price archive, an overrides table checked
-against vendor pricing pages, and an anomaly alarm for the x0.5 / x2.0 breaks
-OpenRouter intermittently serves.
+---
 
-| | Tier 1 (preferred) | Tier 2 | Tier 3 |
+## Where the numbers come from
+
+`optimtoken.optimnow.io` is the single source of truth. When it cannot be reached, the
+server degrades in tiers rather than failing, and says which tier it used.
+
+| Tool | Tier 1 | Tier 2 | Tier 3 |
 |---|---|---|---|
-| **LLM models** | `optimtoken.optimnow.io/api/llm-models` — vendor-verified | [OpenRouter](https://openrouter.ai/) direct — **uncorrected** | static snapshot |
-| **Compute** | `optimtoken.optimnow.io/api/pricing` — ~6,000 live instances | — | 137-row static snapshot |
+| LLM tools | `GET /api/llm-models` | OpenRouter direct | embedded snapshot |
+| Compute tool | `GET /api/pricing?region=` | not available | embedded snapshot (137 rows) |
 
-Tiers 2 and 3 serve uncorrected prices, so they set `provenance.pricesVerified`
-to false and lead their text output with a notice. LLM data is enriched locally
-with Chatbot Arena ELO scores and FinOps efficiency metrics.
+**Tiers 2 and 3 serve uncorrected prices**, and that matters more than it sounds. An
+upstream feed once published a frontier model at half its real list price, which halves
+every monthly figure derived from it. So every response carries a `provenance` object
+with `pricesVerified`, and the lower tiers put a notice at the top of the answer. A
+fallback should never quietly downgrade correctness.
 
-### Use Case Profiles
+Tier 1 is accepted only when the catalogue reports that it is itself serving fresh
+upstream data. If the site is on its own fallback, it carries no corrections, and this
+server treats it accordingly.
 
-Pre-configured token profiles for cost estimation:
-- Support Ticket, Knowledge QA, Meeting Summary
-- Marketing Content, Coding Task, Invoice Processing
-- Call Summary, Agent Workflow
+---
 
-## Getting Started
+## Local development
 
-### Prerequisites
-
-- Node.js 24+
-
-### Install & Run
+Requires **Node.js 24+**.
 
 ```bash
 npm install
-npm run dev
+npm run dev              # Skybridge dev server + MCP inspector at localhost:3000
+npm test                 # schema conformance, serialisation precision, data sources
+npm run build            # widgets + server
 ```
 
-This starts the MCP server with Skybridge DevTools at `http://localhost:3000/`.
-
-### Connect to Claude Desktop
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "ai-pricing-hub": {
-      "command": "cmd",
-      "args": ["/c", "npx", "mcp-remote", "https://ai-pricing-hub-mcp-9604f763.alpic.live/"]
-    }
-  }
-}
-```
-
-Restart Claude Desktop to connect.
-
-Or, from a terminal with Claude Code installed:
+The static fallback catalogue is refreshed by hand, not on a schedule:
 
 ```bash
-claude mcp add ai-pricing-hub --transport http https://ai-pricing-hub-mcp-9604f763.alpic.live/
+npm run refresh-fallback
 ```
 
-### Connect to ChatGPT
+Because it is manual, check its `dataAsOf` before trusting a tier-3 response. An
+unrefreshed fallback ages silently.
 
-The server already emits the MCP Apps format ChatGPT expects: widget resources
-use `mimeType: "text/html;profile=mcp-app"` and each tool carries
-`_meta.ui.resourceUri`. No manifest file is involved.
-
-Add it as a custom connector in developer mode with the endpoint:
-`https://ai-pricing-hub-mcp-9604f763.alpic.live/`
-
-To publish it in the ChatGPT directory, see `docs/chatgpt-submission.md`.
-
-### Example Prompts
-
-- "Compare the prices of LLMs from OpenAI and Anthropic"
-- "Recommend a model for support tickets under $500 a month"
-- "Compare GPT-4o, Claude Opus 5 and Gemini 3.1 Pro side by side"
-- "Estimate the monthly cost of using Claude Sonnet for 100k support tickets"
-- "What would 800 input and 200 output tokens cost me at 4 million calls a month?"
-- "Show me the cheapest GPU instances across all cloud providers"
-- "Which LLM has the best quality-to-price ratio for coding tasks?"
-
-## Deployment
-
-Deployed to [Alpic Cloud](https://alpic.ai/):
-
-```bash
-npx alpic deploy --yes --project-name ai-pricing-hub-mcp
+```text
+ai-pricing-hub-mcp/
+├─ server/src/index.ts              # tool + widget registrations
+├─ server/src/lib/optimtoken-api.ts # the one base URL constant, fetch and timeout discipline
+├─ server/src/lib/                  # ranking, efficiency scoring, provenance, normalisation
+├─ server/src/data/                 # static fallback pricing + region maps
+└─ web/src/widgets/                 # React widgets rendered in the client
 ```
 
-## Related
+Built with [Skybridge](https://docs.skybridge.tech/), deployed on [Alpic](https://alpic.ai/).
 
-- [OptimToken](https://optimtoken.optimnow.io) — the web app this server reads its pricing from
-- [Skybridge Documentation](https://docs.skybridge.tech/)
-- [MCP Protocol](https://modelcontextprotocol.io/)
-- [OpenRouter API](https://openrouter.ai/) — the tier-2 fallback
+---
+
+## The rest of the family
+
+| | |
+|---|---|
+| [**OptimToken**](https://optimtoken.optimnow.io) | The web app. Same catalogue, full UI, an AI advisor and a public JSON API. |
+| [**AI ROI Calculator**](https://github.com/OptimNow/ai-roi-calculator-mcp) | Does the AI business case pay for itself. Same prices, plus harness costs and value modelling. |
+| [**cloud-finops-skills**](https://github.com/OptimNow/cloud-finops-skills) | FinOps knowledge for AI agents: AWS, Azure, GCP, AI inference, SaaS. |
+| [**finops-mcp-resources**](https://github.com/OptimNow/finops-mcp-resources) | MCP servers, tutorials and client guides for cloud cost work. |
+
+---
 
 ## License
 
-Private repository. All rights reserved.
+Released under the [MIT License](./LICENSE).
+
+Prices served by this server come from third-party sources and are provided as is,
+without warranty. Verify against vendor pricing pages before committing spend.
+
+---
+
+Questions about your own AI or cloud bill? [Talk to OptimNow](https://www.optimnow.io/contact).

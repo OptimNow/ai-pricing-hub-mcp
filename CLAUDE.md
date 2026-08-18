@@ -2,7 +2,7 @@
 
 **Project:** AI Pricing Hub MCP
 **Framework:** Skybridge (MCP App Framework)
-**Repo:** github.com/OptimNow/ai-pricing-hub-mcp (private)
+**Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
 **Deployed:** https://ai-pricing-hub-mcp-9604f763.alpic.live
 
 ---
