@@ -58,13 +58,14 @@ Restart Claude Desktop to connect.
 
 ### Connect to ChatGPT
 
-This repo now includes a ChatGPT App manifest (`app.json`) that maps the existing MCP tools and widgets.
+The server already emits the MCP Apps format ChatGPT expects: widget resources
+use `mimeType: "text/html;profile=mcp-app"` and each tool carries
+`_meta.ui.resourceUri`. No manifest file is involved.
 
-1. Register the app manifest with your ChatGPT Apps SDK flow.
-2. Configure the backend MCP endpoint as: `https://ai-pricing-hub-mcp-9604f763.alpic.live/`
-3. Ensure the 3 UI resources in `app.json` are registered (`ui://widget/*`).
+Add it as a custom connector in developer mode with the endpoint:
+`https://ai-pricing-hub-mcp-9604f763.alpic.live/`
 
-See `docs/chatgpt-app-migration.md` for the full migration mapping.
+To publish it in the ChatGPT directory, see `docs/chatgpt-submission.md`.
 
 ### Example Prompts
 
