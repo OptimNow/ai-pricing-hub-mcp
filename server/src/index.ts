@@ -2,7 +2,7 @@ import { McpServer } from "skybridge/server";
 import { z } from "zod";
 import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
 import type { ResolutionStatus } from "./lib/llm-models.js";
-import type { LLMModel } from "./data/pricing-data.js";
+import type { LLMModel, ComputeInstance } from "./data/pricing-data.js";
 import {
   USE_CASE_KEYS,
   USE_CASE_PROFILES,
@@ -30,6 +30,7 @@ import type {
 } from "./lib/llm-business-metrics.js";
 import { roiCalculatorUrl } from "./lib/roi-link.js";
 import { enrichInstances } from "./lib/compute-categories.js";
+import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
 import {
   PRICING_REGIONS,
@@ -305,6 +306,34 @@ const recommendOutputSchema = {
 type ResolutionEntry = { query: string; status: ResolutionStatus; resolved?: string; alternatives: string[]; totalMatches: number };
 type ConstraintCheck = z.infer<typeof constraintCheckSchema>;
 type Recommendation = z.infer<typeof recommendationSchema>;
+
+/**
+ * The rows this tool can actually return, enriched, memoised per catalogue.
+ *
+ * Two wastes were stacked here. `enrichInstances()` ran over all ~6,050 rows on
+ * every single request — 60-85% of warm CPU and ~2.6 MB of allocation — even
+ * though the catalogue behind it is memoised for an hour and the enrichment is
+ * a pure function of it. And ~41% of those rows are Windows, which the filter
+ * below discarded immediately afterwards, so nearly half the work could never
+ * reach a caller.
+ *
+ * Keyed by the catalogue array identity rather than by region or a timestamp:
+ * the memo in compute-pricing.ts hands back the same array for the life of an
+ * entry and a fresh one after a refresh, so identity tracks exactly the thing
+ * that would invalidate this. A WeakMap means a refreshed catalogue takes its
+ * enriched copy with it.
+ */
+const servableCache = new WeakMap<ComputeInstance[], EnrichedComputeInstance[]>();
+
+function servableCatalogue(catalogue: ComputeInstance[]): EnrichedComputeInstance[] {
+  const hit = servableCache.get(catalogue);
+  if (hit) return hit;
+  // Linux-only is a property of the tool, not of the fetch layer, which is why
+  // the filter lives here rather than in coerceSiteInstance.
+  const enriched = enrichInstances(catalogue).filter(inst => inst.os === "Linux");
+  servableCache.set(catalogue, enriched);
+  return enriched;
+}
 
 /** Flat shortfall charge for a constraint that is a yes/no, not a distance.
  *  Larger than any realistic numeric shortfall (a 10x budget overrun scores 1,
@@ -1142,12 +1171,11 @@ const server = new McpServer(
       const { instances: catalogue, source, provenance } = await fetchComputeInstances(
         (region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION,
       );
-      const enriched = enrichInstances(catalogue);
+      const enriched = servableCatalogue(catalogue);
 
       const filtered = enriched.filter(inst => {
         if (provider && inst.provider.toLowerCase() !== provider.toLowerCase()) return false;
         if (category && inst.category.toLowerCase() !== category.toLowerCase()) return false;
-        if (inst.os !== "Linux") return false;
         if (minVCPUs !== undefined && inst.vCPUs < minVCPUs) return false;
         if (maxVCPUs !== undefined && inst.vCPUs > maxVCPUs) return false;
         if (minMemory !== undefined && inst.memory < minMemory) return false;

@@ -944,6 +944,25 @@ export async function fetchLLMModels(): Promise<LLMFetchResult> {
     return cache.result;
   }
 
+  // One fetch shared between concurrent callers. Cheaper here than on the
+  // compute side (~200 ms cold rather than ~10 s) but free to do, and it stops
+  // a burst of tool calls on a cold process from walking the whole tier chain
+  // several times over.
+  if (inflight) return inflight;
+  inflight = (async () => {
+    try {
+      return await fetchAllTiers();
+    } finally {
+      inflight = null;
+    }
+  })();
+  return inflight;
+}
+
+let inflight: Promise<LLMFetchResult> | null = null;
+
+async function fetchAllTiers(): Promise<LLMFetchResult> {
+
   try {
     const result = await fetchFromSite();
     cache = { result, fetchedAt: Date.now() };

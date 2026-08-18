@@ -67,7 +67,7 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * guaranteed-cold cache key:
  *
  *   /api/llm-models   cold 0.19-0.42 s   warm  31 ms    (68 KB)
- *   /api/pricing      cold 6.7-8.9 s     warm 80-350 ms (1.4 MB)
+ *   /api/pricing      cold 6.1-10.7 s    warm 80-350 ms (1.4 MB)
  *
  * A cold `/api/pricing` is ~28x slower than a cold `/api/llm-models`, because
  * the site assembles the region from six live provider APIs inside a function
@@ -87,7 +87,7 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * whatever entry ambient traffic has warmed. With no steady traffic of its
  * own to hold an entry open, it pays the rebuild.
  *
- * 25s is ~2.8x the worst cold path observed, and the margin is the whole
+ * 25s is ~2.3x the worst cold path observed, and the margin is the whole
  * point. The healthy path is ~7.5 s, but a throttled or failing provider API
  * upstream can still push it far past that, and the original reasoning is
  * untouched: the data cannot arrive faster than upstream can assemble it.
@@ -97,12 +97,21 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  */
 export const UPSTREAM_TIMEOUT_MS = 25_000;
 
-/** The cold-path time this budget has to cover: the slowest of 8 cold samples
- *  taken across all four regions on 2026-08-18 (6.7 s min / 7.5 s mean /
- *  8.9 s max). Exported so a test can fail if the budget is ever trimmed back
- *  toward the cold path — precisely the regression that pinned this tool to
- *  tier 2 when a 20 s budget met a 50.5 s rebuild. */
-export const MEASURED_COLD_REBUILD_MS = 8_900;
+/** The cold-path time this budget has to cover.
+ *
+ *  First set to 8.9 s from 8 samples on 2026-08-18. Two independent re-measures
+ *  the same day both exceeded it — 10.7 s and 9.3 s, on europe and asia-pacific
+ *  — so 8 samples across 4 regions was not enough to characterise an endpoint
+ *  that assembles six provider APIs live. Raised to 11 s, which covers every
+ *  sample seen so far with the spread they actually show.
+ *
+ *  The lesson is the file's own: a measurement here is load-bearing, so sample
+ *  until the max stops moving rather than until the numbers look tidy.
+ *
+ *  Exported so a test can fail if the budget is ever trimmed back toward the
+ *  cold path — precisely the regression that pinned this tool to tier 2 when a
+ *  20 s budget met a 50.5 s rebuild. */
+export const MEASURED_COLD_REBUILD_MS = 11_000;
 
 /** How much headroom the budget must keep over the measured cold path.
  *
@@ -248,6 +257,7 @@ const cache = new Map<PricingRegion, { result: ComputeFetchResult; fetchedAt: nu
 /** Drop the memo. Tests drive the tiers by stubbing fetch, so they need to be
  *  able to ask again rather than get the previous tier's answer back. */
 export function resetComputePricingCache(): void {
+  inflight.clear();
   cache.clear();
   refreshing.clear();
 }
@@ -437,20 +447,41 @@ export async function fetchComputeInstances(
     };
   }
 
-  try {
-    const result = await fetchFromSite(region, upstreamBudget());
-    cache.set(region, { result, fetchedAt: Date.now() });
-    return result;
-  } catch (error) {
-    const { summary } = describeUpstreamFailure(error);
-    console.error(
-      `[compute-pricing] site API failed for region "${region}" (${summary}), serving static snapshot`,
-    );
-    // Deliberately not cached, for the same reason as the LLM snapshot: it
-    // would keep answering from frozen data for the full TTL after recovery.
-    return fetchFromSnapshot(region, summary);
-  }
+  // Cold miss. Share one rebuild between every caller that arrives while it is
+  // running: measured, 5 concurrent cold callers fired 5 separate /api/pricing
+  // requests, each a six-provider assembly upstream costing 7-11s. The stale
+  // branch above was already deduped; this one was not, which is the branch
+  // that actually costs money.
+  const existing = inflight.get(region);
+  if (existing) return existing;
+
+  const attempt = (async () => {
+    try {
+      const result = await fetchFromSite(region, upstreamBudget());
+      cache.set(region, { result, fetchedAt: Date.now() });
+      return result;
+    } catch (error) {
+      const { summary } = describeUpstreamFailure(error);
+      console.error(
+        `[compute-pricing] site API failed for region "${region}" (${summary}), serving static snapshot`,
+      );
+      // Deliberately not cached, for the same reason as the LLM snapshot: it
+      // would keep answering from frozen data for the full TTL after recovery.
+      return fetchFromSnapshot(region, summary);
+    } finally {
+      // Always clear, or one failure pins every later caller to it.
+      inflight.delete(region);
+    }
+  })();
+
+  inflight.set(region, attempt);
+  return attempt;
 }
+
+/** In-flight cold fetches, keyed by region. Distinct from `refreshing` below:
+ *  that one guards the background refresh of a stale entry, this one guards the
+ *  foreground rebuild that callers are actually waiting on. */
+const inflight = new Map<PricingRegion, Promise<ComputeFetchResult>>();
 
 /** In-flight refreshes, so N concurrent callers trigger one rebuild rather than
  *  N — each of which would cost upstream a 50s six-provider assembly. */
