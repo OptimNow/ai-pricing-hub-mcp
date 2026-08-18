@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { llmModels } from "../data/pricing-data.js";
+import type { LLMModel } from "../data/pricing-data.js";
 
 import {
   MONTHLY_DECIMALS,
   PER_REQUEST_DECIMALS,
   USE_CASE_PROFILES,
+  optimizationLevers,
   optimizedUseCaseCost,
   roundCost,
   roundMonthlyCost,
@@ -120,4 +123,80 @@ test("the nullable price variant keeps null distinct from zero", () => {
   // 0 would read as "qualifies at $0/1M".
   assert.equal(roundPricePer1MOrNull(null), null);
   assert.equal(roundPricePer1MOrNull(8.999999999999998), 9);
+});
+
+// ── A lever that costs money is not an optimization ──────────────────
+//
+// Zhipu GLM 5.2 publishes batch rates ABOVE its list rates ($0.70/$2.20 against
+// $0.49/$1.54). The original formula applied batch whenever both fields were
+// present, so "optimized" came out 34% dearer than list — and because
+// savingsPct() clamps at 0, the widget reported "Same as list price" next to a
+// visibly larger number and a longer bar.
+//
+// This is a deliberate divergence from cloud-sparkle-compare, which still has
+// the original behaviour. See the backport note in CLAUDE.md.
+
+test("a published batch rate that costs more is not applied", () => {
+  const dearBatch: LLMModel = {
+    provider: "Test", model: "Dear Batch", inputPricePer1M: 0.49, outputPricePer1M: 1.54,
+    batchInputPricePer1M: 0.70, batchOutputPricePer1M: 2.20,
+    contextWindow: "128K", category: "Budget", capabilities: ["Text"],
+  };
+  const profile = USE_CASE_PROFILES.meetingSummary;
+  assert.equal(profile.batchEligible, true, "sanity: this profile is batch-eligible");
+
+  const levers = optimizationLevers(dearBatch, profile);
+  assert.equal(levers.batchEligible, true, "the workload is still batch-eligible");
+  assert.equal(levers.batchApplied, false, "but the lever must not be reported as applied");
+
+  const list = useCaseCost(dearBatch.inputPricePer1M, dearBatch.outputPricePer1M, profile);
+  assert.ok(
+    optimizedUseCaseCost(dearBatch, profile) <= list,
+    "optimized must never exceed list — it is the best achievable price, not a different one",
+  );
+});
+
+test("a cache rate above the input price is not applied either", () => {
+  const dearCache: LLMModel = {
+    provider: "Test", model: "Dear Cache", inputPricePer1M: 1.0, outputPricePer1M: 2.0,
+    cachedInputPricePer1M: 1.5,
+    contextWindow: "128K", category: "Budget", capabilities: ["Text"],
+  };
+  const profile = USE_CASE_PROFILES.supportTicket;
+  assert.ok(profile.cacheHitRate > 0, "sanity: this profile has a cacheable prefix");
+
+  assert.equal(optimizationLevers(dearCache, profile).cacheApplied, false);
+  assert.equal(
+    optimizedUseCaseCost(dearCache, profile),
+    useCaseCost(dearCache.inputPricePer1M, dearCache.outputPricePer1M, profile),
+    "with no lever pulled, optimized is exactly the list cost — not a few ULPs above it",
+  );
+});
+
+test("optimized never exceeds list anywhere in the catalogue", () => {
+  // The guard against this class returning: 3 (model, workload) pairs were
+  // materially inverted and 35 more by float noise before the fix.
+  for (const m of llmModels) {
+    for (const profile of Object.values(USE_CASE_PROFILES)) {
+      const list = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
+      assert.ok(
+        optimizedUseCaseCost(m, profile) <= list,
+        `${m.provider} ${m.model} / ${profile.label}: optimized exceeds list`,
+      );
+    }
+  }
+});
+
+test("a lever is only reported applied when it actually saved money", () => {
+  for (const m of llmModels) {
+    for (const profile of Object.values(USE_CASE_PROFILES)) {
+      const { batchApplied, cacheApplied } = optimizationLevers(m, profile);
+      if (!batchApplied && !cacheApplied) continue;
+      const list = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
+      assert.ok(
+        optimizedUseCaseCost(m, profile) < list,
+        `${m.provider} ${m.model} / ${profile.label}: names a lever but saved nothing`,
+      );
+    }
+  }
 });

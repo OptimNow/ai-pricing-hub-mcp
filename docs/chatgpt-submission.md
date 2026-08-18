@@ -15,7 +15,7 @@ Verified against the live endpoint, so nothing here needs changing:
   UI type ChatGPT expects.
 - Each tool carries `_meta.ui.resourceUri`. The `openai/outputTemplate` field
   is only a legacy compatibility alias and is not required.
-- All three tools declare `readOnlyHint`, `destructiveHint` and
+- All five tools declare `readOnlyHint`, `destructiveHint` and
   `openWorldHint`. Missing annotations are a common rejection reason.
 - Transport is streamable HTTP at a stable public HTTPS URL.
 - Test cases are prepared in `chatgpt-app-smoke-tests.md`.
@@ -43,7 +43,7 @@ Apps Management write access. Create a plugin, choose "With MCP", then:
 1. **Info**: name, descriptions, logo, category, and the four URLs above.
 2. **MCP**: choose Universal (one fixed URL for all users), enter the
    production URL, set the UI content security policy domains, confirm domain
-   ownership, then run **Scan Tools** to have OpenAI discover the three tools
+   ownership, then run **Scan Tools** to have OpenAI discover the five tools
    and validate their metadata.
 3. **Tool annotations**: confirm the three hints per tool. All three are
    `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true`.

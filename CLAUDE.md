@@ -11,7 +11,7 @@
 
 An MCP (Model Context Protocol) app that provides AI/LLM model comparison, cost estimation, and cloud compute pricing tools as interactive widgets inside AI conversations (Claude, ChatGPT, VS Code, Goose). Built with Skybridge framework.
 
-**Origin:** Business logic copied from the standalone web app cloud-sparkle-compare, which has since been renamed to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (private). The local checkout is still the `cloud-sparkle-compare` folder, and this file uses the old name throughout. The original app remains untouched.
+**Origin:** Business logic copied from the standalone web app cloud-sparkle-compare, which has since been renamed to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (private). The local checkout is still the `cloud-sparkle-compare` folder, and this file uses the old name throughout. It is deployed at `optimtoken.optimnow.io`, which is what this app reads its pricing from. The original app remains untouched.
 
 ---
 
@@ -63,44 +63,49 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # MCP server — 3 tool/widget definitions
+│       ├── index.ts                  # MCP server — 5 tool/widget definitions
+│       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
-│       │   ├── llm-models.ts         # 3-tier model fetch + ELO enrichment
+│       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
+│       │   ├── roi-link.ts           # Deep link into the sister AI ROI Calculator
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
-│       │   └── compute-categories.ts  # Compute instance categorization + enrichment
+│       │   ├── compute-categories.ts # Compute instance categorization + enrichment
+│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, scale
 │       └── data/
-│           ├── pricing-data.ts       # Static fallback LLM pricing + compute instances
-│           └── region-api-map.ts     # Cloud region mappings
+│           ├── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
+│           └── region-api-map.ts     # Cloud region mappings — currently unimported
 ├── web/
 │   ├── src/
-│   │   ├── helpers.ts                # Skybridge widget helpers
-│   │   ├── index.css                 # Widget styles
+│   │   ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
+│   │   ├── index.css                 # Colour tokens on :root + dark-mode overrides
+│   │   ├── format.ts                 # formatCost / formatBudget / savingsPct / leverSummary
+│   │   ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
+│   │   ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
 │   │   └── widgets/
-│   │       ├── compare-llm-models/
-│   │       │   └── index.tsx         # Model comparison table widget
-│   │       ├── estimate-llm-cost/
-│   │       │   └── index.tsx         # Cost estimation cards widget
-│   │       └── compare-compute-pricing/
-│   │           └── index.tsx         # Compute pricing table widget
+│   │       ├── compare-llm-models/index.tsx
+│   │       ├── estimate-llm-cost/index.tsx
+│   │       ├── compare-models-side-by-side/index.tsx
+│   │       ├── recommend-llm-model/index.tsx
+│   │       └── compare-compute-pricing/index.tsx
 │   └── vite.config.ts                # Skybridge Vite plugin
 ├── docs/
 │   ├── chatgpt-submission.md         # Blockers + portal run for the ChatGPT directory
-│   └── chatgpt-app-smoke-tests.md    # The 5 positive / 3 negative cases the portal asks for
+│   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
-│   └── check-serialisation-precision.mjs
-├── .github/workflows/ci.yml
+│   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
+├── .github/workflows/ci.yml          # typecheck + test + build on every PR
 ├── alpic.json                        # Alpic deployment config
 ├── server.json                       # Manifest for the official MCP registry
 ├── AGENTS.md
 ├── package.json
-├── tsconfig.json
-└── tsconfig.test.json
+├── tsconfig.json                     # Build + typecheck (excludes *.test.ts)
+└── tsconfig.test.json                # Type-checks the tests
 ```
 
 Tests live beside their subjects: `lib/data-sources.test.ts`,
@@ -116,15 +121,27 @@ Tests live beside their subjects: `lib/data-sources.test.ts`,
 - **Input:** Optional filters (provider, category = price tier, openness, capability, price range, min ELO, use-case preset, volume)
 - **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs, and the concrete thresholds behind the FinOps Friendly badge
 - **Data Source:** optimtoken API → direct OpenRouter → static fallback
-- **Widget:** Interactive comparison table
+- **Widget:** Comparison cards, with a local List / Cost-vs-ELO toggle. The scatter is inline SVG (log10 cost on x, Arena ELO on y, chartreuse for FinOps Friendly); axis maths lives in `web/src/scale.ts`. Models without an ELO score are counted as "not plotted", never silently dropped.
 
 ### Tool 2: `estimate-llm-cost`
 - **Type:** Widget (has UI)
 - **Input:** Model name + use-case preset (or custom token counts + volume)
-- **Output:** Per-request and monthly cost breakdown per model
-- **Widget:** Cost comparison cards
+- **Output:** Per-request and monthly cost breakdown per model, plus `savingsPct` and the four optimization-lever booleans (`batchEligible`/`cacheEligible`/`batchApplied`/`cacheApplied`) per entry
+- **Widget:** Paired list-vs-optimized bars per use case. Both levers are conditional, so when neither applies the row says *why* — "this model publishes no batch rate" — instead of drawing a 0% saving.
 
-### Tool 3: `compare-compute-pricing`
+### Tool 3: `compare-models-side-by-side`
+- **Type:** Widget (has UI)
+- **Input:** `models` (2-4 free-text names) + optional `volumePreset`
+- **Output:** Each named model against all 8 use-case profiles, list and optimized, plus a `resolution` entry per name. A name that matched nothing, matched several models, or duplicated an earlier pick is reported rather than silently changing the columns — a missing column is not a free model.
+- **Widget:** Use-case × model cost matrix, cheapest cell per row highlighted
+
+### Tool 4: `recommend-llm-model`
+- **Type:** Widget (has UI)
+- **Input:** `useCasePreset` (required) + optional `volumePreset`, `maxMonthlyBudget`, `minElo`, `requiredCapability`, `openness`
+- **Output:** Top 3 by value score as structured facts — efficiency rank, ELO, list and optimized cost, FinOps flag, volatility, and a per-constraint satisfied/violated breakdown — leaving the narrative to the calling model. An over-constrained query sets `overConstrained` and returns `nearMisses` instead, ordered by how far each is from the *numeric* constraints, each carrying the constraint it failed. Also carries `roiCalculatorUrl`.
+- **Widget:** Three podium cards with a per-constraint checklist
+
+### Tool 5: `compare-compute-pricing`
 - **Type:** Widget (has UI)
 - **Input:** `region` (us-east | us-west | europe | asia-pacific, default us-east) plus filters (provider, vCPUs, memory, category, processor, use case, sort). No OS filter: the tool serves Linux only, and the upstream Windows rows are filtered out.
 - **Output:** Filtered cloud compute instance comparison across 7 providers, plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable
@@ -138,11 +155,20 @@ Tests live beside their subjects: `lib/data-sources.test.ts`,
 ```bash
 npm install
 npm run dev        # Skybridge dev server with DevTools emulator
-npm run build      # Production build
-npm run start      # Start production server
-npm run typecheck  # tsc --noEmit, then the test tsconfig
+npm run typecheck  # tsc --noEmit over both tsconfigs (src and tests)
 npm test           # node --test over server/src/**/*.test.ts
+npm run build      # Production build
+npm run start      # Start production server (serves /mcp locally)
 ```
+
+`.github/workflows/ci.yml` runs typecheck, test and build on every PR.
+
+Note: `npm run typecheck` writes `dist/tsconfig.tsbuildinfo`. Because it does not
+emit, a following `npm run build` can believe the server output is already up to
+date and skip compiling it — if `dist/server/` looks stale, delete it and rebuild.
+
+`scripts/check-serialisation-precision.mjs` is deliberately outside CI: it needs a
+running server and the live catalogue. Run it by hand after touching cost code.
 
 ### Deployment
 
@@ -150,7 +176,8 @@ npm test           # node --test over server/src/**/*.test.ts
 npm run deploy     # alpic deploy
 ```
 
-Deploys to Alpic Cloud. The streamable HTTP endpoint is served at root `/`.
+Deploys to Alpic Cloud. The streamable HTTP endpoint is served at root `/` — that
+is the URL `server.json` publishes. Locally, `npm run start` serves it at `/mcp`.
 
 **Alpic collects files through the git index, not the working tree.** Deleting a
 tracked file without staging the deletion makes the deploy fail with `ENOENT` on
@@ -173,11 +200,27 @@ this server answers with 400, which stalls startup behind a Cloudflare timeout.
 
 ## Key Design Decisions
 
-1. **All 3 tools use `registerWidget()`** — each has a React widget UI
+1. **All 5 tools use `registerWidget()`** — each has a React widget UI, and each is restricted to `hosts: ["mcp-app"]`. Omitting `hosts` publishes every widget twice (`ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`), which listed each one twice in Claude's attachment picker; the apps-sdk variant is the legacy shape.
 2. **optimtoken.optimnow.io is the source of truth** for both LLM and compute pricing. Direct OpenRouter is kept as a working second tier for LLM models only, never as the preferred one.
 3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
 3b. **Provenance ships with every response.** `structuredContent.provenance` carries the upstream timestamp, which tier served, and — for compute — `sources`, `sourceRegions` and `priceTypes`. AWS Savings Plans and GCP CUDs are `static` upstream (us-east-1 constants scaled by a region multiplier); serving those beside live on-demand rates without saying which is which gives a FinOps answer nobody can audit. `provenance.staticPriceColumns` pre-walks `priceTypes` so the non-live columns are one field away.
 3c. **Tool `outputSchema`s must go through `outputSchema()`** in `lib/output-schema.ts`. The MCP SDK's `toJsonSchemaCompat()` defaults its target to `draft-7` (still true at SDK 1.30.0), and hosts that validate 2020-12 only — Claude Code among them — reject such a tool *before its handler runs*. Passing a pre-built JSON Schema object is not an alternative: `AnySchema` is Zod-only, so a plain object makes `normalizeObjectSchema()` return `undefined` and the schema is silently dropped.
+3d. **The widgets share one component set and one palette.** `web/src/components/` holds the shell,
+badges, cards and empty/error states; `web/src/index.css` defines every colour as a custom property on
+`:root`, redefined under `prefers-color-scheme: dark`. No widget may contain a hard-coded hex literal —
+there were 95, and they made dark mode impossible. `--brand` (#ACE849) is invariant for fills;
+`--brand-text` darkens in light mode, where the pure hue fails contrast on white.
+3e. **One set of cost formatters.** `web/src/format.ts` is character-identical to `formatMicroCost` /
+`formatMonthlyBudget` in `llm-business-metrics.ts`. There were previously three implementations that
+disagreed, so the widget could render `$450.00` where the text the model reads said `$450`. Change one
+side, change the other.
+3f. **Optimized cost is conditional, and the widgets must say so.** Batch pricing
+needs an async workload *and* a model that publishes batch rates; cache savings
+need a cacheable prefix *and* a published cache-read rate. `optimizationLevers()`
+returns which of the four conditions held, and `leverSummary()` turns that into a
+sentence. A bare 0% saving reads as a bug; "this model publishes no batch rate"
+reads as an answer. `leverSummary()` is duplicated in the estimate widget — keep
+the two in step.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
 6. **Compute pricing** comes from `GET /api/pricing` (~6,000 instances across 7 providers), with the 137-row static array in `data/pricing-data.ts` as fallback only. Category, processor and use-case enrichment is applied locally to whichever rows arrive. It stopped being a static-only tool when optimtoken became the source of truth, and `openWorldHint` was corrected to `true` to match.
@@ -211,6 +254,16 @@ diverged before the switch.
   is unreachable, so its drift is invisible until the day it matters.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference. Applied locally to the site's rows.
+
+**One deliberate divergence, to be backported.** `optimizationLevers()` here
+refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
+returns the list cost exactly when no lever is pulled. The original applies batch
+pricing whenever both batch fields are present, which for Zhipu GLM 5.2 — batch
+$0.70/$2.20 against list $0.49/$1.54 — produced an "optimized" cost 34% dearer
+than list, reported as a 0% saving with both levers named as the reason. The two
+apps therefore no longer agree to the cent for that model. Fix it upstream and
+the divergence closes; until then it is intentional and pinned by four tests in
+`llm-business-metrics.test.ts`, including a whole-catalogue sweep.
 
 Two things keep the two honest:
 
@@ -255,10 +308,24 @@ Each profile defines typical input/output token counts per request.
 
 - No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
 - No database — stateless tool execution
-- `/api/pricing` costs ~0.3s on an edge-cache HIT and ~50s on a MISS, and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
-- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Measured 2026-08-17: `/api/llm-models` is 209 ms cold / 31 ms warm; `/api/pricing` is **50.5 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget, which is *shorter than the cold path always takes* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is now 55 s and guarded by a test against `MEASURED_COLD_REBUILD_MS`. Do not "tune it down" to match the LLM side.
-- **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s: an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
-- **Do not rename or drop `structuredContent` fields.** The `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (`app.json` used to be bound to it too; it was deleted once ChatGPT moved to submitting the MCP server directly.)
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
+- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
+  **This paragraph used to say 55 s and "do not tune it down"; that was correct advice against a 50.5 s cold path, and upstream PR #57 (2026-08-18) cut that path by ~6x.** The rule it was protecting has not changed — never size this budget from the LLM endpoint's profile — but the number that satisfies it has. Re-measure before moving it again, and move all four places together (the two constants, the guard tests, and this bullet). Do not restore 55 s just because this paragraph once said so.
+- **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s (measured 2026-08-17, against the 50.5 s rebuild; not re-run since PR #57, but the mechanism does not depend on the rebuild's duration): an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
+- **The compute catalogue is enriched once, not per request.** `servableCatalogue()`
+  in `index.ts` memoises `enrichInstances()` + the Linux filter in a `WeakMap`
+  keyed by the catalogue array's identity — the memo in `compute-pricing.ts` hands
+  back the same array for the life of an entry and a fresh one after a refresh, so
+  identity is exactly the right invalidation key. Enriching per request cost 7 ms
+  and ~2.6 MB every call, 41% of it on Windows rows the tool discards immediately.
+  `catalogSize` counts servable rows (~3,573), not the raw catalogue (~6,052):
+  a denominator that includes rows no query can reach is not a denominator.
+- **Both fetchers dedupe in-flight requests.** Five concurrent cold callers used
+  to produce five upstream rebuilds each. The `refreshing` set only ever covered
+  the stale-while-revalidate branch; the cold branch — the one callers wait on —
+  had none. Keep the `finally` that clears the shared promise, or one failure
+  pins every later caller to it.
+- **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (`app.json` used to be bound to it too; it was deleted once ChatGPT moved to submitting the MCP server directly.)
 - **Widgets are registered for the `mcp-app` host only.** Omitting `hosts` on `registerWidget` publishes each widget twice, under `ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`, with the same display name, so hosts list every widget twice in their resource pickers. `mcp-app` emits `text/html;profile=mcp-app` and `_meta.ui.resourceUri`, which is what both Claude and current ChatGPT want; `apps-sdk` is the legacy shape. See `docs/chatgpt-submission.md`.
 - Brand color: Chartreuse (#ACE849) for OptimNow identity
 - Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
@@ -273,3 +340,4 @@ Each profile defines typical input/output token counts per request.
 - `react`, `react-dom` — Widget UI rendering
 - `vite` — Build tooling
 - `alpic` — Deployment CLI (devDependency)
+- `tsx` — TypeScript loader `npm test` runs node --test through (devDependency)

@@ -944,6 +944,25 @@ export async function fetchLLMModels(): Promise<LLMFetchResult> {
     return cache.result;
   }
 
+  // One fetch shared between concurrent callers. Cheaper here than on the
+  // compute side (~200 ms cold rather than ~10 s) but free to do, and it stops
+  // a burst of tool calls on a cold process from walking the whole tier chain
+  // several times over.
+  if (inflight) return inflight;
+  inflight = (async () => {
+    try {
+      return await fetchAllTiers();
+    } finally {
+      inflight = null;
+    }
+  })();
+  return inflight;
+}
+
+let inflight: Promise<LLMFetchResult> | null = null;
+
+async function fetchAllTiers(): Promise<LLMFetchResult> {
+
   try {
     const result = await fetchFromSite();
     cache = { result, fetchedAt: Date.now() };
@@ -991,4 +1010,60 @@ export function filterModels<T extends LLMModel>(
     if (filters.minElo !== undefined && (!m.eloScore || m.eloScore < filters.minElo)) return false;
     return true;
   });
+}
+
+/** Substring match on model or provider name, shared by every tool that takes a
+ *  free-text model name. An exact model-name hit is promoted to the front so
+ *  "GPT-4o" resolves to GPT-4o and not to GPT-4o-mini. */
+export function matchModels<T extends LLMModel>(models: T[], query: string, limit = 5): T[] {
+  const search = query.trim().toLowerCase();
+  if (!search) return [];
+  const matches = models.filter(
+    (m) => m.model.toLowerCase().includes(search) || m.provider.toLowerCase().includes(search),
+  );
+  const exact = matches.filter((m) => m.model.toLowerCase() === search);
+  if (exact.length === 0) return matches.slice(0, limit);
+  return [...exact, ...matches.filter((m) => m.model.toLowerCase() !== search)].slice(0, limit);
+}
+
+export type ResolutionStatus = "exact" | "unique" | "ambiguous" | "not-found" | "duplicate";
+
+export interface ModelResolution<T> {
+  query: string;
+  status: ResolutionStatus;
+  matched?: T;
+  /** The other rows the query also hit, so an ambiguous pick can be reported
+   *  rather than silently made. Capped — see `totalMatches` for the real count. */
+  alternatives: string[];
+  /** How many rows the query hit in total, before `alternatives` was capped.
+   *  Reporting `alternatives.length + 1` as the total told the caller six models
+   *  were weighed when thirty had been dropped. */
+  totalMatches: number;
+}
+
+/** How many alternatives a resolution carries. Enough to show the caller what
+ *  else the name could have meant, without pasting the catalogue at them. */
+const MAX_ALTERNATIVES = 5;
+
+/** Resolve one free-text name to a single row, recording how confident that was. */
+export function resolveModel<T extends LLMModel>(models: T[], query: string): ModelResolution<T> {
+  const all = matchModels(models, query, Number.POSITIVE_INFINITY);
+  if (all.length === 0) return { query, status: "not-found", alternatives: [], totalMatches: 0 };
+
+  const search = query.trim().toLowerCase();
+  // Exact hits are promoted to the front by matchModels, so counting them here
+  // tells us whether "exact" is actually unambiguous. Two providers shipping the
+  // same model name is a real case, and picking the first silently is the bug.
+  const exactCount = all.filter((m) => m.model.toLowerCase() === search).length;
+
+  const status: ResolutionStatus =
+    exactCount === 1 ? "exact" : all.length > 1 ? "ambiguous" : "unique";
+
+  return {
+    query,
+    status,
+    matched: all[0],
+    alternatives: all.slice(1, 1 + MAX_ALTERNATIVES).map((m) => `${m.provider} ${m.model}`),
+    totalMatches: all.length,
+  };
 }

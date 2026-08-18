@@ -8,6 +8,7 @@ import {
   setComputeTimeoutForTest,
   UPSTREAM_TIMEOUT_MS,
   MEASURED_COLD_REBUILD_MS,
+  MIN_COLD_PATH_HEADROOM,
 } from "./compute-pricing.js";
 import {
   optimtokenUrl,
@@ -473,13 +474,19 @@ test("the compute snapshot admits it ignored the region filter", async (t) => {
 
 // ── The regression: tier 2 while upstream is reachable ──────────────
 //
-// This is the defect these tests exist for. `/api/pricing` takes ~50.5s to
-// rebuild a cold edge entry (measured 2026-08-17: 50.8s / 50.5s / 50.5s)
-// against `/api/llm-models`' 209ms, because the site assembles six provider
-// APIs inside a `maxDuration: 60` function. The compute budget was 20s — tuned
-// for the small endpoint — so a cold entry could not reach tier 1 at all, and
-// the tool served the snapshot on every call while reporting only that the
-// site "was unreachable". It was reachable. We were not waiting for it.
+// This is the defect these tests exist for. `/api/pricing` rebuilds a cold
+// edge entry in 6.7-8.9s (8 samples across all four regions, 2026-08-18)
+// against `/api/llm-models`' 0.19-0.42s, because the site assembles six
+// provider APIs inside a `maxDuration: 60` function. The compute budget was
+// 20s — tuned for the small endpoint — against a cold path that then took
+// 50.5s, so a cold entry could not reach tier 1 at all, and the tool served
+// the snapshot on every call while reporting only that the site "was
+// unreachable". It was reachable. We were not waiting for it.
+//
+// Upstream PR #57 (2026-08-18) cut that 50.5s cold path to ~7.5s, so the
+// budget came down from 55s to 25s. The shape of the bug did not change with
+// it: a budget tuned to the LLM endpoint still makes tier 1 unreachable. Only
+// the number that would do it moved.
 
 test("the compute budget covers a cold upstream rebuild", () => {
   // The guard against re-tuning this budget to the LLM endpoint's profile. If
@@ -491,11 +498,24 @@ test("the compute budget covers a cold upstream rebuild", () => {
   );
 });
 
+test("the compute budget keeps real headroom over the cold path", () => {
+  // "Above the cold path" was a tight assertion when the budget was 55s against
+  // a 50.5s rebuild. At 25s against 8.9s it would also pass at 9s — a budget
+  // one throttled provider API away from re-pinning the tool to tier 2. The
+  // ratio is what carries the guarantee now that the numbers are far apart.
+  const headroom = UPSTREAM_TIMEOUT_MS / MEASURED_COLD_REBUILD_MS;
+  assert.ok(
+    headroom >= MIN_COLD_PATH_HEADROOM,
+    `compute budget ${UPSTREAM_TIMEOUT_MS}ms is only ${headroom.toFixed(1)}x the measured ` +
+      `${MEASURED_COLD_REBUILD_MS}ms cold rebuild; a degraded upstream needs at least ${MIN_COLD_PATH_HEADROOM}x`,
+  );
+});
+
 test("a slow-but-reachable upstream reaches tier 1 instead of degrading", async (t) => {
   t.after(restoreFetch);
   reset();
-  // 400ms upstream, 5s budget — the same ratio as 50.5s upstream against the
-  // 55s budget, and the inverse of the 50.5s-against-20s that broke.
+  // 400ms upstream, 5s budget — a wider ratio than production's 8.9s against
+  // 25s, and the inverse of the 50.5s-against-20s that broke.
   setComputeTimeoutForTest(5_000);
   stubFetch(url => (isSite(url) ? { body: sitePricingResponse(), delayMs: 400 } : { throws: true }));
 

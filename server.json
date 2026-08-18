@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.OptimNow/ai-pricing-hub",
-  "description": "Compare LLM API pricing, estimate workload costs, and benchmark cloud compute. By OptimNow.",
+  "description": "Compare LLM API pricing and quality, get a model recommendation under a budget, put named models side by side, estimate workload costs, and benchmark cloud compute across 7 providers. Vendor-verified pricing, with provenance on every response. By OptimNow.",
   "status": "active",
   "repository": {
     "url": "https://github.com/OptimNow/ai-pricing-hub-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "remotes": [
     {
       "type": "streamable-http",

@@ -24,6 +24,8 @@ No test account is needed: the server is public and unauthenticated.
 | P3 | `estimate-llm-cost` | "Estimate my monthly LLM cost for a support-ticket workload." | Returns `modelCosts` and `volume` using the default use-case profile. |
 | P4 | `estimate-llm-cost` | "Estimate the monthly cost of GPT-4o-mini at 100 input tokens and 50 output tokens, one million requests a month." | A concrete monthly figure for the named model. |
 | P5 | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, top 5." | Five instances sorted ascending by monthly price, spanning several providers, with a `provenance` block stating which tier served the prices. |
+| P6 | `recommend-llm-model` | "Recommend a model for support tickets under $500 a month." | Top 3 with `efficiencyRank`, `costDeltaVsTopPct` and a per-constraint satisfied/violated list. `overConstrained` is false. |
+| P7 | `compare-models-side-by-side` | "Compare GPT-4o, Claude Opus 5 and Gemini 3.1 Pro side by side." | Three columns × 8 use cases, list and optimized. Each name resolves and the `resolution` entries say how. |
 
 ## Negative cases
 
@@ -36,6 +38,16 @@ rejections, so they are stable across data-source changes.
 | N1 | `compare-llm-models` | "Compare LLM models with a limit of -5." | Validation error naming the `limit` field. No partial results. |
 | N2 | `estimate-llm-cost` | "Estimate LLM cost with a monthly volume of -100." | Validation error naming `monthlyVolume`. |
 | N3 | `compare-compute-pricing` | "Compare compute pricing with a limit of 0." | Validation error naming `limit`. |
+
+### Failure modes worth showing a reviewer
+
+These are deliberate behaviours, not defects, and both are easy to mistake for
+one if they turn up unannounced during a review.
+
+| # | Tool | Prompt | Expected |
+|---|------|--------|----------|
+| N4 | `recommend-llm-model` | "Recommend a model for coding under $1 a month with an ELO of at least 1490." | Not an error and not an empty list: `overConstrained: true`, `recommendations: []`, and `nearMisses` carrying the constraint each one failed, ordered by how far off they are. |
+| N5 | `compare-models-side-by-side` | "Compare gpt and claude." | Succeeds, and the `resolution` block states that each partial name matched many models and which one was used — including how many were not shown. A name that matched nothing gets no column, and that is said out loud. |
 
 ## Schema notes
 
@@ -66,7 +78,11 @@ P2: PASS/FAIL - notes
 P3: PASS/FAIL - notes
 P4: PASS/FAIL - notes
 P5: PASS/FAIL - notes
+P6: PASS/FAIL - notes
+P7: PASS/FAIL - notes
 N1: PASS/FAIL - notes
 N2: PASS/FAIL - notes
 N3: PASS/FAIL - notes
+N4: PASS/FAIL - notes
+N5: PASS/FAIL - notes
 ```

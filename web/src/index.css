@@ -6,9 +6,94 @@
   padding: 0;
 }
 
+/* Widgets render inside the host's own chrome (Claude, ChatGPT, VS Code), which
+   may be light or dark. Every colour a widget paints comes from a token below;
+   the dark block redefines the same names so no widget needs a media query. */
+:root {
+  --surface: #ffffff;
+  --surface-subtle: #f9fafb;
+  --surface-accent: #f7fce9;
+  --border: #e5e7eb;
+  --border-subtle: #f3f4f6;
+  --border-dashed: #d1d5db;
+
+  --text: #111827;
+  --text-muted: #6b7280;
+  --text-faint: #9ca3af;
+
+  /* OptimNow chartreuse. Pure #ACE849 fails contrast as text on white, so light
+     mode uses a darkened tint for text and keeps the pure hue for fills. */
+  --brand: #ace849;
+  --brand-text: #557f0c;
+  --brand-soft: rgba(172, 232, 73, 0.22);
+  --brand-border: rgba(120, 170, 40, 0.55);
+
+  --positive: #16a34a;
+  --negative: #dc2626;
+
+  --chip-bg: #f3f4f6;
+  --chip-text: #374151;
+  --capability-bg: #eff6ff;
+  --capability-text: #1d4ed8;
+  --warn-bg: #fef3c7;
+  --warn-text: #92400e;
+  --error-bg: #fef2f2;
+  --error-border: #fecaca;
+  --error-text: #991b1b;
+
+  --provider-aws: #9a5b00;
+  --provider-azure: #005a9e;
+  --provider-gcp: #1a56c4;
+  --provider-digitalocean: #0062c4;
+  --provider-oci: #b03a2a;
+  --provider-ovh: #000e9c;
+  --provider-alibaba: #a34400;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #16181d;
+    --surface-subtle: #1b1e24;
+    --surface-accent: rgba(172, 232, 73, 0.08);
+    --border: #2a2f38;
+    --border-subtle: #23272f;
+    --border-dashed: #39404b;
+
+    --text: #e5e7eb;
+    --text-muted: #9ca3af;
+    --text-faint: #6b7280;
+
+    --brand-text: #ace849;
+    --brand-soft: rgba(172, 232, 73, 0.14);
+    --brand-border: rgba(172, 232, 73, 0.45);
+
+    --positive: #4ade80;
+    --negative: #f87171;
+
+    --chip-bg: #23272f;
+    --chip-text: #d1d5db;
+    --capability-bg: rgba(59, 130, 246, 0.18);
+    --capability-text: #93c5fd;
+    --warn-bg: rgba(245, 158, 11, 0.18);
+    --warn-text: #fcd34d;
+    --error-bg: rgba(239, 68, 68, 0.12);
+    --error-border: rgba(248, 113, 113, 0.4);
+    --error-text: #fca5a5;
+
+    --provider-aws: #ff9900;
+    --provider-azure: #4ca9ec;
+    --provider-gcp: #7ba9f7;
+    --provider-digitalocean: #4da3ff;
+    --provider-oci: #e8776a;
+    --provider-ovh: #7b87ff;
+    --provider-alibaba: #ff8a3d;
+  }
+}
+
 body {
   font-family: system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   line-height: 1.5;
-  color: #111827;
+  color: var(--text);
+  background: var(--surface);
 }

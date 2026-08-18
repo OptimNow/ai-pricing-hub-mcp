@@ -1,7 +1,8 @@
 import { McpServer } from "skybridge/server";
 import { z } from "zod";
-import { fetchLLMModels, filterModels } from "./lib/llm-models.js";
-import type { LLMModel } from "./data/pricing-data.js";
+import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
+import type { ResolutionStatus } from "./lib/llm-models.js";
+import type { LLMModel, ComputeInstance } from "./data/pricing-data.js";
 import {
   USE_CASE_KEYS,
   USE_CASE_PROFILES,
@@ -15,10 +16,21 @@ import {
   roundPerRequestCost,
   roundMonthlyCost,
   roundPricePer1MOrNull,
+  optimizationLevers,
+  savingsPct,
+  leverSummary,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
-import type { UseCaseProfile, VolumePreset } from "./lib/llm-business-metrics.js";
+import type {
+  UseCaseProfile,
+  VolumePreset,
+  UseCaseKey,
+  EnrichedLLMModel,
+  OptimizationLevers,
+} from "./lib/llm-business-metrics.js";
+import { roiCalculatorUrl } from "./lib/roi-link.js";
 import { enrichInstances } from "./lib/compute-categories.js";
+import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
 import {
   PRICING_REGIONS,
@@ -58,6 +70,12 @@ const enrichedModelSchema = z.object({
   optimizedMonthlyBudget: z.number(),
   volatilityRisk: z.string(),
   isFinOpsFriendly: z.boolean(),
+  /** Which optimization levers actually applied for the selected use case, so
+   *  the widget can name them instead of assuming caching. */
+  batchEligible: z.boolean(),
+  cacheEligible: z.boolean(),
+  batchApplied: z.boolean(),
+  cacheApplied: z.boolean(),
 });
 
 /**
@@ -148,6 +166,11 @@ const estimateCostOutputSchema = {
           monthly: z.number(),
           perRequestOptimized: z.number(),
           monthlyOptimized: z.number(),
+          savingsPct: z.number(),
+          batchEligible: z.boolean(),
+          cacheEligible: z.boolean(),
+          batchApplied: z.boolean(),
+          cacheApplied: z.boolean(),
         }),
       ),
     }),
@@ -187,6 +210,140 @@ const computePricingOutputSchema = {
   error: z.string().optional(),
 };
 
+const resolutionSchema = z.object({
+  query: z.string(),
+  status: z.enum(["exact", "unique", "ambiguous", "not-found", "duplicate"]),
+  resolved: z.string().optional(),
+  /** Capped at 5 — `totalMatches` is the real figure. */
+  alternatives: z.array(z.string()),
+  totalMatches: z.number(),
+});
+
+/** One (model, use case) cell: list and optimized cost, plus which of the two
+ *  optimization levers actually applied. The levers ship so the widget can say
+ *  *why* a saving is 0% instead of drawing an empty bar. */
+const useCaseCostSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  perRequest: z.number(),
+  perRequestOptimized: z.number(),
+  monthly: z.number(),
+  monthlyOptimized: z.number(),
+  savingsPct: z.number(),
+  batchEligible: z.boolean(),
+  cacheEligible: z.boolean(),
+  batchApplied: z.boolean(),
+  cacheApplied: z.boolean(),
+});
+
+const sideBySideOutputSchema = {
+  models: z.array(z.object({ ...modelShape, useCaseCosts: z.array(useCaseCostSchema) })),
+  resolution: z.array(resolutionSchema),
+  volume: z.number(),
+  volumeLabel: z.string(),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  provenance: llmProvenanceSchema.optional(),
+  error: z.string().optional(),
+};
+
+/** One constraint the caller set, and whether this model met it. Returned for
+ *  satisfied constraints too: "met" is the evidence behind a recommendation. */
+const constraintCheckSchema = z.object({
+  constraint: z.string(),
+  required: z.string(),
+  actual: z.string(),
+  satisfied: z.boolean(),
+});
+
+const recommendationSchema = z.object({
+  rank: z.number(),
+  provider: z.string(),
+  model: z.string(),
+  category: z.string(),
+  openness: z.string(),
+  contextWindow: z.string(),
+  capabilities: z.array(z.string()),
+  license: z.string().optional(),
+  eloScore: z.number().nullable(),
+  efficiencyScore: z.number().nullable(),
+  efficiencyRank: z.number().nullable(),
+  rankedOutOf: z.number(),
+  perRequest: z.number(),
+  perRequestOptimized: z.number(),
+  monthlyBudget: z.number(),
+  monthlyOptimizedBudget: z.number(),
+  savingsPct: z.number(),
+  isFinOpsFriendly: z.boolean(),
+  volatilityRisk: z.string(),
+  costDeltaVsTopPct: z.number(),
+  constraints: z.array(constraintCheckSchema),
+});
+
+const recommendOutputSchema = {
+  recommendations: z.array(recommendationSchema),
+  /** Populated only when `overConstrained` — the nearest models, each carrying
+   *  the constraint it failed, so an impossible query still answers something. */
+  nearMisses: z.array(recommendationSchema),
+  overConstrained: z.boolean(),
+  useCaseLabel: z.string(),
+  volumeLabel: z.string(),
+  volume: z.number(),
+  candidateCount: z.number(),
+  rankedCount: z.number(),
+  catalogSize: z.number(),
+  roiCalculatorUrl: z.string(),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  provenance: llmProvenanceSchema.optional(),
+  error: z.string().optional(),
+};
+
+type ResolutionEntry = { query: string; status: ResolutionStatus; resolved?: string; alternatives: string[]; totalMatches: number };
+type ConstraintCheck = z.infer<typeof constraintCheckSchema>;
+type Recommendation = z.infer<typeof recommendationSchema>;
+
+/**
+ * The rows this tool can actually return, enriched, memoised per catalogue.
+ *
+ * Two wastes were stacked here. `enrichInstances()` ran over all ~6,050 rows on
+ * every single request — 60-85% of warm CPU and ~2.6 MB of allocation — even
+ * though the catalogue behind it is memoised for an hour and the enrichment is
+ * a pure function of it. And ~41% of those rows are Windows, which the filter
+ * below discarded immediately afterwards, so nearly half the work could never
+ * reach a caller.
+ *
+ * Keyed by the catalogue array identity rather than by region or a timestamp:
+ * the memo in compute-pricing.ts hands back the same array for the life of an
+ * entry and a fresh one after a refresh, so identity tracks exactly the thing
+ * that would invalidate this. A WeakMap means a refreshed catalogue takes its
+ * enriched copy with it.
+ */
+const servableCache = new WeakMap<ComputeInstance[], EnrichedComputeInstance[]>();
+
+function servableCatalogue(catalogue: ComputeInstance[]): EnrichedComputeInstance[] {
+  const hit = servableCache.get(catalogue);
+  if (hit) return hit;
+  // Linux-only is a property of the tool, not of the fetch layer, which is why
+  // the filter lives here rather than in coerceSiteInstance.
+  const enriched = enrichInstances(catalogue).filter(inst => inst.os === "Linux");
+  servableCache.set(catalogue, enriched);
+  return enriched;
+}
+
+/** Flat shortfall charge for a constraint that is a yes/no, not a distance.
+ *  Larger than any realistic numeric shortfall (a 10x budget overrun scores 1,
+ *  a 500-point ELO gap scores 5) so categorical misses rank last among equals. */
+const CATEGORICAL_SHORTFALL = 10;
+
+function modelKey(m: { provider: string; model: string }): string {
+  return `${m.provider}/${m.model}`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -194,7 +351,7 @@ function errorMessage(error: unknown): string {
 const server = new McpServer(
   {
     name: "ai-pricing-hub",
-    version: "0.1.0",
+    version: "0.3.0",
   },
   { capabilities: {} },
 )
@@ -207,10 +364,15 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Compare LLM Models",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
-      "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
-      "Fetches live data from OpenRouter API. Filter by provider, price tier (category), openness, " +
+      "Browse and filter the whole LLM catalogue and get back a ranked table: price, quality (ELO), " +
+      "efficiency and capabilities. Use this when the user wants to SEE THE FIELD — 'show me models " +
+      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300'. " +
+      "For a single PICK under a budget use recommend-llm-model; to weigh 2-4 NAMED models against " +
+      "each other use compare-models-side-by-side. " +
+      "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
       "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
       "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
       "Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. " +
@@ -219,13 +381,13 @@ const server = new McpServer(
       "Present the results as a table and let the user draw conclusions.",
     inputSchema: {
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
-      category: z.string().optional().describe("Filter by price tier: Frontier, Mid-tier, Budget, Image"),
+      category: z.string().optional().describe("Price tier, matched by exact equality (case-insensitive): Frontier, Mid-tier, Budget, Image. This is cost only — self-hostability is the separate `openness` axis."),
       openness: z.enum(OPENNESS_VALUES as [string, ...string[]]).optional().describe("Filter by self-hostability, derived from the licence: Open source, Open weights, Proprietary, Unknown"),
-      capability: z.string().optional().describe("Filter by capability: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
+      capability: z.string().optional().describe("Capability, matched by exact equality (case-insensitive): Text, Vision, Code, Reasoning, Agents, Image Gen, Audio. Any other string returns zero matches."),
       maxInputPrice: z.number().optional().describe("Max input price per 1M tokens in USD"),
       maxOutputPrice: z.number().optional().describe("Max output price per 1M tokens in USD"),
-      minElo: z.number().optional().describe("Minimum ELO score (quality benchmark from Chatbot Arena)"),
-      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case for cost estimation. Default: supportTicket"),
+      minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
     },
@@ -247,8 +409,8 @@ const server = new McpServer(
 
       if (allModels.length === 0) {
         return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models from OpenRouter API." },
-          content: [{ type: "text", text: "Failed to fetch LLM models from OpenRouter API." }],
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
           isError: true,
         };
       }
@@ -294,6 +456,7 @@ const server = new McpServer(
             monthlyBudget: roundMonthlyCost(m.monthlyBudget),
             optimizedUseCaseCost: roundPerRequestCost(m.optimizedUseCaseCost),
             optimizedMonthlyBudget: roundMonthlyCost(m.optimizedMonthlyBudget),
+            ...optimizationLevers(m, USE_CASE_PROFILES[ucKey]),
           })),
           useCaseLabel,
           volumeLabel,
@@ -350,18 +513,23 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Estimate LLM Cost",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
-      "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. " +
+      "Cost a workload with EXACT numbers the caller supplies: arbitrary token counts per request and " +
+      "any monthly volume, not just the 10k/100k/1m presets the other cost tools use. Use this for " +
+      "'about 800 in and 200 out, 4 million calls a month', or to price one named model across every " +
+      "use-case profile. To compare 2-4 named models like for like at a preset volume, use " +
+      "compare-models-side-by-side instead. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
       "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
-      modelName: z.string().optional().describe("Model name to estimate costs for (e.g. 'GPT-4o', 'Claude Sonnet 4'). If omitted, shows top models."),
-      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case preset. Default: all presets."),
-      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request (overrides preset)"),
-      customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request (overrides preset)"),
-      monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Custom monthly volume (default: 100,000)"),
+      modelName: z.string().optional().describe("Model name, e.g. 'GPT-4o'. A partial name matches up to 5 models and ALL of them are costed. If omitted, the first 8 catalogue entries are used — that is catalogue order, not a quality ranking."),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: every preset."),
+      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request. Must be supplied TOGETHER with customOutputTokens — either alone is ignored and the preset is used. A custom shape assumes no cacheable prefix and no batch eligibility, so its optimized cost equals its list cost."),
+      customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request. Must be supplied TOGETHER with customInputTokens — either alone is ignored and the preset is used."),
+      monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Exact monthly request count, any integer (default 100,000). This tool does not take the 10k/100k/1m presets the other cost tools use."),
     },
     outputSchema: outputSchema(estimateCostOutputSchema),
   },
@@ -383,10 +551,7 @@ const server = new McpServer(
       // Find matching models
       let targetModels: LLMModel[];
       if (modelName) {
-        const search = modelName.toLowerCase();
-        targetModels = allModels.filter(
-          m => m.model.toLowerCase().includes(search) || m.provider.toLowerCase().includes(search)
-        ).slice(0, 5);
+        targetModels = matchModels(allModels, modelName, 5);
         if (targetModels.length === 0) {
           return {
             structuredContent: {
@@ -414,7 +579,8 @@ const server = new McpServer(
         monthly: number;
         perRequestOptimized: number;
         monthlyOptimized: number;
-      };
+        savingsPct: number;
+      } & OptimizationLevers;
 
       const entry = (m: LLMModel, useCase: string, profile: UseCaseProfile): CostEntry => {
         const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
@@ -427,6 +593,8 @@ const server = new McpServer(
           monthly: cost * volume,
           perRequestOptimized: optimized,
           monthlyOptimized: optimized * volume,
+          savingsPct: savingsPct(cost, optimized),
+          ...optimizationLevers(m, profile),
         };
       };
 
@@ -459,8 +627,12 @@ const server = new McpServer(
       const lines = modelCosts.map(({ model: m, costs }) => {
         const costLines = costs.map(c =>
           `  ${c.useCase}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo ` +
-          `(optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo) ` +
-          `(${c.inputTokens} in + ${c.outputTokens} out tokens)`
+          `(${c.inputTokens} in + ${c.outputTokens} out tokens)
+` +
+          `    optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
+          (c.savingsPct > 0
+            ? ` — save ${c.savingsPct}% with ${leverSummary(c)}`
+            : ` — no saving available (${leverSummary(c)})`)
         );
         return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)\n${costLines.join("\n")}`;
       });
@@ -508,7 +680,468 @@ const server = new McpServer(
   },
 )
 
-// ─── Tool 3: Compare Compute Pricing ────────────────────────────────
+// ─── Tool 3: Compare Models Side by Side ────────────────────────────
+
+.registerWidget(
+  "compare-models-side-by-side",
+  { description: "Compare Models Side by Side", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
+  {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    title: "Compare Models Side by Side",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      "Compare 2-4 named LLM models against all 8 use-case profiles at a chosen monthly volume, " +
+      "showing list and optimized cost for each. Use when the user names specific models to weigh " +
+      "against each other, rather than filtering the whole catalogue. If they also supply their own " +
+      "token counts, or a volume outside 10k/100k/1m, use estimate-llm-cost instead. " +
+      "Every name is resolved against the catalogue and the result is reported: a name that matched " +
+      "nothing, matched several models, or duplicated an earlier pick is stated explicitly. " +
+      "IMPORTANT: Report all prices and costs EXACTLY as returned, and repeat any name-resolution " +
+      "warning to the user — a missing column is not the same as a model that costs nothing.",
+    inputSchema: {
+      models: z
+        .array(z.string())
+        .min(2)
+        .max(4)
+        .describe("2-4 model names to compare, e.g. ['GPT-4o', 'Claude Opus 5', 'Gemini 3.1 Pro']"),
+      volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+    },
+    outputSchema: outputSchema(sideBySideOutputSchema),
+  },
+  async ({ models: requested, volumePreset }) => {
+    const vol = (volumePreset || "100k") as VolumePreset;
+    const volumeEntry = VOLUME_PRESETS.find(p => p.key === vol);
+    const volume = volumeEntry?.value ?? 100_000;
+
+    const emptyOutput = {
+      models: [] as unknown[],
+      resolution: [] as ResolutionEntry[],
+      volume,
+      volumeLabel: volumeEntry?.label ?? vol,
+      source: "error",
+      eloAsOf: "",
+      dataAsOf: undefined as string | undefined,
+      provenance: undefined as unknown,
+      error: undefined as string | undefined,
+    };
+
+    try {
+      const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
+
+      if (allModels.length === 0) {
+        return {
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
+          isError: true,
+        };
+      }
+
+      // One pass per requested name, keeping the caller's order and recording
+      // every miss: dropping a column silently is the failure mode to avoid.
+      const seen = new Set<string>();
+      const resolution: ResolutionEntry[] = [];
+      const selected: LLMModel[] = [];
+
+      for (const query of requested) {
+        const r = resolveModel(allModels, query);
+        if (!r.matched) {
+          resolution.push({ query, status: "not-found", alternatives: [], totalMatches: 0 });
+          continue;
+        }
+        const resolved = `${r.matched.provider} ${r.matched.model}`;
+        if (seen.has(modelKey(r.matched))) {
+          resolution.push({ query, status: "duplicate", resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
+          continue;
+        }
+        seen.add(modelKey(r.matched));
+        selected.push(r.matched);
+        resolution.push({ query, status: r.status, resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
+      }
+
+      const describe = (r: ResolutionEntry): string => {
+        switch (r.status) {
+          case "not-found": return `"${r.query}" matched no model — no column for it.`;
+          case "duplicate": return `"${r.query}" resolved to ${r.resolved}, already selected by an earlier name — no extra column.`;
+          case "ambiguous": {
+            const undisclosed = r.totalMatches - 1 - r.alternatives.length;
+            return `"${r.query}" matched ${r.totalMatches} models; used ${r.resolved}` +
+              (r.alternatives.length > 0
+                ? ` (also matched: ${r.alternatives.join(", ")}${undisclosed > 0 ? `, and ${undisclosed} more` : ""})`
+                : "") + ".";
+          }
+          default: return `"${r.query}" → ${r.resolved}.`;
+        }
+      };
+
+      if (selected.length < 2) {
+        const message =
+          `Need at least 2 distinct models to compare, resolved ${selected.length}. ` +
+          resolution.map(describe).join(" ");
+        return {
+          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      // Raw floats drive the arithmetic; rounding happens once, on the way out.
+      const withCosts = selected.map(m => ({
+        ...m,
+        useCaseCosts: USE_CASE_KEYS.map(key => {
+          const profile = USE_CASE_PROFILES[key];
+          const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
+          const optimized = optimizedUseCaseCost(m, profile);
+          return {
+            key,
+            label: profile.label,
+            inputTokens: profile.inputTokens,
+            outputTokens: profile.outputTokens,
+            perRequest: cost,
+            perRequestOptimized: optimized,
+            monthly: cost * volume,
+            monthlyOptimized: optimized * volume,
+            savingsPct: savingsPct(cost, optimized),
+            ...optimizationLevers(m, profile),
+          };
+        }),
+      }));
+
+      const header = withCosts.map(m =>
+        `${m.provider} ${m.model} — In: $${m.inputPricePer1M}/1M, Out: $${m.outputPricePer1M}/1M` +
+        (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
+        `, context ${m.contextWindow}`
+      );
+
+      const rows = USE_CASE_KEYS.map((key, i) => {
+        const profile = USE_CASE_PROFILES[key];
+        const cells = withCosts.map(m => {
+          const c = m.useCaseCosts[i];
+          return `  ${m.provider} ${m.model}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo` +
+            ` | optimized ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
+            (c.savingsPct > 0 ? ` (−${c.savingsPct}%, ${leverSummary(c)})` : ` (no saving: ${leverSummary(c)})`);
+        });
+        return `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out):\n${cells.join("\n")}`;
+      });
+
+      return {
+        structuredContent: {
+          ...emptyOutput,
+          models: withCosts.map(m => ({
+            ...m,
+            useCaseCosts: m.useCaseCosts.map(c => ({
+              ...c,
+              perRequest: roundPerRequestCost(c.perRequest),
+              perRequestOptimized: roundPerRequestCost(c.perRequestOptimized),
+              monthly: roundMonthlyCost(c.monthly),
+              monthlyOptimized: roundMonthlyCost(c.monthlyOptimized),
+            })),
+          })),
+          resolution,
+          source,
+          eloAsOf,
+          dataAsOf,
+          provenance,
+        },
+        content: [
+          {
+            type: "text",
+            // The notice leads: a caller told to report prices exactly as
+            // returned must see "unverified" before it sees the prices.
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n` +
+              `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
+              `${header.join("\n")}\n\n${rows.join("\n\n")}`,
+          },
+        ],
+        isError: false,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error("[compare-models-side-by-side] failed:", error);
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: `Error comparing models: ${message}` }],
+        isError: true,
+      };
+    }
+  },
+)
+
+// ─── Tool 4: Recommend an LLM Model ─────────────────────────────────
+
+.registerWidget(
+  "recommend-llm-model",
+  { description: "Recommend an LLM Model", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
+  {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    title: "Recommend an LLM Model",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      "Pick a model. Returns a ranked top 3 for one workload under optional constraints, each with a " +
+      "per-constraint satisfied/violated breakdown as the evidence. Use this when the user wants an " +
+      "ANSWER rather than a table — 'what should I use for support tickets under $500 a month'. To " +
+      "browse or filter the whole catalogue instead, use compare-llm-models. Constraints: " +
+      "(monthly budget, minimum ELO, required capability, self-hostability). " +
+      "Returns a top 3 as structured facts — efficiency rank, ELO, list and optimized cost, " +
+      "FinOps flag, volatility, and a per-constraint satisfied/violated breakdown. " +
+      "When nothing satisfies every constraint the query is reported as over-constrained and the " +
+      "nearest misses are returned instead, each carrying the constraint it failed. " +
+      "IMPORTANT: Report the returned facts EXACTLY. The ranking is already computed — do not " +
+      "re-rank, and do not present a near miss as if it satisfied the constraints.",
+    inputSchema: {
+      useCasePreset: z.enum(USE_CASE_KEYS).describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k)."),
+      volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+      maxMonthlyBudget: z.number().positive().optional().describe("Maximum monthly budget in USD at the given volume. Tested against the LIST-price monthly cost, not the caching/batch-optimized cost."),
+      minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
+      requiredCapability: z.string().optional().describe("Capability the model must have: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
+      openness: z
+        .enum(OPENNESS_VALUES as [string, ...string[]])
+        .optional()
+        .describe("Require a self-hostability bucket, derived from the licence: Open source, Open weights, Proprietary, Unknown"),
+    },
+    outputSchema: outputSchema(recommendOutputSchema),
+  },
+  async ({ useCasePreset, volumePreset, maxMonthlyBudget, minElo, requiredCapability, openness }) => {
+    const vol = (volumePreset || "100k") as VolumePreset;
+    const volumeEntry = VOLUME_PRESETS.find(p => p.key === vol);
+    const volume = volumeEntry?.value ?? 100_000;
+    const ucKey = useCasePreset as UseCaseKey;
+
+    const emptyOutput = {
+      recommendations: [] as unknown[],
+      nearMisses: [] as unknown[],
+      overConstrained: false,
+      useCaseLabel: USE_CASE_PROFILES[ucKey].label,
+      volumeLabel: volumeEntry?.label ?? vol,
+      volume,
+      candidateCount: 0,
+      rankedCount: 0,
+      catalogSize: 0,
+      roiCalculatorUrl: roiCalculatorUrl({ useCase: ucKey, volume: vol }),
+      source: "error",
+      eloAsOf: "",
+      dataAsOf: undefined as string | undefined,
+      provenance: undefined as unknown,
+      error: undefined as string | undefined,
+    };
+
+    try {
+      const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
+
+      if (allModels.length === 0) {
+        return {
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
+          isError: true,
+        };
+      }
+
+      const enriched = enrichModels(allModels, vol, ucKey);
+
+      // Only models the value score could rank are candidates: an unscored model
+      // has no ELO, so there is nothing to recommend it on.
+      const ranked = enriched
+        .filter(m => m.efficiencyScore !== null)
+        .sort((a, b) => b.efficiencyScore! - a.efficiencyScore! || a.optimizedMonthlyBudget - b.optimizedMonthlyBudget);
+      const efficiencyRank = new Map(ranked.map((m, i) => [modelKey(m), i + 1]));
+
+      const checks = (m: EnrichedLLMModel): ConstraintCheck[] => {
+        const out: ConstraintCheck[] = [];
+        if (maxMonthlyBudget !== undefined) {
+          out.push({
+            constraint: "maxMonthlyBudget",
+            required: `≤ ${formatMonthlyBudget(maxMonthlyBudget)}/mo`,
+            actual: `${formatMonthlyBudget(m.monthlyBudget)}/mo list`,
+            satisfied: m.monthlyBudget <= maxMonthlyBudget,
+          });
+        }
+        if (minElo !== undefined) {
+          out.push({
+            constraint: "minElo",
+            required: `≥ ${minElo}`,
+            actual: m.eloScore !== undefined ? String(m.eloScore) : "no ELO score",
+            satisfied: m.eloScore !== undefined && m.eloScore >= minElo,
+          });
+        }
+        if (requiredCapability) {
+          out.push({
+            constraint: "requiredCapability",
+            required: requiredCapability,
+            actual: m.capabilities.join(", ") || "none listed",
+            satisfied: m.capabilities.some(c => c.toLowerCase() === requiredCapability.toLowerCase()),
+          });
+        }
+        if (openness) {
+          // Openness is its own axis, derived from the licence in openness.ts —
+          // not a price tier. Asking for "Open weights" must not also constrain
+          // what the model costs.
+          out.push({
+            constraint: "openness",
+            required: openness,
+            actual: m.openness,
+            satisfied: m.openness === openness,
+          });
+        }
+        return out;
+      };
+
+      // How far a model is from the numeric constraints, for ordering near
+      // misses: a model $17/mo over a $1 budget is more use to the caller than
+      // one $125/mo over, even though both violate exactly one constraint.
+      // Categorical misses have no distance, so they sit behind any numeric one.
+      const shortfall = (m: EnrichedLLMModel): number => {
+        let total = 0;
+        if (maxMonthlyBudget !== undefined && m.monthlyBudget > maxMonthlyBudget) {
+          total += Math.log10(m.monthlyBudget / maxMonthlyBudget);
+        }
+        if (minElo !== undefined) {
+          if (m.eloScore === undefined) total += CATEGORICAL_SHORTFALL;
+          else if (m.eloScore < minElo) total += (minElo - m.eloScore) / 100;
+        }
+        // A categorical miss has no natural distance, so it gets a flat charge
+        // big enough to sit behind any numeric near-miss — which is what the
+        // comment above always claimed and the code did not do. Charging 0
+        // sorted categorical misses *first*: asking for a cheap model with
+        // Vision returned a model with no Vision at all, ranked above a Vision
+        // model $46/mo over budget.
+        if (requiredCapability && !m.capabilities.some(c => c.toLowerCase() === requiredCapability.toLowerCase())) {
+          total += CATEGORICAL_SHORTFALL;
+        }
+        if (openness && m.openness !== openness) {
+          total += CATEGORICAL_SHORTFALL;
+        }
+        return total;
+      };
+
+      const evaluated = ranked.map(m => ({ m, constraints: checks(m), shortfall: shortfall(m) }));
+      const passing = evaluated.filter(e => e.constraints.every(c => c.satisfied));
+
+      // Over-constrained: rather than an empty list, return the models that came
+      // closest, each carrying the constraint it failed.
+      // "Over-constrained" has to mean the constraints did the excluding. With no
+      // constraints at all `checks()` returns [] and every model passes, so an
+      // empty `passing` means nothing was RANKABLE — a different failure with a
+      // different remedy. Reporting it as over-constraint sent the reader
+      // hunting for a constraint to relax that they never set.
+      const constraintsSet =
+        maxMonthlyBudget !== undefined || minElo !== undefined || !!requiredCapability || !!openness;
+      const nothingRankable = ranked.length === 0;
+      const overConstrained = constraintsSet && passing.length === 0 && !nothingRankable;
+      const shortlist = overConstrained
+        ? [...evaluated].sort(
+            (a, b) =>
+              a.constraints.filter(c => !c.satisfied).length - b.constraints.filter(c => !c.satisfied).length ||
+              a.shortfall - b.shortfall ||
+              (b.m.efficiencyScore ?? 0) - (a.m.efficiencyScore ?? 0),
+          ).slice(0, 3)
+        : passing.slice(0, 3);
+
+      const top = shortlist[0];
+      const build = (e: (typeof shortlist)[number], i: number): Recommendation => ({
+        rank: i + 1,
+        provider: e.m.provider,
+        model: e.m.model,
+        category: e.m.category,
+        openness: e.m.openness,
+        contextWindow: e.m.contextWindow,
+        capabilities: e.m.capabilities,
+        license: e.m.license,
+        eloScore: e.m.eloScore ?? null,
+        efficiencyScore: e.m.efficiencyScore,
+        efficiencyRank: efficiencyRank.get(modelKey(e.m)) ?? null,
+        rankedOutOf: ranked.length,
+        perRequest: roundPerRequestCost(e.m.useCaseCost),
+        perRequestOptimized: roundPerRequestCost(e.m.optimizedUseCaseCost),
+        monthlyBudget: roundMonthlyCost(e.m.monthlyBudget),
+        monthlyOptimizedBudget: roundMonthlyCost(e.m.optimizedMonthlyBudget),
+        savingsPct: savingsPct(e.m.monthlyBudget, e.m.optimizedMonthlyBudget),
+        isFinOpsFriendly: e.m.isFinOpsFriendly,
+        volatilityRisk: e.m.volatilityRisk,
+        costDeltaVsTopPct:
+          top && top.m.monthlyBudget > 0
+            ? Math.round((e.m.monthlyBudget / top.m.monthlyBudget - 1) * 100)
+            : 0,
+        constraints: e.constraints,
+      });
+
+      const results = shortlist.map(build);
+      const useCaseLabel = USE_CASE_PROFILES[ucKey].label;
+      const volumeLabel = volumeEntry?.label ?? vol;
+
+      const lines = results.map(r =>
+        `${r.rank}. ${r.provider} ${r.model} — ELO ${r.eloScore ?? "n/a"}, ` +
+        `efficiency ${r.efficiencyScore ?? "n/a"} (rank ${r.efficiencyRank ?? "n/a"} of ${r.rankedOutOf}), ` +
+        `${formatMicroCost(r.perRequest)}/req list → ${formatMonthlyBudget(r.monthlyBudget)}/mo, ` +
+        `${formatMicroCost(r.perRequestOptimized)}/req optimized → ${formatMonthlyBudget(r.monthlyOptimizedBudget)}/mo (−${r.savingsPct}%), ` +
+        `FinOps Friendly: ${r.isFinOpsFriendly ? "yes" : "no"}, volatility: ${r.volatilityRisk}, ` +
+        `monthly cost vs #1: ${r.costDeltaVsTopPct >= 0 ? "+" : ""}${r.costDeltaVsTopPct}%` +
+        (r.constraints.length > 0
+          ? `. Constraints: ${r.constraints.map(c => `${c.constraint} ${c.required} vs ${c.actual} — ${c.satisfied ? "met" : "MISSED"}`).join("; ")}`
+          : "")
+      );
+
+      const preamble = nothingRankable
+        ? `No model in the catalogue could be ranked for ${useCaseLabel}: the value score needs an Arena ELO ` +
+          `score and none of the ${allModels.length} catalogue entries carries one. That is a data problem, ` +
+          `not an over-constrained query${constraintsSet ? " — relaxing the constraints will not help" : ""}.`
+        : overConstrained
+        ? `No model satisfies every constraint. Closest ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
+          `(${ranked.length} ranked of ${allModels.length} catalogue entries), each with the constraint it failed:`
+        : `Top ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
+          `(${passing.length} of ${ranked.length} ranked models satisfy all constraints; ${allModels.length} catalogue entries):`;
+
+      const roiUrl = roiCalculatorUrl({
+        useCase: ucKey,
+        volume: vol,
+        model: top ? { provider: top.m.provider, model: top.m.model } : undefined,
+      });
+
+      return {
+        structuredContent: {
+          ...emptyOutput,
+          recommendations: overConstrained ? [] : results,
+          nearMisses: overConstrained ? results : [],
+          overConstrained,
+          candidateCount: passing.length,
+          rankedCount: ranked.length,
+          catalogSize: allModels.length,
+          roiCalculatorUrl: roiUrl,
+          source,
+          eloAsOf,
+          dataAsOf,
+          provenance,
+        },
+        content: [
+          {
+            type: "text",
+            // The notice leads: a recommendation built on uncorrected prices is
+            // exactly the case where the reader must see the caveat first.
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              `${preamble}\n\n${lines.join("\n")}\n\n` +
+              `ROI calculator for this scenario: ${roiUrl}`,
+          },
+        ],
+        isError: false,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error("[recommend-llm-model] failed:", error);
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: `Error recommending a model: ${message}` }],
+        isError: true,
+      };
+    }
+  },
+)
+
+// ─── Tool 5: Compare Compute Pricing ────────────────────────────────
 
 .registerWidget(
   "compare-compute-pricing",
@@ -516,6 +1149,7 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Compare Cloud Compute Pricing",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
@@ -528,14 +1162,14 @@ const server = new McpServer(
       "IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
       region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
-      provider: z.string().optional().describe("Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba"),
-      category: z.string().optional().describe("Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable"),
+      provider: z.string().optional().describe("Cloud provider. Must be one of these exactly (case-insensitive): AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba. Any other string returns zero matches rather than an error."),
+      category: z.string().optional().describe("Instance category. Must be one of these exactly (case-insensitive): General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable. Any other string returns zero matches rather than an error."),
       minVCPUs: z.number().optional().describe("Minimum number of vCPUs"),
       maxVCPUs: z.number().optional().describe("Maximum number of vCPUs"),
       minMemory: z.number().optional().describe("Minimum memory in GiB"),
       maxMemory: z.number().optional().describe("Maximum memory in GiB"),
-      processor: z.string().optional().describe("Processor filter: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, etc."),
-      useCase: z.string().optional().describe("Use case filter: Web App, Database, HPC, ML & AI, Dev/Test, Big Data"),
+      processor: z.string().optional().describe("Processor. Matched by exact equality (case-insensitive), so a partial value like 'H100' returns nothing. Known values: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, NVIDIA L4, NVIDIA T4, NVIDIA V100, NVIDIA Other."),
+      useCase: z.string().optional().describe("Use case. Must be one of these exactly (case-insensitive): Web App, Database, HPC, ML & AI, Dev/Test, Big Data. Any other string returns zero matches rather than an error."),
       sortBy: z.enum(["price", "vcpus", "memory", "pricePerVCPU"]).optional().describe("Sort by: price, vcpus, memory, pricePerVCPU. Default: price"),
       limit: z.number().min(1).max(50).optional().describe("Max instances to return (default: 20)"),
     },
@@ -554,12 +1188,11 @@ const server = new McpServer(
       const { instances: catalogue, source, provenance } = await fetchComputeInstances(
         (region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION,
       );
-      const enriched = enrichInstances(catalogue);
+      const enriched = servableCatalogue(catalogue);
 
       const filtered = enriched.filter(inst => {
         if (provider && inst.provider.toLowerCase() !== provider.toLowerCase()) return false;
         if (category && inst.category.toLowerCase() !== category.toLowerCase()) return false;
-        if (inst.os !== "Linux") return false;
         if (minVCPUs !== undefined && inst.vCPUs < minVCPUs) return false;
         if (maxVCPUs !== undefined && inst.vCPUs > maxVCPUs) return false;
         if (minMemory !== undefined && inst.memory < minMemory) return false;
