@@ -1,7 +1,14 @@
 import "@/index.css";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
+import { formatBudget, formatCost, savingsPct } from "../../format.js";
+import {
+  Badge, Card, EmptyState, ErrorState, FreshnessBadges, LoadingState, WidgetHeader, WidgetShell,
+} from "../../components/index.js";
 
+// The handler's success and error paths return different shapes, so skybridge
+// infers this tool's output as a union it cannot usefully destructure. Until
+// those returns are unified server-side, the contract is restated here.
 interface CostEntry {
   useCase: string;
   inputTokens: number;
@@ -41,52 +48,40 @@ interface EstimateOutput {
   error?: string;
 }
 
-function formatCost(amount: number): string {
-  if (amount === 0) return "$0";
-  if (amount < 0.001) return `$${amount.toFixed(6)}`;
-  if (amount < 0.01) return `$${amount.toFixed(4)}`;
-  if (amount < 1) return `$${amount.toFixed(4)}`;
-  return `$${amount.toFixed(2)}`;
-}
-
-function formatMonthly(amount: number): string {
-  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(1)}M`;
-  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(1)}K`;
-  if (amount < 1) return `$${amount.toFixed(2)}`;
-  return `$${amount.toFixed(0)}`;
-}
-
 function EstimateCost() {
   const { output } = useToolInfo();
 
   if (!output) {
-    return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Estimating costs...</div>;
+    return <LoadingState label="Estimating costs..." />;
   }
 
-  const { modelCosts, volume, source, eloAsOf, dataAsOf, provenance, error } = output as unknown as EstimateOutput;
+  const { modelCosts, volume, source, eloAsOf, dataAsOf, provenance, error } =
+    output as unknown as EstimateOutput;
 
   if (error) {
-    return <ErrorCard message={error} />;
+    return (
+      <WidgetShell maxWidth={720}>
+        <ErrorState title="Could not estimate costs" message={error} />
+      </WidgetShell>
+    );
   }
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "720px" }}>
-      <h2 style={{ fontSize: "18px", fontWeight: 700, marginBottom: "4px" }}>
-        LLM Cost Estimates
-      </h2>
-      <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
-        {modelCosts.length} model(s) · {volume.toLocaleString()} requests/month
-        {eloAsOf && <Badge label={`ELO as of ${eloAsOf}`} />}
-        {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
+    <WidgetShell maxWidth={720}>
+      <WidgetHeader
+        title="LLM Cost Estimates"
+        subtitle={`${modelCosts.length} model(s) · ${volume.toLocaleString()} requests/month`}
+      >
+        <FreshnessBadges source={source} eloAsOf={eloAsOf} dataAsOf={dataAsOf} />
         {/* Every figure on this card is derived from the prices below, so an
             uncorrected price silently halves the whole monthly estimate. */}
         {provenance && !provenance.pricesVerified && source !== "static-fallback" && (
-          <Badge label="unverified prices — not price-corrected" warn />
+          <Badge label="unverified prices — not price-corrected" tone="warn" />
         )}
         {provenance?.upstreamTimestamp && (
           <Badge label={`data as of ${provenance.upstreamTimestamp.slice(0, 10)}`} />
         )}
-      </p>
+      </WidgetHeader>
 
       {modelCosts.length === 0 ? (
         <EmptyState />
@@ -95,45 +90,15 @@ function EstimateCost() {
           <ModelCostCard key={`${mc.model.provider}-${mc.model.model}-${idx}`} mc={mc} />
         ))
       )}
-    </div>
+    </WidgetShell>
   );
 }
 
-function Badge({ label, warn }: { label: string; warn?: boolean }) {
-  return (
-    <span style={{
-      marginLeft: "8px", fontSize: "11px", borderRadius: "4px", padding: "1px 6px",
-      background: warn ? "#fef3c7" : "#f3f4f6", color: warn ? "#92400e" : "#4b5563",
-    }}>
-      {label}
-    </span>
-  );
-}
-
-function ErrorCard({ message }: { message: string }) {
-  return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
-      <div style={{
-        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
-        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
-      }}>
-        <strong style={{ display: "block", marginBottom: "4px" }}>Could not estimate costs</strong>
-        {message}
-      </div>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div style={{
-      border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
-      textAlign: "center", color: "#6b7280", fontSize: "13px",
-    }}>
-      No results match these filters.
-    </div>
-  );
-}
+const thStyle: React.CSSProperties = {
+  padding: "4px 6px",
+  color: "var(--text-muted)",
+  fontWeight: 500,
+};
 
 function ModelCostCard({ mc }: { mc: ModelCostItem }) {
   const m = mc.model;
@@ -141,77 +106,77 @@ function ModelCostCard({ mc }: { mc: ModelCostItem }) {
   const maxCost = Math.max(...mc.costs.map(c => c.monthly));
 
   return (
-    <div style={{
-      border: "1px solid #e5e7eb", borderRadius: "8px",
-      padding: "14px", marginBottom: "12px", background: "#fff",
-    }}>
-      {/* Model Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "10px" }}>
-        <div>
-          <span style={{ fontWeight: 600, fontSize: "14px" }}>{m.provider}</span>
-          <span style={{ color: "#6b7280", fontSize: "14px", marginLeft: "4px" }}>{m.model}</span>
-          {m.eloScore && (
-            <span style={{ marginLeft: "8px", fontSize: "11px", color: "#6b7280" }}>ELO: {m.eloScore}</span>
-          )}
+    <div style={{ marginBottom: "12px" }}>
+      <Card>
+        {/* Model Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "10px" }}>
+          <div>
+            <span style={{ fontWeight: 600, fontSize: "14px" }}>{m.provider}</span>
+            <span style={{ color: "var(--text-muted)", fontSize: "14px", marginLeft: "4px" }}>{m.model}</span>
+            {m.eloScore && (
+              <span style={{ marginLeft: "8px", fontSize: "11px", color: "var(--text-muted)" }}>ELO: {m.eloScore}</span>
+            )}
+          </div>
+          <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            In: ${m.inputPricePer1M}/1M · Out: ${m.outputPricePer1M}/1M
+          </div>
         </div>
-        <div style={{ fontSize: "12px", color: "#6b7280" }}>
-          In: ${m.inputPricePer1M}/1M · Out: ${m.outputPricePer1M}/1M
-        </div>
-      </div>
 
-      {/* Cost Table */}
-      <table style={{ width: "100%", fontSize: "12px", borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ textAlign: "left", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Use Case</th>
-            <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Tokens (in+out)</th>
-            <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Per Request</th>
-            <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Monthly</th>
-            <th style={{ textAlign: "right", padding: "4px 6px", color: "#6b7280", fontWeight: 500 }}>Monthly optimized</th>
-          </tr>
-        </thead>
-        <tbody>
-          {mc.costs.map((c) => {
-            const isMin = mc.costs.length > 1 && c.monthly === minCost;
-            const isMax = mc.costs.length > 1 && c.monthly === maxCost;
-            return (
-              <tr key={c.useCase} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                <td style={{ padding: "5px 6px", fontWeight: 500 }}>{c.useCase}</td>
-                <td style={{ textAlign: "right", padding: "5px 6px", color: "#6b7280" }}>
-                  {c.inputTokens.toLocaleString()} + {c.outputTokens.toLocaleString()}
-                </td>
-                <td style={{ textAlign: "right", padding: "5px 6px" }}>{formatCost(c.perRequest)}</td>
-                <td style={{
-                  textAlign: "right", padding: "5px 6px", fontWeight: 600,
-                  color: isMin ? "#16a34a" : isMax ? "#dc2626" : "#111827",
-                }}>
-                  {formatMonthly(c.monthly)}
-                </td>
-                <td style={{ textAlign: "right", padding: "5px 6px", color: "#6b7280" }}>
-                  {formatMonthly(c.monthlyOptimized)}
-                  {c.monthly > 0 && c.monthlyOptimized < c.monthly && (
-                    <span style={{ color: "#16a34a", fontSize: "10px", marginLeft: "3px" }}>
-                      −{Math.round((1 - c.monthlyOptimized / c.monthly) * 100)}%
-                    </span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+        {/* Cost Table */}
+        <table style={{ width: "100%", fontSize: "12px", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              <th style={{ ...thStyle, textAlign: "left" }}>Use Case</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Tokens (in+out)</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Per Request</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Monthly</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Monthly optimized</th>
+            </tr>
+          </thead>
+          <tbody>
+            {mc.costs.map((c) => {
+              const isMin = mc.costs.length > 1 && c.monthly === minCost;
+              const isMax = mc.costs.length > 1 && c.monthly === maxCost;
+              const saved = savingsPct(c.monthly, c.monthlyOptimized);
+              return (
+                <tr key={c.useCase} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                  <td style={{ padding: "5px 6px", fontWeight: 500 }}>{c.useCase}</td>
+                  <td style={{ textAlign: "right", padding: "5px 6px", color: "var(--text-muted)" }}>
+                    {c.inputTokens.toLocaleString()} + {c.outputTokens.toLocaleString()}
+                  </td>
+                  <td style={{ textAlign: "right", padding: "5px 6px" }}>{formatCost(c.perRequest)}</td>
+                  <td style={{
+                    textAlign: "right", padding: "5px 6px", fontWeight: 600,
+                    color: isMin ? "var(--positive)" : isMax ? "var(--negative)" : "var(--text)",
+                  }}>
+                    {formatBudget(c.monthly)}
+                  </td>
+                  <td style={{ textAlign: "right", padding: "5px 6px", color: "var(--text-muted)" }}>
+                    {formatBudget(c.monthlyOptimized)}
+                    {saved > 0 && (
+                      <span style={{ color: "var(--positive)", fontSize: "10px", marginLeft: "3px" }}>
+                        −{saved}%
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
 
-      {/* Budget Range */}
-      {mc.costs.length > 1 && (
-        <div style={{
-          marginTop: "8px", fontSize: "11px", color: "#6b7280",
-          padding: "6px 8px", background: "#f9fafb", borderRadius: "4px",
-        }}>
-          Monthly range: <strong style={{ color: "#16a34a" }}>{formatMonthly(minCost)}</strong>
-          {" "}to{" "}
-          <strong style={{ color: "#dc2626" }}>{formatMonthly(maxCost)}</strong>
-        </div>
-      )}
+        {/* Budget Range */}
+        {mc.costs.length > 1 && (
+          <div style={{
+            marginTop: "8px", fontSize: "11px", color: "var(--text-muted)",
+            padding: "6px 8px", background: "var(--surface-subtle)", borderRadius: "4px",
+          }}>
+            Monthly range: <strong style={{ color: "var(--positive)" }}>{formatBudget(minCost)}</strong>
+            {" "}to{" "}
+            <strong style={{ color: "var(--negative)" }}>{formatBudget(maxCost)}</strong>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

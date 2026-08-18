@@ -1,7 +1,14 @@
 import "@/index.css";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
+import { formatBudget, formatCost, savingsPct } from "../../format.js";
+import {
+  Badge, Card, EmptyState, ErrorState, FootNote, FreshnessBadges, LoadingState, WidgetHeader, WidgetShell,
+} from "../../components/index.js";
 
+// The handler's success and error paths return different shapes, so skybridge
+// infers this tool's output as a union it cannot usefully destructure. Until
+// those returns are unified server-side, the contract is restated here.
 interface EnrichedModel {
   provider: string;
   model: string;
@@ -48,62 +55,51 @@ interface CompareOutput {
   error?: string;
 }
 
-function formatCost(amount: number): string {
-  if (amount === 0) return "$0.00";
-  if (amount < 0.001) return `$${amount.toFixed(6)}`;
-  if (amount < 0.01) return `$${amount.toFixed(4)}`;
-  return `$${amount.toFixed(3)}`;
-}
-
-function formatBudget(amount: number): string {
-  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(1)}M`;
-  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(1)}K`;
-  return `$${amount.toFixed(2)}`;
-}
-
 function CompareModels() {
   const { output } = useToolInfo();
 
   if (!output) {
-    return <div style={{ padding: "24px", textAlign: "center", color: "#6b7280" }}>Loading models...</div>;
+    return <LoadingState label="Loading models..." />;
   }
 
   const { models, useCaseLabel, volumeLabel, source, matchingCount, catalogSize, eloAsOf, dataAsOf, provenance, finopsBadge, error } =
     output as unknown as CompareOutput;
 
   if (error) {
-    return <ErrorCard message={error} />;
+    return (
+      <WidgetShell maxWidth={800}>
+        <ErrorState title="Could not load model comparison" message={error} />
+      </WidgetShell>
+    );
   }
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px", maxWidth: "800px" }}>
-      <h2 style={{ fontSize: "18px", fontWeight: 700, marginBottom: "4px" }}>
-        LLM Model Comparison
-      </h2>
-      <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "16px" }}>
-        {matchingCount} of {catalogSize} models match · Showing {models.length} · {useCaseLabel} · {volumeLabel}/mo
-        <Badge label={`ELO as of ${eloAsOf}`} />
-        {source === "static-fallback" && <Badge label={`static snapshot${dataAsOf ? ` ${dataAsOf}` : ""}`} warn />}
+    <WidgetShell maxWidth={800}>
+      <WidgetHeader
+        title="LLM Model Comparison"
+        subtitle={`${matchingCount} of ${catalogSize} models match · Showing ${models.length} · ${useCaseLabel} · ${volumeLabel}/mo`}
+      >
+        <FreshnessBadges source={source} eloAsOf={eloAsOf} dataAsOf={dataAsOf} />
         {/* Tier 2 is the one that looks healthy and isn't: live data, straight
             from OpenRouter, without the site's price corrections. Without this
             badge a half-priced model is indistinguishable from a real one. */}
         {provenance && !provenance.pricesVerified && source !== "static-fallback" && (
-          <Badge label="unverified prices — not price-corrected" warn />
+          <Badge label="unverified prices — not price-corrected" tone="warn" />
         )}
         {provenance?.upstreamTimestamp && (
           <Badge label={`data as of ${provenance.upstreamTimestamp.slice(0, 10)}`} />
         )}
-      </p>
+      </WidgetHeader>
 
       {finopsBadge && finopsBadge.ranked > 0 && (
         // The badge gates on percentiles, which move with the market. Stating
         // where they land today is what makes the badge auditable rather than
         // something the reader has to take on trust.
-        <p style={{ fontSize: "11px", color: "#6b7280", marginTop: "-8px", marginBottom: "16px" }}>
+        <FootNote>
           FinOps Friendly today: ELO ≥ {finopsBadge.minElo ?? "n/a"}, blended list price ≤ $
           {finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, top-30% efficiency, stable release —{" "}
           {finopsBadge.qualifying} of {finopsBadge.ranked} ranked models qualify.
-        </p>
+        </FootNote>
       )}
 
       {models.length === 0 ? (
@@ -115,80 +111,31 @@ function CompareModels() {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function Badge({ label, warn }: { label: string; warn?: boolean }) {
-  return (
-    <span style={{
-      marginLeft: "8px", fontSize: "11px", borderRadius: "4px", padding: "1px 6px",
-      background: warn ? "#fef3c7" : "#f3f4f6", color: warn ? "#92400e" : "#4b5563",
-    }}>
-      {label}
-    </span>
-  );
-}
-
-function ErrorCard({ message }: { message: string }) {
-  return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "16px" }}>
-      <div style={{
-        border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b",
-        borderRadius: "8px", padding: "12px 14px", fontSize: "13px",
-      }}>
-        <strong style={{ display: "block", marginBottom: "4px" }}>Could not load model comparison</strong>
-        {message}
-      </div>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div style={{
-      border: "1px dashed #d1d5db", borderRadius: "8px", padding: "24px",
-      textAlign: "center", color: "#6b7280", fontSize: "13px",
-    }}>
-      No results match these filters.
-    </div>
+    </WidgetShell>
   );
 }
 
 function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
-  const savingsPct = m.monthlyBudget > 0
-    ? Math.round((1 - m.optimizedMonthlyBudget / m.monthlyBudget) * 100)
-    : 0;
+  const saved = savingsPct(m.monthlyBudget, m.optimizedMonthlyBudget);
 
   return (
-    <div style={{
-      border: "1px solid #e5e7eb",
-      borderRadius: "8px",
-      padding: "12px",
-      background: m.isFinOpsFriendly ? "#f0fdf4" : "#ffffff",
-    }}>
+    <Card accent={m.isFinOpsFriendly}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
         <div>
-          <span style={{ fontSize: "12px", color: "#9ca3af", marginRight: "6px" }}>#{rank}</span>
+          <span style={{ fontSize: "12px", color: "var(--text-faint)", marginRight: "6px" }}>#{rank}</span>
           <span style={{ fontWeight: 600, fontSize: "14px" }}>{m.provider}</span>
-          <span style={{ color: "#6b7280", fontSize: "14px", marginLeft: "4px" }}>{m.model}</span>
+          <span style={{ color: "var(--text-muted)", fontSize: "14px", marginLeft: "4px" }}>{m.model}</span>
           {m.isFinOpsFriendly && (
-            <span
-              title="Top 40% on Arena ELO, top 30% on efficiency, cheapest 70% on list price, and a stable release"
-              style={{
-                marginLeft: "8px", fontSize: "11px", background: "#dcfce7",
-                color: "#166534", padding: "1px 6px", borderRadius: "4px",
-              }}
-            >
-              FinOps Friendly
+            <span title="Top 40% on Arena ELO, top 30% on efficiency, cheapest 70% on list price, and a stable release">
+              <Badge label="FinOps Friendly" tone="brand" />
             </span>
           )}
         </div>
         {/* Two independent axes: what it costs, and whose hardware can run it */}
         <div style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
           <span style={{
-            fontSize: "11px", background: "#f3f4f6", color: "#374151",
+            fontSize: "11px", background: "var(--chip-bg)", color: "var(--chip-text)",
             padding: "2px 8px", borderRadius: "4px",
           }}>
             {m.category}
@@ -198,8 +145,8 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
               title="Self-hostability, derived from the model's licence"
               style={{
                 fontSize: "11px",
-                background: m.openness === "Proprietary" ? "#f3f4f6" : "#ecfdf5",
-                color: m.openness === "Proprietary" ? "#6b7280" : "#047857",
+                background: m.openness === "Proprietary" ? "var(--chip-bg)" : "var(--brand-soft)",
+                color: m.openness === "Proprietary" ? "var(--text-muted)" : "var(--brand-text)",
                 padding: "2px 8px", borderRadius: "4px",
               }}
             >
@@ -214,19 +161,19 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
         <MetricCell label="Input" value={`$${m.inputPricePer1M}/1M`} />
         <MetricCell label="Output" value={`$${m.outputPricePer1M}/1M`} />
         <MetricCell label="Per Request" value={formatCost(m.useCaseCost)} />
-        <MetricCell label="Monthly" value={formatBudget(m.monthlyBudget)} color="#2563eb" />
+        <MetricCell label="Monthly" value={formatBudget(m.monthlyBudget)} color="var(--brand-text)" />
       </div>
 
       {/* Optimized Row */}
-      <div style={{ marginTop: "6px", fontSize: "11px", color: "#6b7280" }}>
-        Optimized (caching{savingsPct > 0 ? " + batch where eligible" : ""}):{" "}
-        <strong style={{ color: "#111827" }}>{formatCost(m.optimizedUseCaseCost)}</strong>/req ·{" "}
-        <strong style={{ color: "#111827" }}>{formatBudget(m.optimizedMonthlyBudget)}</strong>/mo
-        {savingsPct > 0 && <span style={{ color: "#16a34a", marginLeft: "4px" }}>−{savingsPct}%</span>}
+      <div style={{ marginTop: "6px", fontSize: "11px", color: "var(--text-muted)" }}>
+        Optimized (caching{saved > 0 ? " + batch where eligible" : ""}):{" "}
+        <strong style={{ color: "var(--text)" }}>{formatCost(m.optimizedUseCaseCost)}</strong>/req ·{" "}
+        <strong style={{ color: "var(--text)" }}>{formatBudget(m.optimizedMonthlyBudget)}</strong>/mo
+        {saved > 0 && <span style={{ color: "var(--positive)", marginLeft: "4px" }}>−{saved}%</span>}
       </div>
 
       {/* Bottom Row */}
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "11px", color: "#6b7280" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "11px", color: "var(--text-muted)" }}>
         <div style={{ display: "flex", gap: "8px" }}>
           {m.eloScore && <span>ELO: {m.eloScore}</span>}
           {m.efficiencyScore !== undefined && m.efficiencyScore !== null && (
@@ -237,7 +184,7 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
         <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
           {m.capabilities.slice(0, 4).map(c => (
             <span key={c} style={{
-              background: "#eff6ff", color: "#1d4ed8",
+              background: "var(--capability-bg)", color: "var(--capability-text)",
               padding: "0 4px", borderRadius: "3px", fontSize: "10px",
             }}>
               {c}
@@ -245,15 +192,15 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
           ))}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
 function MetricCell({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div>
-      <div style={{ color: "#9ca3af", fontSize: "10px" }}>{label}</div>
-      <div style={{ fontWeight: 600, color: color || "#111827" }}>{value}</div>
+      <div style={{ color: "var(--text-faint)", fontSize: "10px" }}>{label}</div>
+      <div style={{ fontWeight: 600, color: color || "var(--text)" }}>{value}</div>
     </div>
   );
 }
