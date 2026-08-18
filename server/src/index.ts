@@ -203,7 +203,7 @@ const server = new McpServer(
 
 .registerWidget(
   "compare-llm-models",
-  { description: "Compare LLM Models" },
+  { description: "Compare LLM Models", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -346,7 +346,7 @@ const server = new McpServer(
 
 .registerWidget(
   "estimate-llm-cost",
-  { description: "Estimate LLM Cost" },
+  { description: "Estimate LLM Cost", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -512,11 +512,11 @@ const server = new McpServer(
 
 .registerWidget(
   "compare-compute-pricing",
-  { description: "Compare Cloud Compute Pricing" },
+  { description: "Compare Cloud Compute Pricing", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
       "Filter by region, provider, vCPUs, memory, category, processor, or use case. " +
