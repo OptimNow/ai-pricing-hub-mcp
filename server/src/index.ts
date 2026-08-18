@@ -1277,4 +1277,47 @@ const server = new McpServer(
 
 server.run();
 
+/**
+ * Fill the caches the first caller would otherwise pay for.
+ *
+ * Measured against production on 2026-08-18: a freshly deployed process answers
+ * `compare-compute-pricing` in **8.4 s** and then in ~250 ms, because the memo
+ * in compute-pricing.ts starts empty and the first caller funds the rebuild.
+ * The same three MCP sessions minutes apart all reported the same
+ * `upstreamTimestamp`, which is what establishes that the process is long-lived
+ * and that warming it once is worth anything at all. On a per-request runtime
+ * this function would be pure waste.
+ *
+ * Only the default region is warmed. Warming all four would cost four upstream
+ * rebuilds per boot — each one six provider APIs assembled live — for three
+ * regions that a given deployment may never be asked about. The other three
+ * warm on first use, paying ~7 s once (measured: asia-pacific 7.1 s cold, then
+ * 447 ms).
+ *
+ * The LLM catalogue is warmed too. At 0.19-0.42 s cold it is not a latency
+ * problem, but it costs almost nothing to prime and all four LLM tools block on
+ * it.
+ *
+ * Deliberately fire-and-forget: `server.run()` must not wait on an upstream
+ * that can take 11 s, or a slow site turns into a failed boot. A failure here
+ * is logged and dropped — the fetchers do not cache snapshot fallbacks, so a
+ * failed warm leaves the cache empty and the first real caller simply pays what
+ * it would have paid anyway.
+ */
+function warmCaches(): void {
+  // Never reach upstream from a test run or a CI build.
+  if (process.env.NODE_ENV === "test" || process.env.SKIP_CACHE_WARMUP === "1") return;
+
+  const started = Date.now();
+  void fetchLLMModels()
+    .then(r => console.log(`[warmup] llm-models: ${r.models.length} models in ${Date.now() - started}ms (tier ${r.provenance.tier})`))
+    .catch(error => console.error("[warmup] llm-models failed, first caller will pay for it:", errorMessage(error)));
+
+  void fetchComputeInstances(DEFAULT_PRICING_REGION)
+    .then(r => console.log(`[warmup] compute ${DEFAULT_PRICING_REGION}: ${r.instances.length} instances in ${Date.now() - started}ms (tier ${r.provenance.tier})`))
+    .catch(error => console.error("[warmup] compute failed, first caller will pay for it:", errorMessage(error)));
+}
+
+warmCaches();
+
 export type AppType = typeof server;

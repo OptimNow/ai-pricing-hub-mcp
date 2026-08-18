@@ -320,6 +320,50 @@ Each profile defines typical input/output token counts per request.
   and ~2.6 MB every call, 41% of it on Windows rows the tool discards immediately.
   `catalogSize` counts servable rows (~3,573), not the raw catalogue (~6,052):
   a denominator that includes rows no query can reach is not a denominator.
+- **The caches are warmed at boot, for one region only.** `warmCaches()` at the
+  foot of `index.ts` fires `fetchLLMModels()` and `fetchComputeInstances(us-east)`
+  after `server.run()`, fire-and-forget. Measured against production on
+  2026-08-18: a freshly deployed process answered `compare-compute-pricing` in
+  **8.4 s** and then in ~250 ms — the first caller was funding the rebuild.
+  Locally, first call after boot is **231 ms without the warm-up and 23 ms with
+  it** (that gap is small only because the upstream edge cache happened to be
+  warm; on the edge MISS that follows a deploy it is the full ~8 s).
+
+  This is only worth doing because **the Alpic process is long-lived** — three
+  MCP sessions minutes apart all reported the same `provenance.upstreamTimestamp`,
+  which is what proves the memo survives between requests. On a per-request
+  runtime the warm-up would be pure waste, so re-check that assumption before
+  trusting this.
+
+  Three rules it must keep:
+  - **Never block `server.run()`.** The upstream can take 11 s; awaiting it turns
+    a slow site into a failed boot.
+  - **Never cache a failure.** The fetchers do not cache snapshot fallbacks, so a
+    failed warm leaves the cache empty and the first real caller pays what it
+    would have paid anyway. Keep it that way.
+  - **Never reach upstream from a test or a CI build.** Guarded by
+    `NODE_ENV === "test"` and `SKIP_CACHE_WARMUP=1`.
+
+- **Warming that was considered and deliberately rejected.** Each of these is a
+  plausible next step that costs more than it returns; do not add them without
+  new measurements that contradict the ones below.
+  - **All four regions at boot.** Four upstream rebuilds per process start — each
+    one six provider APIs assembled live — for three regions a given deployment
+    may never be asked about. The other three warm on first use for ~7 s once
+    (measured: asia-pacific 7.1 s cold, then 447 ms). Paying a known cost against
+    the site to avoid a maybe-cost is the wrong trade.
+  - **A periodic refresh timer.** The 60-minute TTL is already invisible to
+    callers: `fetchComputeInstances` serves the stale entry immediately and
+    refreshes behind it for up to 12 hours. A timer would only cover a gap longer
+    than 12 hours, at ~26 upstream rebuilds a day per region on an otherwise idle
+    server. Wrong ratio.
+  - **An external cron pinging the endpoint.** Same effect as the timer, plus
+    infrastructure, and it only earns its keep if Alpic scales the process to
+    zero — which the long-lived-process measurement above says it does not.
+  - **Warming from `primeComputePricingCache()`.** That export is a test seam
+    that takes an already-built result; it is not a fetch and cannot warm
+    anything on its own.
+
 - **Both fetchers dedupe in-flight requests.** Five concurrent cold callers used
   to produce five upstream rebuilds each. The `refreshing` set only ever covered
   the stale-while-revalidate branch; the cold branch — the one callers wait on —
