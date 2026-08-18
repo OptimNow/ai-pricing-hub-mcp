@@ -11,7 +11,7 @@
 
 An MCP (Model Context Protocol) app that provides AI/LLM model comparison, cost estimation, and cloud compute pricing tools as interactive widgets inside AI conversations (Claude, ChatGPT, VS Code, Goose). Built with Skybridge framework.
 
-**Origin:** Business logic copied from the standalone web app `cloud-sparkle-compare` (private). Note the local directory name does not match its remote: it pushes to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (default branch `main`), while this repo is `OptimNow/ai-pricing-hub-mcp` (default branch `master`). It is deployed at `optimtoken.optimnow.io`. The original app remains untouched.
+**Origin:** Business logic copied from the standalone web app cloud-sparkle-compare, which has since been renamed to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (private). The local checkout is still the `cloud-sparkle-compare` folder, and this file uses the old name throughout. It is deployed at `optimtoken.optimnow.io`, which is what this app reads its pricing from. The original app remains untouched.
 
 ---
 
@@ -23,7 +23,7 @@ Language:     TypeScript
 Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
 Deployment:   Alpic Cloud
-Transport:    streamable HTTP at root URL / (SSE-framed responses)
+Transport:    Streamable HTTP at root URL /
 Data:         optimtoken.optimnow.io API (source of truth)
               → direct OpenRouter (LLM only, uncorrected)
               → static fallback in data/pricing-data.ts
@@ -80,29 +80,37 @@ ai-pricing-hub-mcp/
 │           ├── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 │           └── region-api-map.ts     # Cloud region mappings — currently unimported
 ├── web/
-│   └── src/
-│       ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
-│       ├── index.css                 # Colour tokens on :root + dark-mode overrides
-│       ├── format.ts                 # formatCost / formatBudget / savingsPct
-│       ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
-│       ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
-│       └── widgets/
-│           ├── compare-llm-models/index.tsx
-│           ├── estimate-llm-cost/index.tsx
-│           ├── compare-models-side-by-side/index.tsx
-│           ├── recommend-llm-model/index.tsx
-│           └── compare-compute-pricing/index.tsx
+│   ├── src/
+│   │   ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
+│   │   ├── index.css                 # Colour tokens on :root + dark-mode overrides
+│   │   ├── format.ts                 # formatCost / formatBudget / savingsPct / leverSummary
+│   │   ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
+│   │   ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
+│   │   └── widgets/
+│   │       ├── compare-llm-models/index.tsx
+│   │       ├── estimate-llm-cost/index.tsx
+│   │       ├── compare-models-side-by-side/index.tsx
+│   │       ├── recommend-llm-model/index.tsx
+│   │       └── compare-compute-pricing/index.tsx
+│   └── vite.config.ts                # Skybridge Vite plugin
+├── docs/
+│   ├── chatgpt-submission.md         # Blockers + portal run for the ChatGPT directory
+│   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
-│   ├── refresh-llm-fallback.mjs      # Re-snapshot the static LLM catalogue
+│   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
-├── docs/                             # ChatGPT submission notes + smoke tests
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR
 ├── alpic.json                        # Alpic deployment config
-├── server.json                       # MCP registry entry (name, version, remote URL)
+├── server.json                       # Manifest for the official MCP registry
+├── AGENTS.md
 ├── package.json
 ├── tsconfig.json                     # Build + typecheck (excludes *.test.ts)
 └── tsconfig.test.json                # Type-checks the tests
 ```
+
+Tests live beside their subjects: `lib/data-sources.test.ts`,
+`lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts` and
+`serialisation-contract.test.ts`.
 
 ---
 
@@ -146,11 +154,11 @@ ai-pricing-hub-mcp/
 
 ```bash
 npm install
-npm run dev        # Skybridge dev server with DevTools emulator (port 3000)
+npm run dev        # Skybridge dev server with DevTools emulator
 npm run typecheck  # tsc --noEmit over both tsconfigs (src and tests)
 npm test           # node --test over server/src/**/*.test.ts
 npm run build      # Production build
-npm run start      # Start production server (serves /mcp on port 3000)
+npm run start      # Start production server (serves /mcp locally)
 ```
 
 `.github/workflows/ci.yml` runs typecheck, test and build on every PR.
@@ -165,21 +173,28 @@ running server and the live catalogue. Run it by hand after touching cost code.
 ### Deployment
 
 ```bash
-npx alpic deploy --yes --project-name ai-pricing-hub-mcp
+npm run deploy     # alpic deploy
 ```
 
-Deploys to Alpic Cloud. The streamable-HTTP endpoint is served at root `/` — that is
-the URL `server.json` publishes. Locally, `npm run start` serves it at `/mcp` instead.
+Deploys to Alpic Cloud. The streamable HTTP endpoint is served at root `/` — that
+is the URL `server.json` publishes. Locally, `npm run start` serves it at `/mcp`.
+
+**Alpic collects files through the git index, not the working tree.** Deleting a
+tracked file without staging the deletion makes the deploy fail with `ENOENT` on
+a path that is no longer on disk. Commit deletions before deploying.
 
 ### Connecting to Claude Desktop
 
-Add to `claude_desktop_config.json`:
+Add to `claude_desktop_config.json`, using the app's native HTTP transport:
 ```json
 "ai-pricing-hub": {
-  "command": "cmd",
-  "args": ["/c", "npx", "mcp-remote", "https://ai-pricing-hub-mcp-9604f763.alpic.live/"]
+  "type": "http",
+  "url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
 }
 ```
+
+Prefer this over an `npx mcp-remote` wrapper. The wrapper opens a GET SSE stream
+this server answers with 400, which stalls startup behind a Cloudflare timeout.
 
 ---
 
@@ -208,7 +223,7 @@ reads as an answer. `leverSummary()` is duplicated in the estimate widget — ke
 the two in step.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
-6. **Compute pricing** is static data from 7 cloud providers with category enrichment
+6. **Compute pricing** comes from `GET /api/pricing` (~6,000 instances across 7 providers), with the 137-row static array in `data/pricing-data.ts` as fallback only. Category, processor and use-case enrichment is applied locally to whichever rows arrive. It stopped being a static-only tool when optimtoken became the source of truth, and `openWorldHint` was corrected to `true` to match.
 7. **Price tier and openness are separate axes.** `category` is Frontier / Mid-tier / Budget / Image and answers "what does it cost". `openness` (derived from the licence in `openness.ts`) answers "whose hardware can run it". They used to be folded together as an "Open Weights" category, which forced every open model to give up one label to earn the other — do not reintroduce it.
 8. **The FinOps Friendly badge gates on percentiles, not fixed numbers:** top 40% on ELO, top 30% on efficiency, cheapest 70% on list price, and a stable release. The tool also returns what those percentiles land on today (`finopsBadge.minElo`, `finopsBadge.maxBlendedPrice`) so the badge is auditable.
 
@@ -310,7 +325,8 @@ Each profile defines typical input/output token counts per request.
   the stale-while-revalidate branch; the cold branch — the one callers wait on —
   had none. Keep the `finally` that clears the shared promise, or one failure
   pins every later caller to it.
-- **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (There is no longer an `app.json` to keep in step — ChatGPT apps are submitted as plugins against the live server, so it was deleted.)
+- **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (`app.json` used to be bound to it too; it was deleted once ChatGPT moved to submitting the MCP server directly.)
+- **Widgets are registered for the `mcp-app` host only.** Omitting `hosts` on `registerWidget` publishes each widget twice, under `ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`, with the same display name, so hosts list every widget twice in their resource pickers. `mcp-app` emits `text/html;profile=mcp-app` and `_meta.ui.resourceUri`, which is what both Claude and current ChatGPT want; `apps-sdk` is the legacy shape. See `docs/chatgpt-submission.md`.
 - Brand color: Chartreuse (#ACE849) for OptimNow identity
 - Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
 
