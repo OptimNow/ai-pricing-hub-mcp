@@ -329,11 +329,18 @@ Each profile defines typical input/output token counts per request.
   it** (that gap is small only because the upstream edge cache happened to be
   warm; on the edge MISS that follows a deploy it is the full ~8 s).
 
-  This is only worth doing because **the Alpic process is long-lived** — three
-  MCP sessions minutes apart all reported the same `provenance.upstreamTimestamp`,
-  which is what proves the memo survives between requests. On a per-request
-  runtime the warm-up would be pure waste, so re-check that assumption before
-  trusting this.
+  This is only worth doing because **the Alpic process outlives a request** —
+  three MCP sessions minutes apart all reported the same
+  `provenance.upstreamTimestamp`, which is what proves the memo survives between
+  requests. On a per-request runtime the warm-up would be pure waste, so
+  re-check that before trusting this.
+
+  It does **not** outlive a deploy: the production logs show two boots 50
+  seconds apart during the rollout of this change, each re-running the warm-up,
+  so budget two upstream fetches per restart rather than per day. That is cheap
+  while the upstream edge cache is warm (measured 205-324 ms per fetch) and
+  would be 7-11 s per fetch if it is cold. If restarts ever become frequent for
+  reasons other than deploys, re-measure before assuming this is still free.
 
   Three rules it must keep:
   - **Never block `server.run()`.** The upstream can take 11 s; awaiting it turns
@@ -343,6 +350,14 @@ Each profile defines typical input/output token counts per request.
     would have paid anyway. Keep it that way.
   - **Never reach upstream from a test or a CI build.** Guarded by
     `NODE_ENV === "test"` and `SKIP_CACHE_WARMUP=1`.
+
+- **Alpic's `duration` field is not application latency.** In the production
+  logs, the first request after each boot reported `duration: 3618ms` and
+  `duration: 3127ms` while only 6-7 ms elapsed between its own START and END
+  timestamps. It appears to include container start-up. So there is a ~3 s
+  cold-start on the first request after a restart that `warmCaches()` cannot
+  remove — it runs after the app has booted — and that field should not be used
+  to judge handler performance. Time calls from the client instead.
 
 - **Warming that was considered and deliberately rejected.** Each of these is a
   plausible next step that costs more than it returns; do not add them without
@@ -359,7 +374,7 @@ Each profile defines typical input/output token counts per request.
     server. Wrong ratio.
   - **An external cron pinging the endpoint.** Same effect as the timer, plus
     infrastructure, and it only earns its keep if Alpic scales the process to
-    zero — which the long-lived-process measurement above says it does not.
+    zero between requests — which the measurement above says it does not.
   - **Warming from `primeComputePricingCache()`.** That export is a test seam
     that takes an already-built result; it is not a fetch and cannot warm
     anything on its own.
