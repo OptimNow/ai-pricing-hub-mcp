@@ -50,6 +50,10 @@ const PASS_THROUGH = new Set([
   "batchInputPricePer1M",
   "batchOutputPricePer1M",
   "cachedInputPricePer1M",
+  // A whole-number percentage from Math.round(), not a currency amount. It
+  // matches the money-name pattern because it is *about* cost, but it carries
+  // no cents to be noisy in.
+  "costDeltaVsTopPct",
   // Published compute rates, not derived
   "onDemandHourly",
   "onDemandMonthly",
@@ -143,11 +147,13 @@ function structuredContentBlocks(): string[] {
   });
 }
 
-test("all three tools declare provenance in their output schema", () => {
+test("every tool declares provenance in its output schema", () => {
   for (const schema of [
     "compareModelsOutputSchema",
     "estimateCostOutputSchema",
     "computePricingOutputSchema",
+    "sideBySideOutputSchema",
+    "recommendOutputSchema",
   ]) {
     const start = schemaRegion.indexOf(`const ${schema} = {`);
     assert.ok(start > -1, `${schema} not found`);
@@ -172,10 +178,13 @@ test("every structuredContent that reached upstream carries provenance", () => {
     b => !/^\{\s*\.\.\.emptyOutput,\s*error:[^,}]+\}$/.test(b.trim().replace(/\s+/g, " ")),
   );
 
+  // 5 successes, plus two paths that fail *after* a good fetch and so still owe
+  // the caller provenance: estimate-llm-cost's no-match path, and
+  // compare-models-side-by-side's "fewer than 2 names resolved".
   assert.equal(
     reachedUpstream.length,
-    4,
-    `expected 4 upstream-backed outputs (3 successes + the no-match path), saw ${reachedUpstream.length}`,
+    7,
+    `expected 7 upstream-backed outputs (5 successes + 2 post-fetch failures), saw ${reachedUpstream.length}`,
   );
   for (const block of reachedUpstream) {
     assert.match(
@@ -210,12 +219,12 @@ test("the LLM provenance keeps the verified-pricing flag", () => {
   assert.match(body, /^\s+notice:/m);
 });
 
-test("all three tools emit a 2020-12 outputSchema", () => {
+test("every tool emits a 2020-12 outputSchema", () => {
   // Passing a bare Zod raw shape makes the SDK declare draft-07, which hosts
   // reject before the handler runs — the bug that made every tool here
   // uncallable from Claude Code. See lib/output-schema.ts.
   const declarations = [...source.matchAll(/outputSchema:\s*([^,\n]+)/g)].map(m => m[1].trim());
-  assert.equal(declarations.length, 3, `expected 3 outputSchema declarations, saw ${declarations.length}`);
+  assert.equal(declarations.length, 5, `expected 5 outputSchema declarations, saw ${declarations.length}`);
   for (const declaration of declarations) {
     assert.match(
       declaration,

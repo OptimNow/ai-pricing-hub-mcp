@@ -107,16 +107,41 @@ export function useCaseCost(inputPrice: number, outputPrice: number, profile: Us
   return (profile.inputTokens / 1e6) * inputPrice + (profile.outputTokens / 1e6) * outputPrice;
 }
 
+/** Which of the two optimization levers actually apply to this (model, workload)
+ *  pair. Both are conditional: batch pricing needs an async workload AND a model
+ *  that publishes batch rates, cache savings need a cacheable prefix AND a
+ *  published cache-read rate. When neither applies the optimized cost is simply
+ *  the list cost — the widgets say so rather than drawing a 0% saving. */
+export interface OptimizationLevers {
+  /** Workload is async enough for the batch API */
+  batchEligible: boolean;
+  /** Workload has a reusable prefix (cacheHitRate > 0) */
+  cacheEligible: boolean;
+  /** Batch eligible AND the model publishes batch rates */
+  batchApplied: boolean;
+  /** Cache eligible AND the model publishes a cache-read rate */
+  cacheApplied: boolean;
+}
+
+export function optimizationLevers(model: LLMModel, profile: UseCaseProfile): OptimizationLevers {
+  return {
+    batchEligible: profile.batchEligible,
+    cacheEligible: profile.cacheHitRate > 0,
+    batchApplied:
+      profile.batchEligible &&
+      model.batchInputPricePer1M !== undefined &&
+      model.batchOutputPricePer1M !== undefined,
+    cacheApplied: profile.cacheHitRate > 0 && model.cachedInputPricePer1M !== undefined,
+  };
+}
+
 /** Unit cost assuming the FinOps optimizations this use case allows:
  *  - batch API pricing when the workload is async (batchEligible)
  *  - prompt-cache read pricing on the cacheHitRate share of input tokens
  *  Falls back to list prices when a model doesn't publish batch/cache rates,
  *  so the optimized cost is never lower than what is actually achievable. */
 export function optimizedUseCaseCost(model: LLMModel, profile: UseCaseProfile): number {
-  const useBatch =
-    profile.batchEligible &&
-    model.batchInputPricePer1M !== undefined &&
-    model.batchOutputPricePer1M !== undefined;
+  const useBatch = optimizationLevers(model, profile).batchApplied;
 
   const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
   const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
@@ -304,6 +329,13 @@ export function formatMicroCost(cost: number): string {
   if (cost < 0.001) return `$${cost.toFixed(6)}`;
   if (cost < 0.01) return `$${cost.toFixed(4)}`;
   return `$${cost.toFixed(3)}`;
+}
+
+/** Percentage saved going from `list` to `optimized`, 0 when there is no gain.
+ *  Mirrors savingsPct in web/src/format.ts — change one, change the other. */
+export function savingsPct(list: number, optimized: number): number {
+  if (!(list > 0) || optimized >= list) return 0;
+  return Math.round((1 - optimized / list) * 100);
 }
 
 /** Format monthly budget: $1.2K, $450, $0.14 */

@@ -63,13 +63,14 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # MCP server — 3 tool/widget definitions
+│       ├── index.ts                  # MCP server — 5 tool/widget definitions
 │       ├── lib/
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch + ELO enrichment
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
+│       │   ├── roi-link.ts          # Deep link into the sister AI ROI Calculator
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
 │       │   └── compute-categories.ts  # Compute instance categorization + enrichment
@@ -110,7 +111,18 @@ ai-pricing-hub-mcp/
 - **Output:** Per-request and monthly cost breakdown per model
 - **Widget:** Cost comparison cards
 
-### Tool 3: `compare-compute-pricing`
+### Tool 3: `compare-models-side-by-side`
+- **Type:** Widget (has UI)
+- **Input:** `models` (2-4 free-text names) + optional `volumePreset`
+- **Output:** Each named model against all 8 use-case profiles, list and optimized, plus a `resolution` entry per name. A name that matched nothing, matched several models, or duplicated an earlier pick is reported rather than silently changing the columns — a missing column is not a free model.
+- **Widget:** Use-case × model cost matrix, cheapest cell per row highlighted
+
+### Tool 4: `recommend-llm-model`
+- **Input:** `useCasePreset` (required) + optional `volumePreset`, `maxMonthlyBudget`, `minElo`, `requiredCapability`, `openness`
+- **Output:** Top 3 by value score as structured facts — efficiency rank, ELO, list and optimized cost, FinOps flag, volatility, and a per-constraint satisfied/violated breakdown — leaving the narrative to the calling model. An over-constrained query sets `overConstrained` and returns `nearMisses` instead, ordered by how far each is from the *numeric* constraints, each carrying the constraint it failed. Also carries `roiCalculatorUrl`.
+- **Widget:** Three podium cards with a per-constraint checklist
+
+### Tool 5: `compare-compute-pricing`
 - **Type:** Widget (has UI)
 - **Input:** `region` (us-east | us-west | europe | asia-pacific, default us-east) plus filters (provider, vCPUs, memory, category, processor, use case, sort). No OS filter: the tool serves Linux only, and the upstream Windows rows are filtered out.
 - **Output:** Filtered cloud compute instance comparison across 7 providers, plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable
@@ -150,11 +162,20 @@ Add to `claude_desktop_config.json`:
 
 ## Key Design Decisions
 
-1. **All 3 tools use `registerWidget()`** — each has a React widget UI
+1. **All 5 tools use `registerWidget()`** — each has a React widget UI, and each is restricted to `hosts: ["mcp-app"]`. Omitting `hosts` publishes every widget twice (`ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`), which listed each one twice in Claude's attachment picker; the apps-sdk variant is the legacy shape.
 2. **optimtoken.optimnow.io is the source of truth** for both LLM and compute pricing. Direct OpenRouter is kept as a working second tier for LLM models only, never as the preferred one.
 3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
 3b. **Provenance ships with every response.** `structuredContent.provenance` carries the upstream timestamp, which tier served, and — for compute — `sources`, `sourceRegions` and `priceTypes`. AWS Savings Plans and GCP CUDs are `static` upstream (us-east-1 constants scaled by a region multiplier); serving those beside live on-demand rates without saying which is which gives a FinOps answer nobody can audit. `provenance.staticPriceColumns` pre-walks `priceTypes` so the non-live columns are one field away.
 3c. **Tool `outputSchema`s must go through `outputSchema()`** in `lib/output-schema.ts`. The MCP SDK's `toJsonSchemaCompat()` defaults its target to `draft-7` (still true at SDK 1.30.0), and hosts that validate 2020-12 only — Claude Code among them — reject such a tool *before its handler runs*. Passing a pre-built JSON Schema object is not an alternative: `AnySchema` is Zod-only, so a plain object makes `normalizeObjectSchema()` return `undefined` and the schema is silently dropped.
+3d. **The widgets share one component set and one palette.** `web/src/components/` holds the shell,
+badges, cards and empty/error states; `web/src/index.css` defines every colour as a custom property on
+`:root`, redefined under `prefers-color-scheme: dark`. No widget may contain a hard-coded hex literal —
+there were 95, and they made dark mode impossible. `--brand` (#ACE849) is invariant for fills;
+`--brand-text` darkens in light mode, where the pure hue fails contrast on white.
+3e. **One set of cost formatters.** `web/src/format.ts` is character-identical to `formatMicroCost` /
+`formatMonthlyBudget` in `llm-business-metrics.ts`. There were previously three implementations that
+disagreed, so the widget could render `$450.00` where the text the model reads said `$450`. Change one
+side, change the other.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
 6. **Compute pricing** is static data from 7 cloud providers with category enrichment
