@@ -124,15 +124,46 @@ export interface OptimizationLevers {
 }
 
 export function optimizationLevers(model: LLMModel, profile: UseCaseProfile): OptimizationLevers {
+  const batchPublished =
+    profile.batchEligible &&
+    model.batchInputPricePer1M !== undefined &&
+    model.batchOutputPricePer1M !== undefined;
+  const cachePublished = profile.cacheHitRate > 0 && model.cachedInputPricePer1M !== undefined;
+
+  // A published rate is not automatically a saving. Zhipu GLM 5.2 lists batch
+  // at $0.70/$2.20 against a list price of $0.49/$1.54 — applying it raises the
+  // cost by a third. "Optimized" means the best achievable price, so a lever
+  // that makes the workload dearer is simply not pulled, and must not be
+  // reported as applied: the widgets name the applied levers as the reason for
+  // a saving, and naming one that cost money is worse than naming none.
   return {
     batchEligible: profile.batchEligible,
     cacheEligible: profile.cacheHitRate > 0,
-    batchApplied:
-      profile.batchEligible &&
-      model.batchInputPricePer1M !== undefined &&
-      model.batchOutputPricePer1M !== undefined,
-    cacheApplied: profile.cacheHitRate > 0 && model.cachedInputPricePer1M !== undefined,
+    batchApplied: batchPublished && costWith(model, profile, true, cachePublished) < costWith(model, profile, false, cachePublished),
+    cacheApplied: cachePublished && model.cachedInputPricePer1M! < model.inputPricePer1M,
   };
+}
+
+/** The use-case cost under an explicit choice of levers. Split out so
+ *  `optimizationLevers` can compare the two batch branches before deciding
+ *  which one is actually the optimization. */
+function costWith(
+  model: LLMModel,
+  profile: UseCaseProfile,
+  useBatch: boolean,
+  useCache: boolean,
+): number {
+  const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
+  const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
+
+  // Cache reads: published rate only, applied as-is even under batch.
+  // (Some providers also discount cache reads in batch, but we don't have a
+  // published batch-cache rate — using the standard cache rate is the
+  // conservative, defensible choice. No published rate -> no cache discount.)
+  const cacheRead = useCache ? model.cachedInputPricePer1M! : baseIn;
+
+  const effectiveIn = cacheRead * profile.cacheHitRate + baseIn * (1 - profile.cacheHitRate);
+  return (profile.inputTokens / 1e6) * effectiveIn + (profile.outputTokens / 1e6) * baseOut;
 }
 
 /** Unit cost assuming the FinOps optimizations this use case allows:
@@ -141,20 +172,15 @@ export function optimizationLevers(model: LLMModel, profile: UseCaseProfile): Op
  *  Falls back to list prices when a model doesn't publish batch/cache rates,
  *  so the optimized cost is never lower than what is actually achievable. */
 export function optimizedUseCaseCost(model: LLMModel, profile: UseCaseProfile): number {
-  const useBatch = optimizationLevers(model, profile).batchApplied;
-
-  const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
-  const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
-
-  // Cache reads: published rate only, applied as-is even under batch.
-  // (Some providers also discount cache reads in batch, but we don't have a
-  // published batch-cache rate — using the standard cache rate is the
-  // conservative, defensible choice. No published rate -> no cache discount.)
-  const cacheRead =
-    model.cachedInputPricePer1M !== undefined ? model.cachedInputPricePer1M : baseIn;
-
-  const effectiveIn = cacheRead * profile.cacheHitRate + baseIn * (1 - profile.cacheHitRate);
-  return (profile.inputTokens / 1e6) * effectiveIn + (profile.outputTokens / 1e6) * baseOut;
+  const { batchApplied, cacheApplied } = optimizationLevers(model, profile);
+  // With no lever pulled the optimized cost IS the list cost. Returning it
+  // through costWith() would blend the input price with itself and land a few
+  // ULPs off, leaving "optimized" a hair above "list" for 35 (model, workload)
+  // pairs — invisible in the numbers but enough to draw a longer bar.
+  if (!batchApplied && !cacheApplied) {
+    return useCaseCost(model.inputPricePer1M, model.outputPricePer1M, profile);
+  }
+  return costWith(model, profile, batchApplied, cacheApplied);
 }
 
 /** Single price figure used to rank a model, mixing input and output at a fixed
@@ -329,6 +355,21 @@ export function formatMicroCost(cost: number): string {
   if (cost < 0.001) return `$${cost.toFixed(6)}`;
   if (cost < 0.01) return `$${cost.toFixed(4)}`;
   return `$${cost.toFixed(3)}`;
+}
+
+/** Name the levers behind a saving — or the reason there isn't one. A 0% figure
+ *  on its own reads like a bug; "not batch-eligible" reads like an answer.
+ *
+ *  Mirrored in web/src/format.ts because the widgets are a separate bundle;
+ *  llm-business-metrics.test.ts pins the two together over a full truth table. */
+export function leverSummary(l: OptimizationLevers): string {
+  const applied = [l.cacheApplied ? "caching" : "", l.batchApplied ? "batch API" : ""].filter(Boolean);
+  if (applied.length > 0) return applied.join(" + ");
+  if (!l.cacheEligible && !l.batchEligible) {
+    return "this workload has no cacheable prefix and is not batch-eligible";
+  }
+  const missing = [l.cacheEligible ? "cache-read" : "", l.batchEligible ? "batch" : ""].filter(Boolean);
+  return `this model publishes no ${missing.join(" or ")} rate`;
 }
 
 /** Percentage saved going from `list` to `optimized`, 0 when there is no gain.

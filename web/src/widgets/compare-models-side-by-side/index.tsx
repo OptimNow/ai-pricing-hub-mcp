@@ -40,7 +40,9 @@ interface ResolutionEntry {
   query: string;
   status: "exact" | "unique" | "ambiguous" | "not-found" | "duplicate";
   resolved?: string;
+  /** Capped at 5 — `totalMatches` is the real figure. */
   alternatives: string[];
+  totalMatches: number;
 }
 
 interface SideBySideOutput {
@@ -122,8 +124,12 @@ function ResolutionNotes({ resolution }: { resolution: ResolutionEntry[] }) {
           {r.status === "not-found" && <>“{r.query}” matched no model — it has no column.</>}
           {r.status === "duplicate" && <>“{r.query}” resolved to {r.resolved}, already chosen by an earlier name — no extra column.</>}
           {r.status === "ambiguous" && (
-            <>“{r.query}” matched several models; used <strong>{r.resolved}</strong>
-              {r.alternatives.length > 0 && <> (also matched: {r.alternatives.join(", ")})</>}.</>
+            <>“{r.query}” matched {r.totalMatches} models; used <strong>{r.resolved}</strong>
+              {r.alternatives.length > 0 && (
+                <> (also matched: {r.alternatives.join(", ")}
+                  {r.totalMatches - 1 - r.alternatives.length > 0 &&
+                    `, and ${r.totalMatches - 1 - r.alternatives.length} more`})</>
+              )}.</>
           )}
         </div>
       ))}

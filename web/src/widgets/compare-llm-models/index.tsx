@@ -2,7 +2,7 @@ import "@/index.css";
 import { useState } from "react";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
-import { formatBudget, formatCost, savingsPct } from "../../format.js";
+import { formatBudget, formatCost, savingsPct, leverSummary } from "../../format.js";
 import { linearDomain, linearScale, linearTicks, logDomain, logScale, logTicks } from "../../scale.js";
 import {
   Badge, Card, EmptyState, ErrorState, FootNote, FreshnessBadges, LoadingState, WidgetHeader, WidgetShell,
@@ -29,6 +29,11 @@ interface EnrichedModel {
   monthlyBudget: number;
   optimizedMonthlyBudget: number;
   isFinOpsFriendly?: boolean;
+  /** Which optimization levers actually applied for the selected use case. */
+  batchEligible: boolean;
+  cacheEligible: boolean;
+  batchApplied: boolean;
+  cacheApplied: boolean;
 }
 
 interface CompareOutput {
@@ -317,7 +322,10 @@ function ModelCard({ model: m, rank }: { model: EnrichedModel; rank: number }) {
 
       {/* Optimized Row */}
       <div style={{ marginTop: "6px", fontSize: "11px", color: "var(--text-muted)" }}>
-        Optimized (caching{saved > 0 ? " + batch where eligible" : ""}):{" "}
+        {/* Name the levers that actually applied. This card used to assert
+            "caching" for every model and workload, including supportTicket,
+            which is not batch-eligible and models that publish no cache rate. */}
+        Optimized ({leverSummary(m)}):{" "}
         <strong style={{ color: "var(--text)" }}>{formatCost(m.optimizedUseCaseCost)}</strong>/req ·{" "}
         <strong style={{ color: "var(--text)" }}>{formatBudget(m.optimizedMonthlyBudget)}</strong>/mo
         {saved > 0 && <span style={{ color: "var(--positive)", marginLeft: "4px" }}>−{saved}%</span>}

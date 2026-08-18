@@ -1014,19 +1014,37 @@ export interface ModelResolution<T> {
   status: ResolutionStatus;
   matched?: T;
   /** The other rows the query also hit, so an ambiguous pick can be reported
-   *  rather than silently made. */
+   *  rather than silently made. Capped — see `totalMatches` for the real count. */
   alternatives: string[];
+  /** How many rows the query hit in total, before `alternatives` was capped.
+   *  Reporting `alternatives.length + 1` as the total told the caller six models
+   *  were weighed when thirty had been dropped. */
+  totalMatches: number;
 }
+
+/** How many alternatives a resolution carries. Enough to show the caller what
+ *  else the name could have meant, without pasting the catalogue at them. */
+const MAX_ALTERNATIVES = 5;
 
 /** Resolve one free-text name to a single row, recording how confident that was. */
 export function resolveModel<T extends LLMModel>(models: T[], query: string): ModelResolution<T> {
-  const matches = matchModels(models, query, 6);
-  if (matches.length === 0) return { query, status: "not-found", alternatives: [] };
-  const exact = matches[0].model.toLowerCase() === query.trim().toLowerCase();
+  const all = matchModels(models, query, Number.POSITIVE_INFINITY);
+  if (all.length === 0) return { query, status: "not-found", alternatives: [], totalMatches: 0 };
+
+  const search = query.trim().toLowerCase();
+  // Exact hits are promoted to the front by matchModels, so counting them here
+  // tells us whether "exact" is actually unambiguous. Two providers shipping the
+  // same model name is a real case, and picking the first silently is the bug.
+  const exactCount = all.filter((m) => m.model.toLowerCase() === search).length;
+
+  const status: ResolutionStatus =
+    exactCount === 1 ? "exact" : all.length > 1 ? "ambiguous" : "unique";
+
   return {
     query,
-    status: exact ? "exact" : matches.length > 1 ? "ambiguous" : "unique",
-    matched: matches[0],
-    alternatives: matches.slice(1).map((m) => `${m.provider} ${m.model}`),
+    status,
+    matched: all[0],
+    alternatives: all.slice(1, 1 + MAX_ALTERNATIVES).map((m) => `${m.provider} ${m.model}`),
+    totalMatches: all.length,
   };
 }

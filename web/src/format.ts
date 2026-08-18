@@ -28,3 +28,28 @@ export function savingsPct(list: number, optimized: number): number {
   if (!(list > 0) || optimized >= list) return 0;
   return Math.round((1 - optimized / list) * 100);
 }
+
+/** Which optimization levers applied to a (model, workload) pair. Structural
+ *  twin of OptimizationLevers in server/src/lib/llm-business-metrics.ts. */
+export interface OptimizationLevers {
+  batchEligible: boolean;
+  cacheEligible: boolean;
+  batchApplied: boolean;
+  cacheApplied: boolean;
+}
+
+/** Name the levers behind a saving — or the reason there isn't one. A 0% figure
+ *  on its own reads like a bug; "not batch-eligible" reads like an answer.
+ *
+ *  Mirrors leverSummary() in llm-business-metrics.ts step for step. The widget
+ *  and the text the model reads must never explain the same number two
+ *  different ways. Change one side, change the other — a test pins them. */
+export function leverSummary(l: OptimizationLevers): string {
+  const applied = [l.cacheApplied ? "caching" : "", l.batchApplied ? "batch API" : ""].filter(Boolean);
+  if (applied.length > 0) return applied.join(" + ");
+  if (!l.cacheEligible && !l.batchEligible) {
+    return "this workload has no cacheable prefix and is not batch-eligible";
+  }
+  const missing = [l.cacheEligible ? "cache-read" : "", l.batchEligible ? "batch" : ""].filter(Boolean);
+  return `this model publishes no ${missing.join(" or ")} rate`;
+}

@@ -2,7 +2,7 @@ import "@/index.css";
 import type { CSSProperties } from "react";
 import { mountWidget } from "skybridge/web";
 import { useToolInfo } from "../../helpers.js";
-import { formatBudget, formatCost } from "../../format.js";
+import { formatBudget, formatCost, leverSummary } from "../../format.js";
 import {
   Badge, Card, EmptyState, ErrorState, FreshnessBadges, LoadingState, WidgetHeader, WidgetShell,
 } from "../../components/index.js";
@@ -56,19 +56,6 @@ interface EstimateOutput {
     notice?: string;
   };
   error?: string;
-}
-
-/** Name the lever behind a saving — or the reason there isn't one. Mirrors
- *  leverSummary() in server/src/index.ts so the widget and the text the model
- *  reads give the same explanation. */
-function leverSummary(c: CostEntry): string {
-  const applied = [c.cacheApplied ? "caching" : "", c.batchApplied ? "batch API" : ""].filter(Boolean);
-  if (applied.length > 0) return applied.join(" + ");
-  if (!c.cacheEligible && !c.batchEligible) {
-    return "this workload has no cacheable prefix and is not batch-eligible";
-  }
-  const missing = [c.cacheEligible ? "cache-read" : "", c.batchEligible ? "batch" : ""].filter(Boolean);
-  return `this model publishes no ${missing.join(" or ")} rate`;
 }
 
 function EstimateCost() {
@@ -186,6 +173,13 @@ function SavingsRow({ cost: c, scaleMax }: { cost: CostEntry; scaleMax: number }
   const pct = (v: number) => (scaleMax > 0 ? (v / scaleMax) * 100 : 0);
   const saved = c.savingsPct > 0;
 
+  // formatBudget drops cents between $1 and $1000, which is right for a budget
+  // and wrong for a pair: at 50 requests/month a real 20% saving rendered as
+  // "List $2 / Optimized $2 / −20%" beside two visibly different bars. When the
+  // rounding would collapse the pair, fall back to the finer formatter.
+  const collapsed = saved && formatBudget(c.monthly) === formatBudget(c.monthlyOptimized);
+  const money = collapsed ? formatCost : formatBudget;
+
   return (
     <div style={{ fontSize: "12px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}>
@@ -199,14 +193,14 @@ function SavingsRow({ cost: c, scaleMax }: { cost: CostEntry; scaleMax: number }
       <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "3px" }}>
         <span style={{ width: "58px", color: "var(--text-faint)", fontSize: "10px" }}>List</span>
         <Bar width={pct(c.monthly)} fill="var(--text-faint)" />
-        <span style={{ width: "62px", textAlign: "right", fontWeight: 600 }}>{formatBudget(c.monthly)}</span>
+        <span style={{ width: "62px", textAlign: "right", fontWeight: 600 }}>{money(c.monthly)}</span>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
         <span style={{ width: "58px", color: "var(--text-faint)", fontSize: "10px" }}>Optimized</span>
         <Bar width={pct(c.monthlyOptimized)} fill={saved ? "var(--brand)" : "var(--border-dashed)"} />
         <span style={{ width: "62px", textAlign: "right", fontWeight: 600, color: saved ? "var(--brand-text)" : "var(--text-muted)" }}>
-          {formatBudget(c.monthlyOptimized)}
+          {money(c.monthlyOptimized)}
         </span>
       </div>
 

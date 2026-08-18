@@ -153,7 +153,10 @@ function PodiumCard({ rec: r }: { rec: Recommendation }) {
       </div>
       <div style={{ fontSize: "11px", color: "var(--text-faint)", marginTop: "2px" }}>
         {formatCost(r.perRequest)}/req ·{" "}
-        {r.rank === 1 ? "cheapest of the three" : `${r.costDeltaVsTopPct >= 0 ? "+" : ""}${r.costDeltaVsTopPct}% vs #1`}
+        {/* The ranking is by value score, not by price — #1 is routinely dearer
+            than #2. Calling it "cheapest" contradicted the −N% printed on the
+            sibling card two columns over. */}
+        {r.rank === 1 ? "best value score" : `${r.costDeltaVsTopPct >= 0 ? "+" : ""}${r.costDeltaVsTopPct}% vs #1`}
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "8px" }}>

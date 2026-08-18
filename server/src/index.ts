@@ -18,6 +18,7 @@ import {
   roundPricePer1MOrNull,
   optimizationLevers,
   savingsPct,
+  leverSummary,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
 import type {
@@ -68,6 +69,12 @@ const enrichedModelSchema = z.object({
   optimizedMonthlyBudget: z.number(),
   volatilityRisk: z.string(),
   isFinOpsFriendly: z.boolean(),
+  /** Which optimization levers actually applied for the selected use case, so
+   *  the widget can name them instead of assuming caching. */
+  batchEligible: z.boolean(),
+  cacheEligible: z.boolean(),
+  batchApplied: z.boolean(),
+  cacheApplied: z.boolean(),
 });
 
 /**
@@ -206,7 +213,9 @@ const resolutionSchema = z.object({
   query: z.string(),
   status: z.enum(["exact", "unique", "ambiguous", "not-found", "duplicate"]),
   resolved: z.string().optional(),
+  /** Capped at 5 — `totalMatches` is the real figure. */
   alternatives: z.array(z.string()),
+  totalMatches: z.number(),
 });
 
 /** One (model, use case) cell: list and optimized cost, plus which of the two
@@ -293,21 +302,14 @@ const recommendOutputSchema = {
   error: z.string().optional(),
 };
 
-type ResolutionEntry = { query: string; status: ResolutionStatus; resolved?: string; alternatives: string[] };
+type ResolutionEntry = { query: string; status: ResolutionStatus; resolved?: string; alternatives: string[]; totalMatches: number };
 type ConstraintCheck = z.infer<typeof constraintCheckSchema>;
 type Recommendation = z.infer<typeof recommendationSchema>;
 
-/** Name the lever behind a saving — or the reason there isn't one. A 0% figure
- *  on its own reads like a bug; "not batch-eligible" reads like an answer. */
-function leverSummary(l: OptimizationLevers): string {
-  const applied = [l.cacheApplied ? "caching" : "", l.batchApplied ? "batch API" : ""].filter(Boolean);
-  if (applied.length > 0) return applied.join(" + ");
-  if (!l.cacheEligible && !l.batchEligible) {
-    return "this workload has no cacheable prefix and is not batch-eligible";
-  }
-  const missing = [l.cacheEligible ? "cache-read" : "", l.batchEligible ? "batch" : ""].filter(Boolean);
-  return `this model publishes no ${missing.join(" or ")} rate`;
-}
+/** Flat shortfall charge for a constraint that is a yes/no, not a distance.
+ *  Larger than any realistic numeric shortfall (a 10x budget overrun scores 1,
+ *  a 500-point ELO gap scores 5) so categorical misses rank last among equals. */
+const CATEGORICAL_SHORTFALL = 10;
 
 function modelKey(m: { provider: string; model: string }): string {
   return `${m.provider}/${m.model}`;
@@ -336,7 +338,7 @@ const server = new McpServer(
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
-      "Fetches live data from OpenRouter API. Filter by provider, price tier (category), openness, " +
+      "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
       "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
       "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
       "Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. " +
@@ -350,7 +352,7 @@ const server = new McpServer(
       capability: z.string().optional().describe("Filter by capability: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
       maxInputPrice: z.number().optional().describe("Max input price per 1M tokens in USD"),
       maxOutputPrice: z.number().optional().describe("Max output price per 1M tokens in USD"),
-      minElo: z.number().optional().describe("Minimum ELO score (quality benchmark from Chatbot Arena)"),
+      minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case for cost estimation. Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
@@ -373,8 +375,8 @@ const server = new McpServer(
 
       if (allModels.length === 0) {
         return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models from OpenRouter API." },
-          content: [{ type: "text", text: "Failed to fetch LLM models from OpenRouter API." }],
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
           isError: true,
         };
       }
@@ -420,6 +422,7 @@ const server = new McpServer(
             monthlyBudget: roundMonthlyCost(m.monthlyBudget),
             optimizedUseCaseCost: roundPerRequestCost(m.optimizedUseCaseCost),
             optimizedMonthlyBudget: roundMonthlyCost(m.optimizedMonthlyBudget),
+            ...optimizationLevers(m, USE_CASE_PROFILES[ucKey]),
           })),
           useCaseLabel,
           volumeLabel,
@@ -702,24 +705,30 @@ const server = new McpServer(
       for (const query of requested) {
         const r = resolveModel(allModels, query);
         if (!r.matched) {
-          resolution.push({ query, status: "not-found", alternatives: [] });
+          resolution.push({ query, status: "not-found", alternatives: [], totalMatches: 0 });
           continue;
         }
         const resolved = `${r.matched.provider} ${r.matched.model}`;
         if (seen.has(modelKey(r.matched))) {
-          resolution.push({ query, status: "duplicate", resolved, alternatives: r.alternatives });
+          resolution.push({ query, status: "duplicate", resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
           continue;
         }
         seen.add(modelKey(r.matched));
         selected.push(r.matched);
-        resolution.push({ query, status: r.status, resolved, alternatives: r.alternatives });
+        resolution.push({ query, status: r.status, resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
       }
 
       const describe = (r: ResolutionEntry): string => {
         switch (r.status) {
           case "not-found": return `"${r.query}" matched no model — no column for it.`;
           case "duplicate": return `"${r.query}" resolved to ${r.resolved}, already selected by an earlier name — no extra column.`;
-          case "ambiguous": return `"${r.query}" matched ${r.alternatives.length + 1} models; used ${r.resolved} (also matched: ${r.alternatives.join(", ")}).`;
+          case "ambiguous": {
+            const undisclosed = r.totalMatches - 1 - r.alternatives.length;
+            return `"${r.query}" matched ${r.totalMatches} models; used ${r.resolved}` +
+              (r.alternatives.length > 0
+                ? ` (also matched: ${r.alternatives.join(", ")}${undisclosed > 0 ? `, and ${undisclosed} more` : ""})`
+                : "") + ".";
+          }
           default: return `"${r.query}" → ${r.resolved}.`;
         }
       };
@@ -841,8 +850,8 @@ const server = new McpServer(
     inputSchema: {
       useCasePreset: z.enum(USE_CASE_KEYS).describe("The workload to recommend for"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
-      maxMonthlyBudget: z.number().optional().describe("Maximum monthly budget in USD at the given volume"),
-      minElo: z.number().optional().describe("Minimum ELO score (quality benchmark from Chatbot Arena)"),
+      maxMonthlyBudget: z.number().positive().optional().describe("Maximum monthly budget in USD at the given volume. Tested against the LIST-price monthly cost, not the caching/batch-optimized cost."),
+      minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
       requiredCapability: z.string().optional().describe("Capability the model must have: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
       openness: z
         .enum(OPENNESS_VALUES as [string, ...string[]])
@@ -945,8 +954,20 @@ const server = new McpServer(
           total += Math.log10(m.monthlyBudget / maxMonthlyBudget);
         }
         if (minElo !== undefined) {
-          if (m.eloScore === undefined) total += 10;
+          if (m.eloScore === undefined) total += CATEGORICAL_SHORTFALL;
           else if (m.eloScore < minElo) total += (minElo - m.eloScore) / 100;
+        }
+        // A categorical miss has no natural distance, so it gets a flat charge
+        // big enough to sit behind any numeric near-miss — which is what the
+        // comment above always claimed and the code did not do. Charging 0
+        // sorted categorical misses *first*: asking for a cheap model with
+        // Vision returned a model with no Vision at all, ranked above a Vision
+        // model $46/mo over budget.
+        if (requiredCapability && !m.capabilities.some(c => c.toLowerCase() === requiredCapability.toLowerCase())) {
+          total += CATEGORICAL_SHORTFALL;
+        }
+        if (openness && m.openness !== openness) {
+          total += CATEGORICAL_SHORTFALL;
         }
         return total;
       };
@@ -956,7 +977,15 @@ const server = new McpServer(
 
       // Over-constrained: rather than an empty list, return the models that came
       // closest, each carrying the constraint it failed.
-      const overConstrained = passing.length === 0;
+      // "Over-constrained" has to mean the constraints did the excluding. With no
+      // constraints at all `checks()` returns [] and every model passes, so an
+      // empty `passing` means nothing was RANKABLE — a different failure with a
+      // different remedy. Reporting it as over-constraint sent the reader
+      // hunting for a constraint to relax that they never set.
+      const constraintsSet =
+        maxMonthlyBudget !== undefined || minElo !== undefined || !!requiredCapability || !!openness;
+      const nothingRankable = ranked.length === 0;
+      const overConstrained = constraintsSet && passing.length === 0 && !nothingRankable;
       const shortlist = overConstrained
         ? [...evaluated].sort(
             (a, b) =>
@@ -1010,7 +1039,11 @@ const server = new McpServer(
           : "")
       );
 
-      const preamble = overConstrained
+      const preamble = nothingRankable
+        ? `No model in the catalogue could be ranked for ${useCaseLabel}: the value score needs an Arena ELO ` +
+          `score and none of the ${allModels.length} catalogue entries carries one. That is a data problem, ` +
+          `not an over-constrained query${constraintsSet ? " — relaxing the constraints will not help" : ""}.`
+        : overConstrained
         ? `No model satisfies every constraint. Closest ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
           `(${ranked.length} ranked of ${allModels.length} catalogue entries), each with the constraint it failed:`
         : `Top ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
