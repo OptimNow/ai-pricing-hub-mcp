@@ -351,7 +351,7 @@ function errorMessage(error: unknown): string {
 const server = new McpServer(
   {
     name: "ai-pricing-hub",
-    version: "0.1.0",
+    version: "0.3.0",
   },
   { capabilities: {} },
 )
@@ -364,9 +364,14 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Compare LLM Models",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
-      "Compare AI/LLM models by price, quality (ELO), efficiency, and capabilities. " +
+      "Browse and filter the whole LLM catalogue and get back a ranked table: price, quality (ELO), " +
+      "efficiency and capabilities. Use this when the user wants to SEE THE FIELD — 'show me models " +
+      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300'. " +
+      "For a single PICK under a budget use recommend-llm-model; to weigh 2-4 NAMED models against " +
+      "each other use compare-models-side-by-side. " +
       "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
       "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
       "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
@@ -376,13 +381,13 @@ const server = new McpServer(
       "Present the results as a table and let the user draw conclusions.",
     inputSchema: {
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
-      category: z.string().optional().describe("Filter by price tier: Frontier, Mid-tier, Budget, Image"),
+      category: z.string().optional().describe("Price tier, matched by exact equality (case-insensitive): Frontier, Mid-tier, Budget, Image. This is cost only — self-hostability is the separate `openness` axis."),
       openness: z.enum(OPENNESS_VALUES as [string, ...string[]]).optional().describe("Filter by self-hostability, derived from the licence: Open source, Open weights, Proprietary, Unknown"),
-      capability: z.string().optional().describe("Filter by capability: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
+      capability: z.string().optional().describe("Capability, matched by exact equality (case-insensitive): Text, Vision, Code, Reasoning, Agents, Image Gen, Audio. Any other string returns zero matches."),
       maxInputPrice: z.number().optional().describe("Max input price per 1M tokens in USD"),
       maxOutputPrice: z.number().optional().describe("Max output price per 1M tokens in USD"),
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
-      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case for cost estimation. Default: supportTicket"),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
     },
@@ -508,18 +513,23 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Estimate LLM Cost",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
-      "Estimate per-request and monthly costs for AI/LLM models across different use cases and volumes. " +
+      "Cost a workload with EXACT numbers the caller supplies: arbitrary token counts per request and " +
+      "any monthly volume, not just the 10k/100k/1m presets the other cost tools use. Use this for " +
+      "'about 800 in and 200 out, 4 million calls a month', or to price one named model across every " +
+      "use-case profile. To compare 2-4 named models like for like at a preset volume, use " +
+      "compare-models-side-by-side instead. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
       "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
-      modelName: z.string().optional().describe("Model name to estimate costs for (e.g. 'GPT-4o', 'Claude Sonnet 4'). If omitted, shows top models."),
-      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Use case preset. Default: all presets."),
-      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request (overrides preset)"),
-      customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request (overrides preset)"),
-      monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Custom monthly volume (default: 100,000)"),
+      modelName: z.string().optional().describe("Model name, e.g. 'GPT-4o'. A partial name matches up to 5 models and ALL of them are costed. If omitted, the first 8 catalogue entries are used — that is catalogue order, not a quality ranking."),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: every preset."),
+      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request. Must be supplied TOGETHER with customOutputTokens — either alone is ignored and the preset is used. A custom shape assumes no cacheable prefix and no batch eligibility, so its optimized cost equals its list cost."),
+      customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request. Must be supplied TOGETHER with customInputTokens — either alone is ignored and the preset is used."),
+      monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Exact monthly request count, any integer (default 100,000). This tool does not take the 10k/100k/1m presets the other cost tools use."),
     },
     outputSchema: outputSchema(estimateCostOutputSchema),
   },
@@ -678,11 +688,13 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Compare Models Side by Side",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare 2-4 named LLM models against all 8 use-case profiles at a chosen monthly volume, " +
       "showing list and optimized cost for each. Use when the user names specific models to weigh " +
-      "against each other, rather than filtering the whole catalogue. " +
+      "against each other, rather than filtering the whole catalogue. If they also supply their own " +
+      "token counts, or a volume outside 10k/100k/1m, use estimate-llm-cost instead. " +
       "Every name is resolved against the catalogue and the result is reported: a name that matched " +
       "nothing, matched several models, or duplicated an earlier pick is stated explicitly. " +
       "IMPORTANT: Report all prices and costs EXACTLY as returned, and repeat any name-resolution " +
@@ -866,9 +878,13 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Recommend an LLM Model",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
-      "Recommend the best-value LLM models for a use case under optional constraints " +
+      "Pick a model. Returns a ranked top 3 for one workload under optional constraints, each with a " +
+      "per-constraint satisfied/violated breakdown as the evidence. Use this when the user wants an " +
+      "ANSWER rather than a table — 'what should I use for support tickets under $500 a month'. To " +
+      "browse or filter the whole catalogue instead, use compare-llm-models. Constraints: " +
       "(monthly budget, minimum ELO, required capability, self-hostability). " +
       "Returns a top 3 as structured facts — efficiency rank, ELO, list and optimized cost, " +
       "FinOps flag, volatility, and a per-constraint satisfied/violated breakdown. " +
@@ -877,7 +893,7 @@ const server = new McpServer(
       "IMPORTANT: Report the returned facts EXACTLY. The ranking is already computed — do not " +
       "re-rank, and do not present a near miss as if it satisfied the constraints.",
     inputSchema: {
-      useCasePreset: z.enum(USE_CASE_KEYS).describe("The workload to recommend for"),
+      useCasePreset: z.enum(USE_CASE_KEYS).describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k)."),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       maxMonthlyBudget: z.number().positive().optional().describe("Maximum monthly budget in USD at the given volume. Tested against the LIST-price monthly cost, not the caching/batch-optimized cost."),
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
@@ -1133,6 +1149,7 @@ const server = new McpServer(
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
+    title: "Compare Cloud Compute Pricing",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
@@ -1145,14 +1162,14 @@ const server = new McpServer(
       "IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
     inputSchema: {
       region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
-      provider: z.string().optional().describe("Cloud provider: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba"),
-      category: z.string().optional().describe("Instance category: General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable"),
+      provider: z.string().optional().describe("Cloud provider. Must be one of these exactly (case-insensitive): AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba. Any other string returns zero matches rather than an error."),
+      category: z.string().optional().describe("Instance category. Must be one of these exactly (case-insensitive): General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, GPU / Accelerated, Burstable. Any other string returns zero matches rather than an error."),
       minVCPUs: z.number().optional().describe("Minimum number of vCPUs"),
       maxVCPUs: z.number().optional().describe("Maximum number of vCPUs"),
       minMemory: z.number().optional().describe("Minimum memory in GiB"),
       maxMemory: z.number().optional().describe("Maximum memory in GiB"),
-      processor: z.string().optional().describe("Processor filter: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, etc."),
-      useCase: z.string().optional().describe("Use case filter: Web App, Database, HPC, ML & AI, Dev/Test, Big Data"),
+      processor: z.string().optional().describe("Processor. Matched by exact equality (case-insensitive), so a partial value like 'H100' returns nothing. Known values: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, NVIDIA L4, NVIDIA T4, NVIDIA V100, NVIDIA Other."),
+      useCase: z.string().optional().describe("Use case. Must be one of these exactly (case-insensitive): Web App, Database, HPC, ML & AI, Dev/Test, Big Data. Any other string returns zero matches rather than an error."),
       sortBy: z.enum(["price", "vcpus", "memory", "pricePerVCPU"]).optional().describe("Sort by: price, vcpus, memory, pricePerVCPU. Default: price"),
       limit: z.number().min(1).max(50).optional().describe("Max instances to return (default: 20)"),
     },

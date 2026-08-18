@@ -240,6 +240,16 @@ diverged before the switch.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference. Applied locally to the site's rows.
 
+**One deliberate divergence, to be backported.** `optimizationLevers()` here
+refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
+returns the list cost exactly when no lever is pulled. The original applies batch
+pricing whenever both batch fields are present, which for Zhipu GLM 5.2 — batch
+$0.70/$2.20 against list $0.49/$1.54 — produced an "optimized" cost 34% dearer
+than list, reported as a 0% saving with both levers named as the reason. The two
+apps therefore no longer agree to the cent for that model. Fix it upstream and
+the divergence closes; until then it is intentional and pinned by four tests in
+`llm-business-metrics.test.ts`, including a whole-catalogue sweep.
+
 Two things keep the two honest:
 
 - `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0).
@@ -283,10 +293,23 @@ Each profile defines typical input/output token counts per request.
 
 - No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
 - No database — stateless tool execution
-- `/api/pricing` costs ~0.3s on an edge-cache HIT and ~7.5s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
-- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (8 cold samples across all four regions): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.7–8.9 s cold** (7.5 s mean) / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
+- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
   **This paragraph used to say 55 s and "do not tune it down"; that was correct advice against a 50.5 s cold path, and upstream PR #57 (2026-08-18) cut that path by ~6x.** The rule it was protecting has not changed — never size this budget from the LLM endpoint's profile — but the number that satisfies it has. Re-measure before moving it again, and move all four places together (the two constants, the guard tests, and this bullet). Do not restore 55 s just because this paragraph once said so.
 - **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s (measured 2026-08-17, against the 50.5 s rebuild; not re-run since PR #57, but the mechanism does not depend on the rebuild's duration): an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
+- **The compute catalogue is enriched once, not per request.** `servableCatalogue()`
+  in `index.ts` memoises `enrichInstances()` + the Linux filter in a `WeakMap`
+  keyed by the catalogue array's identity — the memo in `compute-pricing.ts` hands
+  back the same array for the life of an entry and a fresh one after a refresh, so
+  identity is exactly the right invalidation key. Enriching per request cost 7 ms
+  and ~2.6 MB every call, 41% of it on Windows rows the tool discards immediately.
+  `catalogSize` counts servable rows (~3,573), not the raw catalogue (~6,052):
+  a denominator that includes rows no query can reach is not a denominator.
+- **Both fetchers dedupe in-flight requests.** Five concurrent cold callers used
+  to produce five upstream rebuilds each. The `refreshing` set only ever covered
+  the stale-while-revalidate branch; the cold branch — the one callers wait on —
+  had none. Keep the `finally` that clears the shared promise, or one failure
+  pins every later caller to it.
 - **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (There is no longer an `app.json` to keep in step — ChatGPT apps are submitted as plugins against the live server, so it was deleted.)
 - Brand color: Chartreuse (#ACE849) for OptimNow identity
 - Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)

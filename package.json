@@ -1,8 +1,8 @@
 {
   "name": "ai-pricing-hub-mcp",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Alpic MCP Server Template",
+  "description": "MCP app: LLM pricing comparison, cost estimation, model recommendation and cloud compute benchmarking. By OptimNow.",
   "type": "module",
   "scripts": {
     "dev": "skybridge dev",
