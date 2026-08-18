@@ -84,7 +84,7 @@ ai-pricing-hub-mcp/
 │       ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
 │       ├── index.css                 # Colour tokens on :root + dark-mode overrides
 │       ├── format.ts                 # formatCost / formatBudget / savingsPct
-│       ├── scale.ts                  # log10 axis maths for inline SVG charts
+│       ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
 │       ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
 │       └── widgets/
 │           ├── compare-llm-models/index.tsx
@@ -113,13 +113,13 @@ ai-pricing-hub-mcp/
 - **Input:** Optional filters (provider, category = price tier, openness, capability, price range, min ELO, use-case preset, volume)
 - **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs, and the concrete thresholds behind the FinOps Friendly badge
 - **Data Source:** optimtoken API → direct OpenRouter → static fallback
-- **Widget:** Interactive comparison table
+- **Widget:** Comparison cards, with a local List / Cost-vs-ELO toggle. The scatter is inline SVG (log10 cost on x, Arena ELO on y, chartreuse for FinOps Friendly); axis maths lives in `web/src/scale.ts`. Models without an ELO score are counted as "not plotted", never silently dropped.
 
 ### Tool 2: `estimate-llm-cost`
 - **Type:** Widget (has UI)
 - **Input:** Model name + use-case preset (or custom token counts + volume)
-- **Output:** Per-request and monthly cost breakdown per model
-- **Widget:** Cost comparison cards
+- **Output:** Per-request and monthly cost breakdown per model, plus `savingsPct` and the four optimization-lever booleans (`batchEligible`/`cacheEligible`/`batchApplied`/`cacheApplied`) per entry
+- **Widget:** Paired list-vs-optimized bars per use case. Both levers are conditional, so when neither applies the row says *why* — "this model publishes no batch rate" — instead of drawing a 0% saving.
 
 ### Tool 3: `compare-models-side-by-side`
 - **Type:** Widget (has UI)
@@ -199,6 +199,13 @@ there were 95, and they made dark mode impossible. `--brand` (#ACE849) is invari
 `formatMonthlyBudget` in `llm-business-metrics.ts`. There were previously three implementations that
 disagreed, so the widget could render `$450.00` where the text the model reads said `$450`. Change one
 side, change the other.
+3f. **Optimized cost is conditional, and the widgets must say so.** Batch pricing
+needs an async workload *and* a model that publishes batch rates; cache savings
+need a cacheable prefix *and* a published cache-read rate. `optimizationLevers()`
+returns which of the four conditions held, and `leverSummary()` turns that into a
+sentence. A bare 0% saving reads as a bug; "this model publishes no batch rate"
+reads as an answer. `leverSummary()` is duplicated in the estimate widget — keep
+the two in step.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
 6. **Compute pricing** is static data from 7 cloud providers with category enrichment

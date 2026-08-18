@@ -1,6 +1,6 @@
 import { McpServer } from "skybridge/server";
 import { z } from "zod";
-import { fetchLLMModels, filterModels, resolveModel } from "./lib/llm-models.js";
+import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
 import type { ResolutionStatus } from "./lib/llm-models.js";
 import type { LLMModel } from "./data/pricing-data.js";
 import {
@@ -158,6 +158,11 @@ const estimateCostOutputSchema = {
           monthly: z.number(),
           perRequestOptimized: z.number(),
           monthlyOptimized: z.number(),
+          savingsPct: z.number(),
+          batchEligible: z.boolean(),
+          cacheEligible: z.boolean(),
+          batchApplied: z.boolean(),
+          cacheApplied: z.boolean(),
         }),
       ),
     }),
@@ -504,10 +509,7 @@ const server = new McpServer(
       // Find matching models
       let targetModels: LLMModel[];
       if (modelName) {
-        const search = modelName.toLowerCase();
-        targetModels = allModels.filter(
-          m => m.model.toLowerCase().includes(search) || m.provider.toLowerCase().includes(search)
-        ).slice(0, 5);
+        targetModels = matchModels(allModels, modelName, 5);
         if (targetModels.length === 0) {
           return {
             structuredContent: {
@@ -535,7 +537,8 @@ const server = new McpServer(
         monthly: number;
         perRequestOptimized: number;
         monthlyOptimized: number;
-      };
+        savingsPct: number;
+      } & OptimizationLevers;
 
       const entry = (m: LLMModel, useCase: string, profile: UseCaseProfile): CostEntry => {
         const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
@@ -548,6 +551,8 @@ const server = new McpServer(
           monthly: cost * volume,
           perRequestOptimized: optimized,
           monthlyOptimized: optimized * volume,
+          savingsPct: savingsPct(cost, optimized),
+          ...optimizationLevers(m, profile),
         };
       };
 
@@ -580,8 +585,12 @@ const server = new McpServer(
       const lines = modelCosts.map(({ model: m, costs }) => {
         const costLines = costs.map(c =>
           `  ${c.useCase}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo ` +
-          `(optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo) ` +
-          `(${c.inputTokens} in + ${c.outputTokens} out tokens)`
+          `(${c.inputTokens} in + ${c.outputTokens} out tokens)
+` +
+          `    optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
+          (c.savingsPct > 0
+            ? ` — save ${c.savingsPct}% with ${leverSummary(c)}`
+            : ` — no saving available (${leverSummary(c)})`)
         );
         return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)\n${costLines.join("\n")}`;
       });
