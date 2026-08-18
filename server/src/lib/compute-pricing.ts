@@ -8,10 +8,10 @@
  * Two upstream properties shape this module:
  *
  *  - The site assembles each region from six live provider APIs. A cache MISS
- *    costs ~50s; a HIT costs ~0.3s. Every distinct query string is its own
+ *    costs ~7.5s; a HIT costs ~0.3s. Every distinct query string is its own
  *    cache entry, so we always request the *canonical* per-region URL and do
  *    all filtering locally. Adding `?provider=` to the URL would trade a warm
- *    hit for a cold 50s miss and return less data.
+ *    hit for a cold miss and return less data.
  *  - Prices are per-column, not per-row: `meta.priceTypes` says which of a
  *    provider's six price columns are live, which are static constants, and
  *    which are unavailable. AWS Savings Plans and GCP CUDs are `static` —
@@ -62,35 +62,56 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * How long we wait for `/api/pricing`.
  *
  * This is not the same number as the LLM endpoint's, and assuming it was is
- * what kept this tool pinned to tier 2. Measured against the live endpoint on
- * 2026-08-17:
+ * what kept this tool pinned to tier 2. Re-measured against the live endpoint
+ * on 2026-08-18 — 8 cold samples, two in each of the four regions, each on a
+ * guaranteed-cold cache key:
  *
- *   /api/llm-models   cold 209 ms   warm  31 ms    (68 KB)
- *   /api/pricing      cold 50.5 s   warm 80-350 ms (1.4 MB)
+ *   /api/llm-models   cold 0.19-0.42 s   warm  31 ms    (68 KB)
+ *   /api/pricing      cold 6.7-8.9 s     warm 80-350 ms (1.4 MB)
  *
- * A cold `/api/pricing` is 240x slower than a cold `/api/llm-models`, because
+ * A cold `/api/pricing` is ~28x slower than a cold `/api/llm-models`, because
  * the site assembles the region from six live provider APIs inside a function
- * whose own ceiling is `maxDuration: 60`. The old 20s budget was shorter than
- * the cold path *always* takes, so a cold edge entry could not produce tier 1
- * at all — the fallback was not a timeout risk, it was a certainty.
+ * whose own ceiling is `maxDuration: 60`.
+ *
+ * Those numbers replace the 50.5 s cold path measured on 2026-08-17, which is
+ * what bought the original 55 s budget. Upstream PR #57 landed on 2026-08-18
+ * and cut the cold path by ~6x. The 55 s budget never broke anything — a
+ * timeout that does not fire costs nothing — but it was justified in writing
+ * by a number that had stopped being true, and a stale measurement in a file
+ * this load-bearing is how the next person talks themselves into the wrong
+ * value. Hence the correction rather than a silent leave-it.
  *
  * And this server keeps meeting cold entries. The edge cache is per-key and
  * per-PoP: the deployed server returned tier 2 at a moment when the same URL
  * was serving a warm 200ms hit from another location, so it is not sharing
  * whatever entry ambient traffic has warmed. With no steady traffic of its
- * own to hold an entry open, it pays the rebuild — and then aborted at 20s.
+ * own to hold an entry open, it pays the rebuild.
  *
- * 55s leaves the site its full 60s budget minus transfer, and is the honest
- * price of a correct answer: the data cannot arrive faster than upstream can
- * assemble it. The memo below is what stops anyone paying it twice.
+ * 25s is ~2.8x the worst cold path observed, and the margin is the whole
+ * point. The healthy path is ~7.5 s, but a throttled or failing provider API
+ * upstream can still push it far past that, and the original reasoning is
+ * untouched: the data cannot arrive faster than upstream can assemble it.
+ * What changed is that covering a degraded upstream no longer costs the
+ * caller 55 s. Do not trim this to the LLM endpoint's profile — that is the
+ * regression the guard below exists to catch.
  */
-export const UPSTREAM_TIMEOUT_MS = 55_000;
+export const UPSTREAM_TIMEOUT_MS = 25_000;
 
-/** The cold-path time this budget has to cover, measured against the live
- *  endpoint (50.8s / 50.5s / 50.5s on 2026-08-17). Exported so a test can fail
- *  if the budget is ever trimmed back below the only path the endpoint takes —
- *  which is precisely the regression that pinned this tool to tier 2. */
-export const MEASURED_COLD_REBUILD_MS = 50_500;
+/** The cold-path time this budget has to cover: the slowest of 8 cold samples
+ *  taken across all four regions on 2026-08-18 (6.7 s min / 7.5 s mean /
+ *  8.9 s max). Exported so a test can fail if the budget is ever trimmed back
+ *  toward the cold path — precisely the regression that pinned this tool to
+ *  tier 2 when a 20 s budget met a 50.5 s rebuild. */
+export const MEASURED_COLD_REBUILD_MS = 8_900;
+
+/** How much headroom the budget must keep over the measured cold path.
+ *
+ *  When the budget was 55 s against a 50.5 s rebuild, "budget > measured" was
+ *  a tight and therefore meaningful assertion. At 25 s against 8.9 s it would
+ *  pass at a 9 s budget too — which would be one slow provider API away from
+ *  re-pinning the tool to tier 2. The ratio is what carries the guarantee now
+ *  that the two numbers are no longer a hair apart. */
+export const MIN_COLD_PATH_HEADROOM = 2;
 
 /**
  * Deliberately no retry-on-timeout, and this is the measurement that decided it.
@@ -100,7 +121,9 @@ export const MEASURED_COLD_REBUILD_MS = 50_500;
  * cheaply a moment later. Tested against the live endpoint on a guaranteed-cold
  * cache key (a fresh query string), aborting at 20s and then re-probing every
  * 5s: the key was *still cold at t+236s*, nearly five times the ~50s a rebuild
- * takes.
+ * cost at the time (2026-08-17). The rebuild is ~7.5s now, and this experiment
+ * has not been repeated against it — but the mechanism it exposed is not a
+ * function of how long the rebuild takes.
  *
  * An abandoned request does not leave a warm entry behind — each short probe
  * merely starts another rebuild it then abandons too. That is the production
