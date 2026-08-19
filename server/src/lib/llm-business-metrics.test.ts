@@ -133,8 +133,11 @@ test("the nullable price variant keeps null distinct from zero", () => {
 // savingsPct() clamps at 0, the widget reported "Same as list price" next to a
 // visibly larger number and a longer bar.
 //
-// This is a deliberate divergence from cloud-sparkle-compare, which still has
-// the original behaviour. See the backport note in CLAUDE.md.
+// Upstream's formula still has the original behaviour, but upstream PR #60 now
+// drops any batch row above list at the source, so GLM 5.2 publishes no batch
+// row and no real catalogue row triggers this any more. That is exactly why the
+// model below is synthetic: it keeps the guard tested once the data stops
+// exercising it. See the divergence note in CLAUDE.md.
 
 test("a published batch rate that costs more is not applied", () => {
   const dearBatch: LLMModel = {

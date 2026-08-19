@@ -255,15 +255,26 @@ diverged before the switch.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference. Applied locally to the site's rows.
 
-**One deliberate divergence, to be backported.** `optimizationLevers()` here
-refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
+**One divergence that is now dormant, and must stay.** `optimizationLevers()`
+here refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
 returns the list cost exactly when no lever is pulled. The original applies batch
 pricing whenever both batch fields are present, which for Zhipu GLM 5.2 — batch
 $0.70/$2.20 against list $0.49/$1.54 — produced an "optimized" cost 34% dearer
-than list, reported as a 0% saving with both levers named as the reason. The two
-apps therefore no longer agree to the cent for that model. Fix it upstream and
-the divergence closes; until then it is intentional and pinned by four tests in
-`llm-business-metrics.test.ts`, including a whole-catalogue sweep.
+than list, reported as a 0% saving with both levers named as the reason.
+
+Upstream PR #60 (2026-08-19) closed the gap from the other end: it drops any
+`:batch` row whose rate sits above list, so GLM 5.2 now publishes no batch row at
+all and the bad input never reaches either formula. Measured 2026-08-19 over
+258 models x 8 profiles, against both the live API and the refreshed snapshot: the
+two formulas differ on **0 of 2,064 pairs**, so the two apps agree to the cent
+again.
+
+The guard is therefore dormant, not redundant — it is the only thing standing
+between a future upstream data regression and an "optimized" price dearer than
+list. Do not delete it to close a divergence that no longer shows up in the
+numbers. It stays pinned by four tests in `llm-business-metrics.test.ts`: two on
+synthetic dear-batch/dear-cache models, which is what keeps them meaningful now
+that no real row triggers them, and two whole-catalogue sweeps.
 
 Two things keep the two honest:
 
