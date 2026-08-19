@@ -18,7 +18,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "skybridge": "^0.35.21",
-    "vite": "^7.3.1",
+    "vite": "^7.3.6",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -28,7 +28,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
     "alpic": "^1.91.6",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.12",
     "typescript": "^5.9.3"
   },
   "engines": {
