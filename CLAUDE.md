@@ -75,10 +75,9 @@ ai-pricing-hub-mcp/
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
 │       │   ├── compute-categories.ts # Compute instance categorization + enrichment
-│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, scale
+│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, scale, web-mirror
 │       └── data/
-│           ├── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
-│           └── region-api-map.ts     # Cloud region mappings — currently unimported
+│           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── web/
 │   ├── src/
 │   │   ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
@@ -109,7 +108,9 @@ ai-pricing-hub-mcp/
 ```
 
 Tests live beside their subjects: `lib/data-sources.test.ts`,
-`lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts` and
+`lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts`,
+`lib/scale.test.ts` and `lib/web-mirror.test.ts` (both reach across into
+`web/src`, because `npm test` only walks `server/src`), and
 `serialisation-contract.test.ts`.
 
 ---
@@ -185,16 +186,25 @@ a path that is no longer on disk. Commit deletions before deploying.
 
 ### Connecting to Claude Desktop
 
-Add to `claude_desktop_config.json`, using the app's native HTTP transport:
-```json
-"ai-pricing-hub": {
-  "type": "http",
-  "url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
-}
-```
+Add it as a **custom connector** (Settings → Connectors → Add custom connector),
+pasting the URL above. Connectors are stored account-side, use the native HTTP
+transport, and are the only path on which widgets render.
 
-Prefer this over an `npx mcp-remote` wrapper. The wrapper opens a GET SSE stream
-this server answers with 400, which stalls startup behind a Cloudflare timeout.
+Two paths that look equivalent and are not (both verified 2026-08-19):
+
+- `claude_desktop_config.json` does **not** accept `"type": "http"` entries —
+  Desktop silently drops them from the file on its next config rewrite. This
+  section used to recommend exactly that; it never worked.
+- An `npx mcp-remote` wrapper in that file does connect, but its OAuth discovery
+  plus a GET SSE stream this server rejects push `initialize` past Desktop's
+  ~6 s timeout, so every conversation shows "Unable to reach" even though calls
+  then succeed — and widgets do not render through the STDIO proxy.
+
+Widget rendering on claude.ai additionally requires skybridge ≥ 0.35.21: the
+host validates `_meta.ui.domain` against `sha256(connector URL)` and older
+versions hash Alpic's internal `/mcp` path instead of the public URL, which
+fails that validation ("ui.domain validation failed" in the Desktop logs) while
+tool calls keep working.
 
 ---
 
@@ -213,14 +223,14 @@ there were 95, and they made dark mode impossible. `--brand` (#ACE849) is invari
 3e. **One set of cost formatters.** `web/src/format.ts` is character-identical to `formatMicroCost` /
 `formatMonthlyBudget` in `llm-business-metrics.ts`. There were previously three implementations that
 disagreed, so the widget could render `$450.00` where the text the model reads said `$450`. Change one
-side, change the other.
+side, change the other — `lib/web-mirror.test.ts` fails if they drift.
 3f. **Optimized cost is conditional, and the widgets must say so.** Batch pricing
 needs an async workload *and* a model that publishes batch rates; cache savings
 need a cacheable prefix *and* a published cache-read rate. `optimizationLevers()`
 returns which of the four conditions held, and `leverSummary()` turns that into a
 sentence. A bare 0% saving reads as a bug; "this model publishes no batch rate"
-reads as an answer. `leverSummary()` is duplicated in the estimate widget — keep
-the two in step.
+reads as an answer. `leverSummary()` is duplicated in `web/src/format.ts` for the
+widgets — `lib/web-mirror.test.ts` keeps the two in step.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
 6. **Compute pricing** comes from `GET /api/pricing` (~6,000 instances across 7 providers), with the 137-row static array in `data/pricing-data.ts` as fallback only. Category, processor and use-case enrichment is applied locally to whichever rows arrive. It stopped being a static-only tool when optimtoken became the source of truth, and `openWorldHint` was corrected to `true` to match.
@@ -404,7 +414,10 @@ Each profile defines typical input/output token counts per request.
 
 ## Dependencies
 
-- `skybridge` — MCP app framework
+- `skybridge` — MCP app framework. Pinned `^0.35.21`: ≥ 0.35.21 for the
+  `x-alpic-forwarded-url` fix that makes widgets pass claude.ai's `ui.domain`
+  validation, and below 0.36.0 because 0.36 removes the `mountWidget` API the
+  five widgets are built on. Moving past it is a migration, not a bump.
 - `@modelcontextprotocol/sdk` — MCP protocol SDK
 - `zod` — Input schema validation
 - `react`, `react-dom` — Widget UI rendering
