@@ -185,16 +185,25 @@ a path that is no longer on disk. Commit deletions before deploying.
 
 ### Connecting to Claude Desktop
 
-Add to `claude_desktop_config.json`, using the app's native HTTP transport:
-```json
-"ai-pricing-hub": {
-  "type": "http",
-  "url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
-}
-```
+Add it as a **custom connector** (Settings → Connectors → Add custom connector),
+pasting the URL above. Connectors are stored account-side, use the native HTTP
+transport, and are the only path on which widgets render.
 
-Prefer this over an `npx mcp-remote` wrapper. The wrapper opens a GET SSE stream
-this server answers with 400, which stalls startup behind a Cloudflare timeout.
+Two paths that look equivalent and are not (both verified 2026-08-19):
+
+- `claude_desktop_config.json` does **not** accept `"type": "http"` entries —
+  Desktop silently drops them from the file on its next config rewrite. This
+  section used to recommend exactly that; it never worked.
+- An `npx mcp-remote` wrapper in that file does connect, but its OAuth discovery
+  plus a GET SSE stream this server rejects push `initialize` past Desktop's
+  ~6 s timeout, so every conversation shows "Unable to reach" even though calls
+  then succeed — and widgets do not render through the STDIO proxy.
+
+Widget rendering on claude.ai additionally requires skybridge ≥ 0.35.21: the
+host validates `_meta.ui.domain` against `sha256(connector URL)` and older
+versions hash Alpic's internal `/mcp` path instead of the public URL, which
+fails that validation ("ui.domain validation failed" in the Desktop logs) while
+tool calls keep working.
 
 ---
 
