@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
 import type { ResolutionStatus } from "./lib/llm-models.js";
 import type { LLMModel, ComputeInstance } from "./data/pricing-data.js";
+import { LLM_CAPABILITIES } from "./data/pricing-data.js";
 import {
   USE_CASE_KEYS,
   USE_CASE_PROFILES,
@@ -383,7 +384,7 @@ const server = new McpServer(
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
       category: z.string().optional().describe("Price tier, matched by exact equality (case-insensitive): Frontier, Mid-tier, Budget, Image. This is cost only — self-hostability is the separate `openness` axis."),
       openness: z.enum(OPENNESS_VALUES as [string, ...string[]]).optional().describe("Filter by self-hostability, derived from the licence: Open source, Open weights, Proprietary, Unknown"),
-      capability: z.string().optional().describe("Capability, matched by exact equality (case-insensitive): Text, Vision, Code, Reasoning, Agents, Image Gen, Audio. Any other string returns zero matches."),
+      capability: z.string().optional().describe(`Capability, matched by exact equality (case-insensitive): ${LLM_CAPABILITIES.join(", ")}. Any other string returns zero matches. There is no Code capability: for what coding costs, use useCasePreset codingTask.`),
       maxInputPrice: z.number().optional().describe("Max input price per 1M tokens in USD"),
       maxOutputPrice: z.number().optional().describe("Max output price per 1M tokens in USD"),
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
@@ -897,7 +898,7 @@ const server = new McpServer(
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
       maxMonthlyBudget: z.number().positive().optional().describe("Maximum monthly budget in USD at the given volume. Tested against the LIST-price monthly cost, not the caching/batch-optimized cost."),
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
-      requiredCapability: z.string().optional().describe("Capability the model must have: Text, Vision, Code, Reasoning, Agents, Image Gen, Audio"),
+      requiredCapability: z.string().optional().describe(`Capability the model must have: ${LLM_CAPABILITIES.join(", ")}. There is no Code capability: for coding, pass useCasePreset codingTask.`),
       openness: z
         .enum(OPENNESS_VALUES as [string, ...string[]])
         .optional()

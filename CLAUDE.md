@@ -109,7 +109,7 @@ ai-pricing-hub-mcp/
 
 Tests live beside their subjects: `lib/data-sources.test.ts`,
 `lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts`,
-`lib/scale.test.ts` and `lib/web-mirror.test.ts` (both reach across into
+`lib/scale.test.ts`, `lib/capabilities.test.ts` and `lib/web-mirror.test.ts` (both reach across into
 `web/src`, because `npm test` only walks `server/src`), and
 `serialisation-contract.test.ts`.
 
@@ -292,6 +292,27 @@ Two things keep the two honest:
 - The cost formulas in `llm-business-metrics.ts` are kept **character-identical** to the original's. The coherence test is that both apps produce the same cost to the cent for the same model and use case.
 
 Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.
+
+### Capabilities: there is no `Code`
+
+The values are `LLM_CAPABILITIES` in `data/pricing-data.ts`: Text, Vision,
+Reasoning, Agents, Image Gen, Audio. The site removed `Code` on 2026-10-05 (its
+LLM schemaVersion 2.5): it was assigned to any model whose output cost $0.50 per
+1M tokens or more, 225 of 292 models, so it described a price and not an
+ability. This repo followed the same day. Three things hold it:
+
+- **One list.** The `LLMCapability` type and both tool descriptions
+  (`capability`, `requiredCapability`) are built from `LLM_CAPABILITIES`, so a
+  description cannot offer a value the data does not carry.
+- **The site's payload is filtered to that list** (`coerceSiteModel`). A
+  deployment a release behind, or rolled back, would otherwise put `Code` back
+  on its rows while the descriptions say it does not exist.
+- **The OpenRouter tier no longer assigns it** (`inferCapabilities`).
+
+`lib/capabilities.test.ts` pins all three and the snapshot. Known gap, not fixed
+here: that tier's `Reasoning` rule is still the name match the site replaced on
+2026-09-21 with OpenRouter's `reasoning` parameter, so the two tiers tag
+`Reasoning` differently.
 
 ---
 
