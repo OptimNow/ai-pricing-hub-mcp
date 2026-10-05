@@ -309,10 +309,15 @@ ability. This repo followed the same day. Three things hold it:
   on its rows while the descriptions say it does not exist.
 - **The OpenRouter tier no longer assigns it** (`inferCapabilities`).
 
-`lib/capabilities.test.ts` pins all three and the snapshot. Known gap, not fixed
-here: that tier's `Reasoning` rule is still the name match the site replaced on
-2026-09-21 with OpenRouter's `reasoning` parameter, so the two tiers tag
-`Reasoning` differently.
+`lib/capabilities.test.ts` pins all three and the snapshot.
+
+**`Reasoning` means the model exposes a reasoning control upstream**: OpenRouter
+lists `reasoning` in its `supported_parameters` (a thinking budget or effort
+setting). It is not a quality claim. The site moved to that rule on 2026-09-21;
+the OpenRouter tier here kept a name match ("-pro", "thinking", "o4", ...) until
+2026-10-05, so a caller filtering on `Reasoning` got a different set depending on
+which tier answered. Both tiers now use the parameter, and the same test file
+pins that a name alone never fires.
 
 ---
 

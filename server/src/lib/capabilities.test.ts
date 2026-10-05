@@ -13,7 +13,7 @@ import { coerceSiteModel, inferCapabilities } from "./llm-models.js";
  */
 
 type UpstreamModel = Parameters<typeof inferCapabilities>[0];
-const upstream = (id: string, completion: string) =>
+const upstream = (id: string, completion: string, supported_parameters: string[] = []) =>
   ({
     id,
     name: id,
@@ -22,8 +22,30 @@ const upstream = (id: string, completion: string) =>
     context_length: 128000,
     architecture: { input_modalities: ["text"], output_modalities: ["text"] },
     pricing: { prompt: "0.000001", completion },
-    supported_parameters: [],
+    supported_parameters,
   }) as unknown as UpstreamModel;
+
+test("the OpenRouter tier tags Reasoning from the upstream parameter", () => {
+  // The site's rule since 2026-09-21: the model exposes a reasoning control.
+  assert.deepEqual(
+    inferCapabilities(upstream("anthropic/claude-opus-5", "0.000025", ["reasoning", "tools"])),
+    ["Text", "Reasoning", "Agents"],
+  );
+});
+
+test("a name alone never tags Reasoning", () => {
+  // Each of these fired under the old name rule: a "-pro" suffix, "o4" inside
+  // "pro4", a vendor called Thinking Machines, "r1", "reason".
+  for (const id of [
+    "amazon/nova-pro-v1",
+    "upstage/solar-pro4",
+    "thinking-machines/inkling",
+    "deepseek/deepseek-r1",
+    "acme/reasoner",
+  ]) {
+    assert.deepEqual(inferCapabilities(upstream(id, "0.000002")), ["Text"], id);
+  }
+});
 
 test("the declared list has no Code", () => {
   assert.deepEqual([...LLM_CAPABILITIES], ["Text", "Vision", "Reasoning", "Agents", "Image Gen", "Audio"]);
