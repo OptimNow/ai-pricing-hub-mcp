@@ -8,7 +8,7 @@
 
 // ── Types ──────────────────────────────────────────────────────────
 
-import { llmModels, dataLastUpdated } from "../data/pricing-data.js";
+import { llmModels, dataLastUpdated, LLM_CAPABILITIES } from "../data/pricing-data.js";
 import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.js";
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
 import { opennessOf } from "./openness.js";
@@ -500,7 +500,8 @@ function extractParameters(model: OpenRouterModel): string | undefined {
   return undefined;
 }
 
-function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
+/** Exported for tests. */
+export function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
   const caps: LLMCapability[] = [];
   const inputMods = model.architecture.input_modalities || [];
   const outputMods = model.architecture.output_modalities || [];
@@ -534,14 +535,10 @@ function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
     caps.push("Reasoning");
   }
 
-  // Code
-  const codeIndicators = ["code", "codex", "coder", "codestral"];
-  const isCodeSpecialist = codeIndicators.some((c) => id.includes(c));
-  // Most frontier/mid models can code; be generous
-  const outPrice = parseFloat(model.pricing.completion) * 1e6;
-  if (isCodeSpecialist || outPrice >= 0.5) {
-    caps.push("Code");
-  }
+  // No "Code" capability. It was assigned for a code-like id or an output price
+  // of $0.50 per 1M or more, which tagged 225 of 292 models: a price threshold,
+  // not a capability. The site dropped it on 2026-10-05 (schemaVersion 2.5), and
+  // nothing upstream says which models write code well.
 
   // Agents — supports tool use
   if (params.includes("tools") || params.includes("tool_choice")) {
@@ -767,7 +764,8 @@ interface SiteModelsResponse {
  * model. Anything that fails here is dropped rather than coerced; if enough
  * rows drop, the catalogue floor below hands over to the next tier.
  */
-function coerceSiteModel(row: unknown): LLMModel | null {
+/** Exported for tests. */
+export function coerceSiteModel(row: unknown): LLMModel | null {
   if (row === null || typeof row !== "object") return null;
   const m = row as Record<string, unknown>;
 
@@ -795,8 +793,13 @@ function coerceSiteModel(row: unknown): LLMModel | null {
     // put a retired "Open Weights" category and an unrecognised "Llama 4"
     // licence into this repo in the first place.
     category: (typeof m.category === "string" ? m.category : "Budget") as LLMCategory,
+    // Only the values this server declares. A site deployment a release behind
+    // (or rolled back) can still send "Code", and a filter on a value the tool
+    // descriptions say does not exist must not quietly match.
     capabilities: Array.isArray(m.capabilities)
-      ? (m.capabilities.filter((c): c is LLMCapability => typeof c === "string") as LLMCapability[])
+      ? m.capabilities.filter((c): c is LLMCapability =>
+          (LLM_CAPABILITIES as readonly unknown[]).includes(c),
+        )
       : [],
     releaseDate: typeof m.releaseDate === "string" ? m.releaseDate : undefined,
     eloScore: optionalNumber(m.eloScore),
