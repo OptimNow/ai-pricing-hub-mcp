@@ -352,7 +352,7 @@ function errorMessage(error: unknown): string {
 const server = new McpServer(
   {
     name: "ai-pricing-hub",
-    version: "0.3.0",
+    version: "0.4.0",
   },
   { capabilities: {} },
 )

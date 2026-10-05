@@ -505,8 +505,6 @@ export function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
   const caps: LLMCapability[] = [];
   const inputMods = model.architecture.input_modalities || [];
   const outputMods = model.architecture.output_modalities || [];
-  const id = model.id.toLowerCase();
-  const name = model.name.toLowerCase();
   const params = model.supported_parameters || [];
 
   // Text — virtually all models
@@ -529,9 +527,14 @@ export function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
     caps.push("Image Gen");
   }
 
-  // Reasoning — reasoning/thinking models
-  const reasoningIndicators = ["o1", "o3", "o4", "r1", "qwq", "thinking", "reason", "-pro"];
-  if (reasoningIndicators.some((r) => id.includes(r)) || name.includes("reason")) {
+  // Reasoning — the model exposes a reasoning control upstream (a thinking
+  // budget or effort setting): OpenRouter lists `reasoning` in its
+  // supported_parameters. The site's rule since 2026-09-21. This tier used to
+  // match names ("-pro", "thinking", "o4", ...), which tagged a vendor called
+  // Thinking Machines and "solar-pro4", and missed every Claude and GPT-5.x
+  // model, so it and the site disagreed on most of the catalogue. Never
+  // reintroduce a name rule here.
+  if (params.includes("reasoning")) {
     caps.push("Reasoning");
   }
 
