@@ -23,3 +23,11 @@ test("every place that states the version states the same one", () => {
     { lock: pkg, lockRoot: pkg, registry: pkg, announced: pkg },
   );
 });
+
+test("the registry manifest fits the registry's limits", () => {
+  // The registry refuses a description over 100 characters (HTTP 422), and a
+  // published version can never be edited. A 252-character description kept
+  // 0.3.0 out of the registry entirely, with nothing in this repo noticing.
+  const description: string = JSON.parse(read("../../server.json")).description;
+  assert.ok(description.length > 0 && description.length <= 100, `${description.length} characters`);
+});
