@@ -24,9 +24,12 @@ Verified against the live endpoint, so nothing here needs changing:
 
 **1. Domain verification.** The portal requires a token served at
 `/.well-known/openai-apps-challenge` on the MCP server's own domain. The
-current host returns 404 there and `alpic.live` is not ours. Alpic supports
-custom domains, so point a subdomain we control at the deployment, for example
-`mcp.optimtoken.optimnow.io`, then serve the challenge from it.
+current host returns 404 there, and `fly.dev` is not ours (nor was `alpic.live`,
+the host before 2026-10-07). Fly supports custom domains: point a subdomain we
+control at the app with a CNAME to `ai-pricing-hub-mcp.fly.dev`, run
+`fly certs add <subdomain>`, then serve the challenge from it. That subdomain
+becomes the connector URL, so `README.md`, `server.json` and `CLAUDE.md` move
+with it.
 
 **2. Terms of service page.** The portal wants website, support, privacy and
 terms URLs. We have the site, `optimtoken.optimnow.io/privacy`, and
