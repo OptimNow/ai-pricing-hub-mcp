@@ -209,6 +209,14 @@ build copies. Verified 2026-10-07 by building the image and calling it: five
 tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
 ~140 MB resident after a compute call.
 
+**The app runs one machine, and `fly.toml` does not enforce that.** On an app's
+first deploy Fly creates two machines for redundancy, whatever `fly.toml` says;
+later deploys update the machines that exist and keep the count. This app got
+two on 2026-10-07 and was scaled back with `fly scale count 1 --app
+ai-pricing-hub-mcp`. One is deliberate: each machine holds its own warm caches,
+so a second one makes a cold upstream fetch twice as likely, for redundancy a
+pricing lookup does not need. Check with `fly machine list`.
+
 **A manual `fly deploy` builds what is on disk, not what is on `master`.** The first
 deploy on 2026-10-07 answered `initialize` with `serverInfo.version` 0.3.0 and
 still offered the `Code` capability, while `master` was at 0.4.0: it had been
