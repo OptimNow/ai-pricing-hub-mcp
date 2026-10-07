@@ -98,7 +98,7 @@ ai-pricing-hub-mcp/
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
-├── .github/workflows/ci.yml          # typecheck + test + build on every PR
+├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
 ├── alpic.json                        # Alpic deployment config
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
@@ -164,7 +164,8 @@ npm run build      # Production build
 npm run start      # Start production server (serves /mcp locally)
 ```
 
-`.github/workflows/ci.yml` runs typecheck, test and build on every PR.
+`.github/workflows/ci.yml` runs typecheck, test and build on every PR, and on
+every push to `master` deploys to Fly.io once those pass (see below).
 
 Note: `npm run typecheck` writes `dist/tsconfig.tsbuildinfo`. Because it does not
 emit, a following `npm run build` can believe the server output is already up to
@@ -194,9 +195,26 @@ PR #195); this repo now carries the same three files.
 ### Deployment on Fly.io
 
 ```bash
-fly launch --no-deploy --copy-config   # once: creates the app from fly.toml
-fly deploy                             # every release, from the repo root
+fly deploy    # by hand, from the repo root, if ever needed
 ```
+
+**Releases deploy themselves.** The `deploy` job in `ci.yml` runs
+`flyctl deploy --remote-only` on every push to `master`, after the `check` job
+has passed, then asks the live server for its `serverInfo.version` and fails
+unless it matches the `version` in `server/src/index.ts`. It needs the
+`FLY_API_TOKEN` repository secret (`fly tokens create deploy --app
+ai-pricing-hub-mcp`). Added 2026-10-07 after the live server was found on 0.3.0
+24 commits behind `master`: a manual deploy step is one people forget.
+
+Dependabot merges do **not** trigger it. Auto-merge is queued with
+`GITHUB_TOKEN`, and GitHub starts no workflow from a push made with that token.
+Those bumps ship with the next human merge, or at once from Actions → CI → Run
+workflow on `master`.
+
+The Fly app already exists, so do not run `fly launch` in this repo again. On a
+Node project it generates its own `Dockerfile`, `fly.toml`, `.dockerignore` and
+`.github/workflows/fly-deploy.yml`, and adds `@flydotio/dockerfile` to
+`package.json`; all of that collides with the committed files.
 
 `Dockerfile` builds in two stages (`skybridge build`, then production
 dependencies plus `dist/`), `fly.toml` runs one `shared-cpu-1x` / 512 MB machine
