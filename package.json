@@ -1,6 +1,6 @@
 {
   "name": "ai-pricing-hub-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "MCP app: LLM pricing comparison, cost estimation, model recommendation and cloud compute benchmarking. By OptimNow.",
   "type": "module",

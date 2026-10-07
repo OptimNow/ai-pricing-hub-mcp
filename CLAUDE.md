@@ -244,6 +244,28 @@ Three things about Fly that matter here:
 SIGINT and is only killed at the stop timeout. Fly runs its own init, so this
 does not affect the deployed machine.
 
+#### Publishing to the MCP registry
+
+`server.json` is what <https://registry.modelcontextprotocol.io> lists. Nothing
+publishes it automatically: it is a manual `mcp-publisher` run (the CLI is
+downloaded locally and git-ignored). **A published version can never be
+edited**, so any change to `server.json` (a new connector URL, a description)
+needs a version bump before the registry will show it. 0.4.0 went up on
+2026-10-05 with the Alpic URL, which is why the Fly URL ships as 0.4.1.
+
+The version lives in four places — `package.json`, `package-lock.json`,
+`server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
+fails if they disagree. Release order:
+
+1. Merge the bump and wait for the `deploy` job in `ci.yml` to go green. It
+   deploys `master` and fails unless the live server announces the version this
+   commit declares, so green means the new version is live. Publishing first
+   would list a version the endpoint does not serve yet.
+2. `git pull` (`server.json` is read from disk), then from the repo root:
+   `mcp-publisher login github`, then `mcp-publisher publish`.
+3. Confirm the entry and its `remotes` URL:
+   `https://registry.modelcontextprotocol.io/v0/servers?search=io.github.OptimNow/ai-pricing-hub`
+
 #### Alpic (retired)
 
 Until 2026-10-07 the connector was `https://ai-pricing-hub-mcp-9604f763.alpic.live/`.
