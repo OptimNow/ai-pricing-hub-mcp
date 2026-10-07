@@ -9,6 +9,10 @@ behaviour describes what the server actually did, not what it ought to do.
 
 No test account is needed: the server is public and unauthenticated.
 
+> **The endpoint above is retired.** Since 2026-10-07 the server runs at
+> `https://ai-pricing-hub-mcp.fly.dev/mcp`; the Alpic host answers HTTP 402.
+> Run the cases against the Fly URL before pasting them into the portal.
+>
 > **Re-run these after the next deploy.** They were validated against a build
 > that served the 137-row static compute fallback. On `master`,
 > `compare-compute-pricing` fetches roughly 6,000 instances from
