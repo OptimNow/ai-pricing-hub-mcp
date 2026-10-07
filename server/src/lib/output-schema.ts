@@ -25,7 +25,7 @@ import { z } from "zod";
  *    return `undefined`, which *silently drops the schema entirely*. That
  *    trades a loud error for a quiet loss of the contract.
  *  - Patching `node_modules`, with or without a postinstall step. Out of scope
- *    by instruction, and it would not survive a fresh install on Alpic.
+ *    by instruction, and it would not survive the fresh install every deploy does.
  *
  * What does work: Zod v4 merges a schema's `.meta()` into the JSON Schema it
  * emits, and `$schema` is written from the metadata rather than re-stamped
