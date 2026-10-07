@@ -23,13 +23,13 @@ Verified against the live endpoint, so nothing here needs changing:
 ## Blockers to clear first
 
 **1. Domain verification.** The portal requires a token served at
-`/.well-known/openai-apps-challenge` on the MCP server's own domain. The
-current host returns 404 there, and `fly.dev` is not ours (nor was `alpic.live`,
-the host before 2026-10-07). Fly supports custom domains: point a subdomain we
-control at the app with a CNAME to `ai-pricing-hub-mcp.fly.dev`, run
-`fly certs add <subdomain>`, then serve the challenge from it. That subdomain
-becomes the connector URL, so `README.md`, `server.json` and `CLAUDE.md` move
-with it.
+`/.well-known/openai-apps-challenge` on the MCP server's own domain. The server
+now answers on a domain we control, `optimtoken-mcp.optimnow.io` (a CNAME to
+`ai-pricing-hub-mcp.fly.dev` with a Fly certificate), so the first half of this
+blocker is gone. It still returns 404 at that path: Skybridge exposes no static
+route, so the token has to be served by a small Express handler registered with
+`server.use("/.well-known/openai-apps-challenge", ...)` in `server/src/index.ts`,
+the same mechanism `pinPublicUrl` uses. Add it when the portal issues the token.
 
 **2. Terms of service page.** The portal wants website, support, privacy and
 terms URLs. We have the site, `optimtoken.optimnow.io/privacy`, and

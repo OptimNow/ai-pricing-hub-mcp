@@ -3,7 +3,7 @@
 **Project:** AI Pricing Hub MCP
 **Framework:** Skybridge (MCP App Framework)
 **Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
-**Deployed:** https://ai-pricing-hub-mcp.fly.dev/mcp (Fly.io, since 2026-10-07)
+**Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp, since 2026-10-07)
 
 ---
 
@@ -22,8 +22,8 @@ Framework:    Skybridge (MCP App Framework)
 Language:     TypeScript
 Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
-Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg)
-Transport:    Streamable HTTP at /mcp
+Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
+Transport:    Streamable HTTP at /mcp (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
               → direct OpenRouter (LLM only, uncorrected)
               → static fallback in data/pricing-data.ts
@@ -67,6 +67,7 @@ ai-pricing-hub-mcp/
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
+│       │   ├── public-url.ts         # PUBLIC_MCP_URL, the widget sandbox domain hash, pinPublicUrl middleware
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
@@ -75,7 +76,7 @@ ai-pricing-hub-mcp/
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
 │       │   ├── compute-categories.ts # Compute instance categorization + enrichment
-│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, scale, web-mirror
+│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, public-url, scale, web-mirror
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── web/
@@ -97,6 +98,7 @@ ai-pricing-hub-mcp/
 │   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
+│   ├── check-connector.mjs           # Manual: call a deployed connector and check tools, ui.domain, tier
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
@@ -110,9 +112,10 @@ ai-pricing-hub-mcp/
 
 Tests live beside their subjects: `lib/data-sources.test.ts`,
 `lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts`,
-`lib/scale.test.ts`, `lib/capabilities.test.ts` and `lib/web-mirror.test.ts` (both reach across into
-`web/src`, because `npm test` only walks `server/src`), and
-`serialisation-contract.test.ts`.
+`lib/public-url.test.ts` (pins the connector URL, its sandbox-domain hash and
+every published copy of the URL), `lib/scale.test.ts`, `lib/capabilities.test.ts`
+and `lib/web-mirror.test.ts` (both reach across into `web/src`, because
+`npm test` only walks `server/src`), and `serialisation-contract.test.ts`.
 
 ---
 
@@ -180,9 +183,16 @@ fly deploy    # by hand, from the repo root; master normally deploys itself
               # (`npm run deploy` runs the same)
 ```
 
-The connector URL is **`https://ai-pricing-hub-mcp.fly.dev/mcp`**. That is the
-URL `README.md` and `server.json` publish. Locally, `npm run start` serves the
-same `/mcp` path.
+The connector URL is **`https://optimtoken-mcp.optimnow.io/mcp`**. That is the
+URL `README.md` and `server.json` publish, and it is **one constant**,
+`PUBLIC_MCP_URL` in `lib/public-url.ts`; `public-url.test.ts` fails if any
+published copy drifts from it. It is a custom domain on the Fly app: a CNAME
+`optimtoken-mcp.optimnow.io -> ai-pricing-hub-mcp.fly.dev` in the `optimnow.io`
+zone (hosted on Wix DNS) plus a certificate from
+`fly certs add optimtoken-mcp.optimnow.io`. The `ai-pricing-hub-mcp.fly.dev`
+host still answers tool calls (the `deploy` job reads its version) but is not
+published, and widgets do not render through it (see the `ui.domain` note
+below). Locally, `npm run start` serves the same `/mcp` path.
 
 **Releases deploy themselves.** The `deploy` job in `ci.yml` runs
 `flyctl deploy --remote-only` on every push to `master`, after the `check` job
@@ -230,19 +240,33 @@ curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
   | grep -o '"serverInfo":{[^}]*}'
 ```
 
+**Verify by calling, not by reading.** `node scripts/check-connector.mjs` runs
+`initialize` and `tools/list` against the published URL (or a URL you pass),
+reads every widget resource as `Claude-User` and checks `_meta.ui.domain`
+against the hash of the published URL, then calls `compare-llm-models` and
+checks `provenance.tier` is 1. Run it after every deploy and before touching
+the registry entry or the directory listing.
+
 Three things about Fly that matter here:
 
 - **The connector URL ends in `/mcp`.** The root is a 404 on Fly. Alpic mapped
   the root to the MCP endpoint, which is why older connectors and docs used the
   bare origin.
-- **`ui.domain` follows automatically.** Skybridge hashes
-  `https://<Host header><path>` per request, and Fly passes the Host header
-  through, so the hash matches the URL as pasted with no code change. Verified
-  against the live deployment on 2026-10-07:
-  `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com`. There is no Host
-  allow-list either, so the 421 the Python FinOps server hit on Fly does not
-  apply here. A custom domain later (`fly certs add`) needs no code change, but
-  it is a new connector URL: every copy listed above moves with it.
+- **`ui.domain` is pinned to the published URL.** Skybridge 0.35.21 hashes
+  the `x-alpic-forwarded-url` header when present, else
+  `https://<Host header><path>` per request. Fly passes Host through, so the
+  per-request form did work on the fly.dev host (verified live on 2026-10-07:
+  `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com`), but it follows
+  whichever hostname the request arrived on and anchors to no constant.
+  `pinPublicUrl` in `lib/public-url.ts` now sets that header on every request
+  from `PUBLIC_MCP_URL`, writing both `req.headers` and `rawHeaders` (the MCP
+  SDK rebuilds the request from the raw list through hono's Node adapter, so
+  the parsed object alone never reaches Skybridge). The resulting hash,
+  `6bc975b213d359f660adf536cb8cebab.claudemcpcontent.com`, is pinned by
+  `public-url.test.ts`. Consequences: users paste the URL exactly, with `/mcp`
+  and no trailing slash; the fly.dev host serves tool calls only. There is no
+  Host allow-list, so the 421 the Python FinOps server hit on Fly does not
+  apply here.
 - **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
   outlives requests. With `min_machines_running = 0`, an idle machine stops, and
   the next caller pays the machine start plus an upstream fetch (up to ~8 s on
@@ -259,7 +283,8 @@ publishes it automatically: it is a manual `mcp-publisher` run (the CLI is
 downloaded locally and git-ignored). **A published version can never be
 edited**, so any change to `server.json` (a new connector URL, a description)
 needs a version bump before the registry will show it. 0.4.0 went up on
-2026-10-05 with the Alpic URL, which is why the Fly URL ships as 0.4.1.
+2026-10-05 with the Alpic URL, which is why the Fly URL shipped as 0.4.1, and
+the custom domain ships as 0.4.2.
 
 The version lives in four places — `package.json`, `package-lock.json`,
 `server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
@@ -301,11 +326,14 @@ Two paths that look equivalent and are not (both verified 2026-08-19):
   ~6 s timeout, so every conversation shows "Unable to reach" even though calls
   then succeed — and widgets do not render through the STDIO proxy.
 
-Widget rendering on claude.ai additionally requires skybridge ≥ 0.35.21: the
-host validates `_meta.ui.domain` against `sha256(connector URL)` and older
-versions hash Alpic's internal `/mcp` path instead of the public URL, which
-fails that validation ("ui.domain validation failed" in the Desktop logs) while
-tool calls keep working.
+Widget rendering on claude.ai additionally depends on `_meta.ui.domain`: the
+host validates it against `sha256(<connector URL exactly as the user pasted
+it>)[:32] + ".claudemcpcontent.com"` and otherwise leaves the frame blank
+("ui.domain validation failed" in the Desktop logs) while tool calls keep
+working. This server pins the value to `PUBLIC_MCP_URL` (see "Three things
+about Fly" above), so the URL must be pasted exactly, with `/mcp` and no
+trailing slash. Skybridge 0.35.21 or later is the floor: older versions ignore
+the header the pin relies on.
 
 ---
 
@@ -477,20 +505,21 @@ Each profile defines typical input/output token counts per request.
   it** (that gap is small only because the upstream edge cache happened to be
   warm; on the edge MISS that follows a deploy it is the full ~8 s).
 
-  This is only worth doing because **the Alpic process outlives a request** —
-  three MCP sessions minutes apart all reported the same
-  `provenance.upstreamTimestamp`, which is what proves the memo survives between
-  requests. On a per-request runtime the warm-up would be pure waste, so
-  re-check that before trusting this. On Fly.io the process outlives requests
-  while the machine runs, but `fly.toml` stops it when idle, so the warm-up pays
-  off only within a burst of traffic (see **Deployment**).
-
-  It does **not** outlive a deploy: the production logs show two boots 50
-  seconds apart during the rollout of this change, each re-running the warm-up,
-  so budget two upstream fetches per restart rather than per day. That is cheap
-  while the upstream edge cache is warm (measured 205-324 ms per fetch) and
-  would be 7-11 s per fetch if it is cold. If restarts ever become frequent for
-  reasons other than deploys, re-measure before assuming this is still free.
+  This is only worth doing because **the process outlives a request**. On Alpic
+  that was proven by three MCP sessions minutes apart reporting the same
+  `provenance.upstreamTimestamp`. On Fly.io it is true **per wake, not per
+  deploy**: `fly.toml` sets `auto_stop_machines = "stop"` and
+  `min_machines_running = 0`, so the machine stops after a few idle minutes and
+  restarts, with empty caches, on the next request. The warm-up then runs on
+  every wake, and it still earns its keep for the same reason: the first caller
+  of a wake would otherwise fund the fetch. Budget two upstream fetches per
+  wake plus two per deploy. That is cheap while the upstream edge cache is warm
+  (measured 205-324 ms per fetch on Alpic, 2026-08-18) and 7-11 s per fetch if
+  it is cold. Not yet re-measured on Fly: when the wake rate is known, decide
+  whether `min_machines_running = 1` (one machine always on, roughly $3 a
+  month) buys a memo that is worth more than the stopped machine saves. On a
+  per-request runtime the warm-up would be pure waste, so re-check this
+  before moving hosts again.
 
   Three rules it must keep:
   - **Never block `server.run()`.** The upstream can take 11 s; awaiting it turns
@@ -501,13 +530,15 @@ Each profile defines typical input/output token counts per request.
   - **Never reach upstream from a test or a CI build.** Guarded by
     `NODE_ENV === "test"` and `SKIP_CACHE_WARMUP=1`.
 
-- **Alpic's `duration` field is not application latency.** In the production
-  logs, the first request after each boot reported `duration: 3618ms` and
-  `duration: 3127ms` while only 6-7 ms elapsed between its own START and END
-  timestamps. It appears to include container start-up. So there is a ~3 s
-  cold-start on the first request after a restart that `warmCaches()` cannot
-  remove — it runs after the app has booted — and that field should not be used
-  to judge handler performance. Time calls from the client instead.
+- **Platform logs do not measure handler latency.** On Alpic, the `duration`
+  field of the first request after each boot read 3.1-3.6 s while 6-7 ms
+  elapsed between the handler's own START and END timestamps: it included
+  container start-up. Fly has no such field; `fly logs` carries the app's
+  stdout plus the proxy's machine start and stop lines, which is where the
+  cold-start cost of a wake shows up (the machine boot, then the warm-up).
+  Neither is something `warmCaches()` can remove, since it runs after the app
+  has booted. Time calls from the client instead, as `check-connector.mjs`
+  prints.
 
 - **Warming that was considered and deliberately rejected.** Each of these is a
   plausible next step that costs more than it returns; do not add them without
@@ -523,8 +554,11 @@ Each profile defines typical input/output token counts per request.
     than 12 hours, at ~26 upstream rebuilds a day per region on an otherwise idle
     server. Wrong ratio.
   - **An external cron pinging the endpoint.** Same effect as the timer, plus
-    infrastructure, and it only earns its keep if Alpic scales the process to
-    zero between requests — which the measurement above says it does not.
+    infrastructure. On Fly it would also keep the machine awake around the
+    clock, which is `min_machines_running = 1` with extra steps and none of the
+    savings; set that instead if a warm memo is ever worth paying for. (A
+    stopped machine runs no timers either, so the timer above cannot run on
+    Fly at all.)
   - **Warming from `primeComputePricingCache()`.** That export is a test seam
     that takes an already-built result; it is not a fetch and cannot warm
     anything on its own.
@@ -543,10 +577,13 @@ Each profile defines typical input/output token counts per request.
 
 ## Dependencies
 
-- `skybridge` — MCP app framework. Pinned `^0.35.21`: ≥ 0.35.21 for the
-  `x-alpic-forwarded-url` fix that makes widgets pass claude.ai's `ui.domain`
-  validation, and below 0.36.0 because 0.36 removes the `mountWidget` API the
-  five widgets are built on. Moving past it is a migration, not a bump.
+- `skybridge`: MCP app framework. Pinned `^0.35.21`: at least 0.35.21 because that
+  release started hashing the `x-alpic-forwarded-url` header for `ui.domain`,
+  which `pinPublicUrl` relies on to make widgets pass claude.ai's validation,
+  and below 0.36.0 because 0.36 removes the `mountWidget` API the five widgets
+  are built on. Moving past it is a migration, not a bump; re-read
+  `dist/server/server.js` (`registerWidgetResource`) for the domain derivation
+  before trusting the pin on a new version.
 - `@modelcontextprotocol/sdk` — MCP protocol SDK
 - `zod` — Input schema validation
 - `react`, `react-dom` — Widget UI rendering

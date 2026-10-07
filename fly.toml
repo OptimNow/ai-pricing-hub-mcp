@@ -3,10 +3,15 @@
 # (OptimNow/cloud-finops-skills), which moved off Alpic on 2026-09-09 when the
 # shared free quota returned HTTP 402 to every OptimNow connector.
 #
-# The connector URL is https://<app>.fly.dev/mcp - the /mcp path is required,
-# Fly does not map the root the way Alpic did. Skybridge derives the claude.ai
-# widget sandbox domain per request from the URL it was reached at, so a
-# custom domain later needs no code change, only `fly certs add`.
+# The public URL is https://optimtoken-mcp.optimnow.io/mcp: a custom domain
+# (CNAME optimtoken-mcp.optimnow.io -> ai-pricing-hub-mcp.fly.dev in the
+# optimnow.io zone, certificate issued with `fly certs add`). The /mcp path is
+# required: Fly does not map the root the way Alpic did. That URL is one
+# constant, PUBLIC_MCP_URL in server/src/lib/public-url.ts, and the claude.ai
+# widget sandbox domain is a hash of it, pinned by a test, so the URL and this
+# comment move together. The ai-pricing-hub-mcp.fly.dev host still answers
+# tool calls (the CI deploy job reads its version) but widgets do not render
+# through it, because the hash is of the published URL.
 #
 # Scale-to-zero: the machine stops when idle and restarts on the next request.
 # That also drops the in-memory pricing caches warmed at boot (see the
