@@ -100,6 +100,8 @@ ai-pricing-hub-mcp/
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR
 ├── alpic.json                        # Alpic deployment config
+├── Dockerfile                        # Image for Fly.io (two-stage build)
+├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
 ├── server.json                       # Manifest for the official MCP registry
 ├── AGENTS.md
 ├── package.json
@@ -183,6 +185,45 @@ is the URL `server.json` publishes. Locally, `npm run start` serves it at `/mcp`
 **Alpic collects files through the git index, not the working tree.** Deleting a
 tracked file without staging the deletion makes the deploy fail with `ENOENT` on
 a path that is no longer on disk. Commit deletions before deploying.
+
+**Alpic returned HTTP 402 on `initialize` (checked 2026-10-07)** — the shared
+free quota that took every OptimNow connector down on 2026-09-09. The Cloud
+FinOps connector moved to Fly.io that day (`OptimNow/cloud-finops-skills`
+PR #195); this repo now carries the same three files.
+
+### Deployment on Fly.io
+
+```bash
+fly launch --no-deploy --copy-config   # once: creates the app from fly.toml
+fly deploy                             # every release, from the repo root
+```
+
+`Dockerfile` builds in two stages (`skybridge build`, then production
+dependencies plus `dist/`), `fly.toml` runs one `shared-cpu-1x` / 512 MB machine
+in `cdg` that scales to zero, and `.dockerignore` keeps the context to what the
+build copies. Verified 2026-10-07 by building the image and calling it: five
+tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
+~140 MB resident after a compute call.
+
+Three differences from Alpic that matter:
+
+- **The connector URL ends in `/mcp`.** Alpic mapped the root to the MCP
+  endpoint; on Fly the root is a 404. The URL to publish is
+  `https://ai-pricing-hub-mcp.fly.dev/mcp` (or a custom domain + `/mcp`).
+- **`ui.domain` follows automatically.** Skybridge hashes
+  `https://<Host header><path>` per request, and Fly passes the Host header
+  through, so the hash matches the URL as pasted with no code change. Verified
+  on the image: `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com` for the
+  fly.dev URL above. There is no Host allow-list either, so the 421 the Python
+  FinOps server hit on Fly does not apply here.
+- **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
+  outlives requests. With `min_machines_running = 0`, an idle machine stops, and
+  the next caller pays the machine start plus an upstream fetch (up to ~8 s on
+  `compare-compute-pricing`). Set it to 1 if that latency matters.
+
+`docker run` locally needs `--init`: without it the server is PID 1, ignores
+SIGINT and is only killed at the stop timeout. Fly runs its own init, so this
+does not affect the deployed machine.
 
 ### Connecting to Claude Desktop
 

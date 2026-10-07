@@ -1,0 +1,10 @@
+# Keep the build context to what the Dockerfile copies. A local dist/ or
+# node_modules/ must never reach the image: both are rebuilt inside it.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!server/
+!web/
+server/**/*.test.ts
+web/dist
