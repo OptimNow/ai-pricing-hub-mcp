@@ -9,9 +9,10 @@ behaviour describes what the server actually did, not what it ought to do.
 
 No test account is needed: the server is public and unauthenticated.
 
-> **The endpoint above is retired.** Since 2026-10-07 the server runs at
-> `https://ai-pricing-hub-mcp.fly.dev/mcp`; the Alpic host answers HTTP 402.
-> Run the cases against the Fly URL before pasting them into the portal.
+> **The endpoint above is retired.** Since 2026-10-07 the server runs on
+> Fly.io, published as `https://optimtoken-mcp.optimnow.io/mcp`; the Alpic host
+> answers HTTP 402. Run the cases against that URL before pasting them into
+> the portal (`scripts/check-connector.mjs` confirms it answers first).
 >
 > **Re-run these after the next deploy.** They were validated against a build
 > that served the 137-row static compute fallback. On `master`,

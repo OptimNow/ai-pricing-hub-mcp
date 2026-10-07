@@ -22,6 +22,7 @@ import {
   leverSummary,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
+import { pinPublicUrl } from "./lib/public-url.js";
 import type {
   UseCaseProfile,
   VolumePreset,
@@ -352,7 +353,7 @@ function errorMessage(error: unknown): string {
 const server = new McpServer(
   {
     name: "ai-pricing-hub",
-    version: "0.4.1",
+    version: "0.4.2",
   },
   { capabilities: {} },
 )
@@ -1275,6 +1276,12 @@ const server = new McpServer(
     }
   },
 );
+
+// Every request is hashed as if it arrived at PUBLIC_MCP_URL, so the widget
+// sandbox domain follows the one published URL rather than the Host header.
+// Skybridge mounts custom middleware ahead of the MCP transport; see
+// lib/public-url.ts for why the header, and public-url.test.ts for the pin.
+server.use("/mcp", pinPublicUrl);
 
 server.run();
 

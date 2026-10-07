@@ -7,11 +7,11 @@
     "url": "https://github.com/OptimNow/ai-pricing-hub-mcp",
     "source": "github"
   },
-  "version": "0.4.1",
+  "version": "0.4.2",
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://ai-pricing-hub-mcp.fly.dev/mcp"
+      "url": "https://optimtoken-mcp.optimnow.io/mcp"
     }
   ],
   "title": "OptimToken",

@@ -19,12 +19,15 @@
 The server is hosted, so there is nothing to install.
 
 ```
-https://ai-pricing-hub-mcp.fly.dev/mcp
+https://optimtoken-mcp.optimnow.io/mcp
 ```
+
+Paste it exactly as written, with `/mcp` and no trailing slash. The widgets
+render only for that form: the host checks a hash of the URL you entered.
 
 | Client | How to add it |
 |---|---|
-| <img src="https://img.shields.io/badge/-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Claude Code" height="22"/> | `claude mcp add --transport http optimtoken https://ai-pricing-hub-mcp.fly.dev/mcp` |
+| <img src="https://img.shields.io/badge/-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Claude Code" height="22"/> | `claude mcp add --transport http optimtoken https://optimtoken-mcp.optimnow.io/mcp` |
 | <img src="https://img.shields.io/badge/-Claude.ai%20%2F%20Desktop-D97757?logo=anthropic&logoColor=white" alt="Claude.ai / Desktop" height="22"/> | **Settings → Connectors → Add custom connector**, paste the URL above |
 | <img src="https://img.shields.io/badge/-ChatGPT-10A37F?logo=openai&logoColor=white" alt="ChatGPT" height="22"/> | **Settings → Connectors → Add**, paste the URL. Comparisons render as interactive widgets |
 | <img src="https://img.shields.io/badge/-Cursor-000000?logo=cursor&logoColor=white" alt="Cursor" height="22"/> <img src="https://img.shields.io/badge/-Windsurf-3DDC91?logoColor=white" alt="Windsurf" height="22"/> <img src="https://img.shields.io/badge/-VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" height="22"/> | Add an HTTP MCP server entry pointing at the URL |
