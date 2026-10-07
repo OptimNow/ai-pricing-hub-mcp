@@ -257,10 +257,12 @@ The version lives in four places — `package.json`, `package-lock.json`,
 `server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
 fails if they disagree. Release order:
 
-1. Merge the bump, `git pull`, `fly deploy`, and check that the live server
-   announces the new version (the `curl` above). Publishing first would list a
-   version the endpoint does not serve yet.
-2. From the repo root: `mcp-publisher login github`, then `mcp-publisher publish`.
+1. Merge the bump and wait for the `deploy` job in `ci.yml` to go green. It
+   deploys `master` and fails unless the live server announces the version this
+   commit declares, so green means the new version is live. Publishing first
+   would list a version the endpoint does not serve yet.
+2. `git pull` (`server.json` is read from disk), then from the repo root:
+   `mcp-publisher login github`, then `mcp-publisher publish`.
 3. Confirm the entry and its `remotes` URL:
    `https://registry.modelcontextprotocol.io/v0/servers?search=io.github.OptimNow/ai-pricing-hub`
 
