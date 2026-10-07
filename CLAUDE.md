@@ -98,7 +98,7 @@ ai-pricing-hub-mcp/
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
-├── .github/workflows/ci.yml          # typecheck + test + build on every PR
+├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
 ├── server.json                       # Manifest for the official MCP registry
@@ -163,7 +163,8 @@ npm run build      # Production build
 npm run start      # Start production server (serves /mcp locally)
 ```
 
-`.github/workflows/ci.yml` runs typecheck, test and build on every PR.
+`.github/workflows/ci.yml` runs typecheck, test and build on every PR, and on
+every push to `master` deploys to Fly.io once those pass (see below).
 
 Note: `npm run typecheck` writes `dist/tsconfig.tsbuildinfo`. Because it does not
 emit, a following `npm run build` can believe the server output is already up to
@@ -175,14 +176,31 @@ running server and the live catalogue. Run it by hand after touching cost code.
 ### Deployment
 
 ```bash
-fly launch --no-deploy --copy-config   # once: creates the app from fly.toml
-fly deploy                             # every release, from the repo root
-                                       # (`npm run deploy` runs the same)
+fly deploy    # by hand, from the repo root; master normally deploys itself
+              # (`npm run deploy` runs the same)
 ```
 
 The connector URL is **`https://ai-pricing-hub-mcp.fly.dev/mcp`**. That is the
 URL `README.md` and `server.json` publish. Locally, `npm run start` serves the
 same `/mcp` path.
+
+**Releases deploy themselves.** The `deploy` job in `ci.yml` runs
+`flyctl deploy --remote-only` on every push to `master`, after the `check` job
+has passed, then asks the live server for its `serverInfo.version` and fails
+unless it matches the `version` in `server/src/index.ts`. It needs the
+`FLY_API_TOKEN` repository secret (`fly tokens create deploy --app
+ai-pricing-hub-mcp`). It was added because the manual step was forgotten: see
+the 0.3.0 deploy below.
+
+Dependabot merges do **not** trigger it. Auto-merge is queued with
+`GITHUB_TOKEN`, and GitHub starts no workflow from a push made with that token.
+Those bumps ship with the next human merge, or at once from Actions → CI → Run
+workflow on `master`.
+
+The Fly app already exists, so do not run `fly launch` in this repo again. On a
+Node project it generates its own `Dockerfile`, `fly.toml`, `.dockerignore` and
+`.github/workflows/fly-deploy.yml`, and adds `@flydotio/dockerfile` to
+`package.json`; all of that collides with the committed files.
 
 `Dockerfile` builds in two stages (`skybridge build`, then production
 dependencies plus `dist/`), `fly.toml` runs one `shared-cpu-1x` / 512 MB machine
@@ -191,7 +209,7 @@ build copies. Verified 2026-10-07 by building the image and calling it: five
 tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
 ~140 MB resident after a compute call.
 
-**`fly deploy` builds what is on disk, not what is on `master`.** The first
+**A manual `fly deploy` builds what is on disk, not what is on `master`.** The first
 deploy on 2026-10-07 answered `initialize` with `serverInfo.version` 0.3.0 and
 still offered the `Code` capability, while `master` was at 0.4.0: it had been
 run from a checkout that predated PR #42. Pull first, deploy, then check the
