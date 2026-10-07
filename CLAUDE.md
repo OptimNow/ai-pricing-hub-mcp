@@ -3,7 +3,7 @@
 **Project:** AI Pricing Hub MCP
 **Framework:** Skybridge (MCP App Framework)
 **Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
-**Deployed:** https://ai-pricing-hub-mcp-9604f763.alpic.live
+**Deployed:** https://ai-pricing-hub-mcp.fly.dev/mcp (Fly.io, since 2026-10-07)
 
 ---
 
@@ -22,8 +22,8 @@ Framework:    Skybridge (MCP App Framework)
 Language:     TypeScript
 Build:        Vite + Skybridge plugins
 UI:           React widgets (rendered via structuredContent)
-Deployment:   Alpic Cloud
-Transport:    Streamable HTTP at root URL /
+Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg)
+Transport:    Streamable HTTP at /mcp
 Data:         optimtoken.optimnow.io API (source of truth)
               → direct OpenRouter (LLM only, uncorrected)
               → static fallback in data/pricing-data.ts
@@ -99,7 +99,7 @@ ai-pricing-hub-mcp/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
-├── alpic.json                        # Alpic deployment config
+├── alpic.json                        # Alpic deployment config (retired, see Deployment)
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
 ├── server.json                       # Manifest for the official MCP registry
@@ -177,34 +177,20 @@ running server and the live catalogue. Run it by hand after touching cost code.
 ### Deployment
 
 ```bash
-npm run deploy     # alpic deploy
+fly deploy    # by hand, from the repo root; master normally deploys itself
 ```
 
-Deploys to Alpic Cloud. The streamable HTTP endpoint is served at root `/` — that
-is the URL `server.json` publishes. Locally, `npm run start` serves it at `/mcp`.
-
-**Alpic collects files through the git index, not the working tree.** Deleting a
-tracked file without staging the deletion makes the deploy fail with `ENOENT` on
-a path that is no longer on disk. Commit deletions before deploying.
-
-**Alpic returned HTTP 402 on `initialize` (checked 2026-10-07)** — the shared
-free quota that took every OptimNow connector down on 2026-09-09. The Cloud
-FinOps connector moved to Fly.io that day (`OptimNow/cloud-finops-skills`
-PR #195); this repo now carries the same three files.
-
-### Deployment on Fly.io
-
-```bash
-fly deploy    # by hand, from the repo root, if ever needed
-```
+The connector URL is **`https://ai-pricing-hub-mcp.fly.dev/mcp`**. That is the
+URL `README.md` and `server.json` publish. Locally, `npm run start` serves the
+same `/mcp` path.
 
 **Releases deploy themselves.** The `deploy` job in `ci.yml` runs
 `flyctl deploy --remote-only` on every push to `master`, after the `check` job
 has passed, then asks the live server for its `serverInfo.version` and fails
 unless it matches the `version` in `server/src/index.ts`. It needs the
 `FLY_API_TOKEN` repository secret (`fly tokens create deploy --app
-ai-pricing-hub-mcp`). Added 2026-10-07 after the live server was found on 0.3.0
-24 commits behind `master`: a manual deploy step is one people forget.
+ai-pricing-hub-mcp`). It was added because the manual step was forgotten: see
+the 0.3.0 deploy below.
 
 Dependabot merges do **not** trigger it. Auto-merge is queued with
 `GITHUB_TOKEN`, and GitHub starts no workflow from a push made with that token.
@@ -223,17 +209,32 @@ build copies. Verified 2026-10-07 by building the image and calling it: five
 tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
 ~140 MB resident after a compute call.
 
-Three differences from Alpic that matter:
+**A manual `fly deploy` builds what is on disk, not what is on `master`.** The first
+deploy on 2026-10-07 answered `initialize` with `serverInfo.version` 0.3.0 and
+still offered the `Code` capability, while `master` was at 0.4.0: it had been
+run from a checkout that predated PR #42. Pull first, deploy, then check the
+version the live server announces against `package.json`:
 
-- **The connector URL ends in `/mcp`.** Alpic mapped the root to the MCP
-  endpoint; on Fly the root is a 404. The URL to publish is
-  `https://ai-pricing-hub-mcp.fly.dev/mcp` (or a custom domain + `/mcp`).
+```bash
+curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
+  | grep -o '"serverInfo":{[^}]*}'
+```
+
+Three things about Fly that matter here:
+
+- **The connector URL ends in `/mcp`.** The root is a 404 on Fly. Alpic mapped
+  the root to the MCP endpoint, which is why older connectors and docs used the
+  bare origin.
 - **`ui.domain` follows automatically.** Skybridge hashes
   `https://<Host header><path>` per request, and Fly passes the Host header
   through, so the hash matches the URL as pasted with no code change. Verified
-  on the image: `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com` for the
-  fly.dev URL above. There is no Host allow-list either, so the 421 the Python
-  FinOps server hit on Fly does not apply here.
+  against the live deployment on 2026-10-07:
+  `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com`. There is no Host
+  allow-list either, so the 421 the Python FinOps server hit on Fly does not
+  apply here. A custom domain later (`fly certs add`) needs no code change, but
+  it is a new connector URL: every copy listed above moves with it.
 - **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
   outlives requests. With `min_machines_running = 0`, an idle machine stops, and
   the next caller pays the machine start plus an upstream fetch (up to ~8 s on
@@ -242,6 +243,16 @@ Three differences from Alpic that matter:
 `docker run` locally needs `--init`: without it the server is PID 1, ignores
 SIGINT and is only killed at the stop timeout. Fly runs its own init, so this
 does not affect the deployed machine.
+
+#### Alpic (retired)
+
+Until 2026-10-07 the connector was `https://ai-pricing-hub-mcp-9604f763.alpic.live/`.
+That endpoint answered `initialize` with HTTP 402 from 2026-09-09: Alpic's
+shared free quota, which took every OptimNow connector down that day. The Cloud
+FinOps connector moved to Fly.io then (`OptimNow/cloud-finops-skills` PR #195).
+`alpic.json`, `.alpic/` and `npm run deploy` (`alpic deploy`) are still in the
+repo but no longer deploy the published connector. The Alpic-era measurements in
+**Constraints** below were taken on that platform.
 
 ### Connecting to Claude Desktop
 
@@ -439,7 +450,9 @@ Each profile defines typical input/output token counts per request.
   three MCP sessions minutes apart all reported the same
   `provenance.upstreamTimestamp`, which is what proves the memo survives between
   requests. On a per-request runtime the warm-up would be pure waste, so
-  re-check that before trusting this.
+  re-check that before trusting this. On Fly.io the process outlives requests
+  while the machine runs, but `fly.toml` stops it when idle, so the warm-up pays
+  off only within a burst of traffic (see **Deployment**).
 
   It does **not** outlive a deploy: the production logs show two boots 50
   seconds apart during the rollout of this change, each re-running the warm-up,

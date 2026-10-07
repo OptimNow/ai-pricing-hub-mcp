@@ -11,7 +11,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://ai-pricing-hub-mcp-9604f763.alpic.live/"
+      "url": "https://ai-pricing-hub-mcp.fly.dev/mcp"
     }
   ],
   "title": "OptimToken",

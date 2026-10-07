@@ -681,8 +681,8 @@ const UPSTREAM_TIMEOUT_MS = 15_000;
 /** How long a successful catalogue is reused before we ask upstream again. */
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
-// Best-effort only: on Alpic's serverless runtime this survives just as long as
-// the warm instance does, and a cold start simply refetches.
+// Best-effort only: this survives just as long as the process does (on Fly.io,
+// until the idle machine stops), and a cold start simply refetches.
 let cache: { result: LLMFetchResult; fetchedAt: number } | null = null;
 
 /** Drop the memo. Tests drive the tiers by stubbing fetch, so they need to be
