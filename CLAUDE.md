@@ -99,7 +99,6 @@ ai-pricing-hub-mcp/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR
-├── alpic.json                        # Alpic deployment config (retired, see Deployment)
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
 ├── server.json                       # Manifest for the official MCP registry
@@ -178,6 +177,7 @@ running server and the live catalogue. Run it by hand after touching cost code.
 ```bash
 fly launch --no-deploy --copy-config   # once: creates the app from fly.toml
 fly deploy                             # every release, from the repo root
+                                       # (`npm run deploy` runs the same)
 ```
 
 The connector URL is **`https://ai-pricing-hub-mcp.fly.dev/mcp`**. That is the
@@ -232,9 +232,10 @@ Until 2026-10-07 the connector was `https://ai-pricing-hub-mcp-9604f763.alpic.li
 That endpoint answered `initialize` with HTTP 402 from 2026-09-09: Alpic's
 shared free quota, which took every OptimNow connector down that day. The Cloud
 FinOps connector moved to Fly.io then (`OptimNow/cloud-finops-skills` PR #195).
-`alpic.json`, `.alpic/` and `npm run deploy` (`alpic deploy`) are still in the
-repo but no longer deploy the published connector. The Alpic-era measurements in
-**Constraints** below were taken on that platform.
+`alpic.json`, `.alpic/` and the `alpic` CLI were removed from the repo on
+2026-10-07, and `npm run deploy` now runs `fly deploy`. The Alpic project itself
+is not deleted by that: it lives on Alpic's side until removed in its dashboard.
+The Alpic-era measurements in **Constraints** below were taken on that platform.
 
 ### Connecting to Claude Desktop
 
@@ -502,5 +503,4 @@ Each profile defines typical input/output token counts per request.
 - `zod` — Input schema validation
 - `react`, `react-dom` — Widget UI rendering
 - `vite` — Build tooling
-- `alpic` — Deployment CLI (devDependency)
 - `tsx` — TypeScript loader `npm test` runs node --test through (devDependency)
