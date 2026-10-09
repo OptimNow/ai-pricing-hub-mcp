@@ -263,8 +263,10 @@ Three things about Fly that matter here:
   SDK rebuilds the request from the raw list through hono's Node adapter, so
   the parsed object alone never reaches Skybridge). The resulting hash,
   `6bc975b213d359f660adf536cb8cebab.claudemcpcontent.com`, is pinned by
-  `public-url.test.ts`. Consequences: users paste the URL exactly, with `/mcp`
-  and no trailing slash; the fly.dev host serves tool calls only. There is no
+  `public-url.test.ts`. **Rendering confirmed by hand on Claude Desktop on
+  2026-10-09** with the connector added under exactly that URL: all five
+  widgets drew their frames. Consequences: users paste the URL exactly, with
+  `/mcp` and no trailing slash; the fly.dev host serves tool calls only. There is no
   Host allow-list, so the 421 the Python FinOps server hit on Fly does not
   apply here.
 - **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
