@@ -378,9 +378,8 @@ const server = new McpServer(
       "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
       "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
       "Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. " +
-      "IMPORTANT: Report all prices, costs, and scores EXACTLY as returned. " +
-      "Do NOT add commentary, opinions, or recommendations beyond what the data shows. " +
-      "Present the results as a table and let the user draw conclusions.",
+      "Prices, costs and scores are final as returned: rounded and ranked server-side, and dated by " +
+      "`provenance`. The text block is a numbered table of the same figures.",
     inputSchema: {
       provider: z.string().optional().describe("Filter by provider name (e.g. 'OpenAI', 'Anthropic', 'Google')"),
       category: z.string().optional().describe("Price tier, matched by exact equality (case-insensitive): Frontier, Mid-tier, Budget, Image. This is cost only — self-hostability is the separate `openness` axis."),
@@ -525,7 +524,8 @@ const server = new McpServer(
       "compare-models-side-by-side instead. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
-      "IMPORTANT: Report all cost figures EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
+      "Cost figures are final as returned: rounded server-side and dated by `provenance`, with the " +
+      "lever behind each saving, or the reason there is none, named in the text.",
     inputSchema: {
       modelName: z.string().optional().describe("Model name, e.g. 'GPT-4o'. A partial name matches up to 5 models and ALL of them are costed. If omitted, the first 8 catalogue entries are used — that is catalogue order, not a quality ranking."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: every preset."),
@@ -697,10 +697,10 @@ const server = new McpServer(
       "showing list and optimized cost for each. Use when the user names specific models to weigh " +
       "against each other, rather than filtering the whole catalogue. If they also supply their own " +
       "token counts, or a volume outside 10k/100k/1m, use estimate-llm-cost instead. " +
-      "Every name is resolved against the catalogue and the result is reported: a name that matched " +
-      "nothing, matched several models, or duplicated an earlier pick is stated explicitly. " +
-      "IMPORTANT: Report all prices and costs EXACTLY as returned, and repeat any name-resolution " +
-      "warning to the user — a missing column is not the same as a model that costs nothing.",
+      "Every name is resolved against the catalogue and the outcome is reported in `resolution` and " +
+      "in the text: a name that matched nothing, matched several models, or duplicated an earlier pick " +
+      "is stated explicitly, and such a name gets no column rather than a zero cost. Prices and costs " +
+      "are final as returned: rounded server-side and dated by `provenance`.",
     inputSchema: {
       models: z
         .array(z.string())
@@ -890,10 +890,10 @@ const server = new McpServer(
       "(monthly budget, minimum ELO, required capability, self-hostability). " +
       "Returns a top 3 as structured facts — efficiency rank, ELO, list and optimized cost, " +
       "FinOps flag, volatility, and a per-constraint satisfied/violated breakdown. " +
-      "When nothing satisfies every constraint the query is reported as over-constrained and the " +
-      "nearest misses are returned instead, each carrying the constraint it failed. " +
-      "IMPORTANT: Report the returned facts EXACTLY. The ranking is already computed — do not " +
-      "re-rank, and do not present a near miss as if it satisfied the constraints.",
+      "When nothing satisfies every constraint the query is reported as over-constrained, " +
+      "`recommendations` is empty, and the nearest misses are returned in `nearMisses` instead, each " +
+      "carrying the constraint it failed and flagged as a miss in the text. The ranking is computed " +
+      "server-side and is final.",
     inputSchema: {
       useCasePreset: z.enum(USE_CASE_KEYS).describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k)."),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
@@ -1159,9 +1159,9 @@ const server = new McpServer(
       "All prices are Linux on-demand list prices in USD. " +
       "Not every price column is live: `provenance.priceTypes` says which of each provider's price " +
       "columns come from a live API, which are static constants, and which are unavailable, and " +
-      "`provenance.staticPriceColumns` lists the non-live ones outright. When you report a savings " +
-      "plan or reserved rate that appears there, say that it is a static estimate. " +
-      "IMPORTANT: Report all prices EXACTLY as returned. Do NOT add commentary or recommendations beyond the data.",
+      "`provenance.staticPriceColumns` lists the non-live ones outright; a savings-plan or reserved " +
+      "rate that appears there is a static estimate, not a live quote. Prices are returned as the " +
+      "catalogue serves them and dated by `provenance`.",
     inputSchema: {
       region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
       provider: z.string().optional().describe("Cloud provider. Must be one of these exactly (case-insensitive): AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba. Any other string returns zero matches rather than an error."),

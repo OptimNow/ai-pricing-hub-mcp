@@ -95,6 +95,7 @@ ai-pricing-hub-mcp/
 │   └── vite.config.ts                # Skybridge Vite plugin
 ├── docs/
 │   ├── chatgpt-submission.md         # Blockers + portal run for the ChatGPT directory
+│   ├── claude-directory-submission.md # Status, portal run and listing material for the Claude directory
 │   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
