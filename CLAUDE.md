@@ -208,6 +208,19 @@ Dependabot merges do **not** trigger it. Auto-merge is queued with
 Those bumps ship with the next human merge, or at once from Actions → CI → Run
 workflow on `master`.
 
+**Docs-only pushes do not redeploy.** Every CI deploy labels its image with the
+commit SHA (`--image-label`), which the machines report back as
+`image_ref.tag`. Before deploying, the job diffs that live commit against
+`HEAD` and skips the rollout when every changed file is documentation:
+Markdown anywhere, `docs/`, or `LICENSE`. The version check still runs.
+It diffs against the **live commit, not the previous push**, because of the
+Dependabot rule above: a docs-only merge that follows Dependabot merges still
+carries their lockfile changes, so it deploys them. Whatever it cannot
+establish deploys: a manual run, an unlabelled image (any `fly deploy` by
+hand), machines on different images, or flyctl failing. A skip shows as a
+notice on the run. Before changing the file patterns, check the build context
+in `.dockerignore`: a file the image copies must never count as documentation.
+
 The Fly app already exists, so do not run `fly launch` in this repo again. On a
 Node project it generates its own `Dockerfile`, `fly.toml`, `.dockerignore` and
 `.github/workflows/fly-deploy.yml`, and adds `@flydotio/dockerfile` to
