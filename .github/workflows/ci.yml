@@ -42,6 +42,9 @@ jobs:
   # GITHUB_TOKEN, and GitHub does not start workflows from pushes made with
   # that token. They ship with the next human merge, or straight away from
   # Actions -> CI -> Run workflow on master.
+  #
+  # A push that changes only documentation since the live commit does not roll
+  # the machine (see "Decide whether anything deployable changed").
   deploy:
     needs: check
     if: >-
@@ -55,18 +58,60 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history, so the next step can diff against the live commit.
+          fetch-depth: 0
 
       - uses: superfly/flyctl-actions/setup-flyctl@1.6
 
+      # Skips the rollout when only documentation changed since the commit that
+      # is live. Every deploy labels its image with the commit SHA (below), and
+      # the machines report that label back as image_ref.tag.
+      #
+      # It diffs against the live commit, not the previous push, on purpose:
+      # Dependabot merges never run this workflow, so a docs-only human merge
+      # that follows them still carries their lockfile changes and must deploy.
+      # Anything it cannot establish deploys: a manual run, an image without a
+      # commit label (any `fly deploy` by hand), machines on different images,
+      # a commit missing from this history, or flyctl failing.
+      - name: Decide whether anything deployable changed
+        id: changes
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          deploy=true
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "Manual run: deploying."
+          else
+            live=$(flyctl machine list --app ai-pricing-hub-mcp --json \
+              | jq -r '[.[].image_ref.tag] | unique | if length == 1 then .[0] else "" end' || true)
+            if [[ "$live" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$live^{commit}" 2>/dev/null; then
+              changed=$(git diff --name-only "$live" HEAD)
+              echo "Changed since the live commit $live:"
+              echo "${changed:-  (nothing)}"
+              # Documentation: Markdown anywhere, docs/, LICENSE. Nothing else.
+              if ! grep -vE '\.md$|^docs/|^LICENSE$' <<<"$changed" | grep -q .; then
+                deploy=false
+                echo "::notice::Only documentation changed since $live, so the live machine was not redeployed."
+              fi
+            else
+              echo "Live commit not known ('${live:-none}'): deploying."
+            fi
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
       # Builds the Dockerfile on Fly's remote builder and rolls the machine.
-      - run: flyctl deploy --remote-only
+      # The image label is what the step above reads on the next push.
+      - if: steps.changes.outputs.deploy == 'true'
+        run: flyctl deploy --remote-only --image-label "$GITHUB_SHA"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       # A deploy that exits 0 has not necessarily put this commit live. Ask the
       # server which version it runs and compare it with the one this commit
       # declares. The first call can also pay a machine start (scale-to-zero),
-      # hence the retries.
+      # hence the retries. It also runs when the deploy was skipped: the
+      # version lives in files the skip never covers, so it must still match.
       - name: Check the live server runs this commit's version
         run: |
           expected=$(grep -oP '^\s*version: "\K[^"]+' server/src/index.ts)
