@@ -300,7 +300,10 @@ fails if they disagree. Release order:
 2. `git pull` (`server.json` is read from disk), then from the repo root:
    `mcp-publisher login github`, then `mcp-publisher publish`.
 3. Confirm the entry and its `remotes` URL:
-   `https://registry.modelcontextprotocol.io/v0/servers?search=io.github.OptimNow/ai-pricing-hub`
+   `https://registry.modelcontextprotocol.io/v0/servers/io.github.OptimNow%2Fai-pricing-hub/versions/latest`
+   Not the `?search=` listing: right after the 0.4.1 publish on 2026-10-07 it
+   still showed 0.4.0 as latest while this endpoint already returned 0.4.1, so
+   it can make a successful publish look failed.
 
 #### Alpic (retired)
 
