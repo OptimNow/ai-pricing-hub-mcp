@@ -1,0 +1,517 @@
+# ai-pricing-hub-mcp: design reference
+
+Sections moved verbatim from `CLAUDE.md` on 2026-11-08 to keep that file short. `CLAUDE.md`
+keeps what an agent needs in every session and lists the sections below.
+
+## Architecture
+
+```
+Framework:    Skybridge (MCP App Framework)
+Language:     TypeScript
+Build:        Vite + Skybridge plugins
+UI:           React widgets (rendered via structuredContent)
+Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
+Transport:    Streamable HTTP at /mcp (https://optimtoken-mcp.optimnow.io/mcp)
+Data:         optimtoken.optimnow.io API (source of truth)
+              → direct OpenRouter (LLM only, uncorrected)
+              → static fallback in data/pricing-data.ts
+```
+
+### Data sources and the fallback chain
+
+`https://optimtoken.optimnow.io` is the single source of truth for both LLM and
+compute pricing. It is the deployed face of `cloud-sparkle-compare`, and it is
+where pricing *correctness* lives: a committed price archive, a `PRICE_OVERRIDES`
+table verified against vendor pricing pages, and `scripts/check-price-anomalies.mjs`,
+which alarms on the ×0.5 / ×2.0 ratio breaks OpenRouter intermittently serves.
+This app has no archive and cannot build one, so it asks rather than re-derives.
+
+The base URL is one constant, `OPTIMTOKEN_BASE_URL` in `lib/optimtoken-api.ts`,
+overridable with the `OPTIMTOKEN_API_BASE_URL` env var. Do not hard-code a
+second host.
+
+| Tool | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|
+| LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
+| Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
+
+**Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
+published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
+derived monthly figure. Every response therefore carries a `provenance` object
+with `pricesVerified`, and the lower tiers set a `notice` that leads the text
+output. A fallback must never silently downgrade correctness.
+
+Tier 1 is only accepted when the site reports `meta.source === "openrouter"` —
+anything else means the site is itself serving its own fallback and carries no
+fresh corrections.
+
+### Project Structure
+
+```
+ai-pricing-hub-mcp/
+├── server/
+│   └── src/
+│       ├── index.ts                  # MCP server — 5 tool/widget definitions
+│       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
+│       ├── lib/
+│       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
+│       │   ├── public-url.ts         # PUBLIC_MCP_URL, the widget sandbox domain hash, pinPublicUrl middleware
+│       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
+│       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
+│       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
+│       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
+│       │   ├── roi-link.ts           # Deep link into the sister AI ROI Calculator
+│       │   ├── openness.ts           # Licence → self-hostability bucket
+│       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
+│       │   ├── compute-categories.ts # Compute instance categorization + enrichment
+│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, public-url, scale, web-mirror
+│       └── data/
+│           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
+├── web/
+│   ├── src/
+│   │   ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
+│   │   ├── index.css                 # Colour tokens on :root + dark-mode overrides
+│   │   ├── format.ts                 # formatCost / formatBudget / savingsPct / leverSummary
+│   │   ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
+│   │   ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
+│   │   └── widgets/
+│   │       ├── compare-llm-models/index.tsx
+│   │       ├── estimate-llm-cost/index.tsx
+│   │       ├── compare-models-side-by-side/index.tsx
+│   │       ├── recommend-llm-model/index.tsx
+│   │       └── compare-compute-pricing/index.tsx
+│   └── vite.config.ts                # Skybridge Vite plugin
+├── docs/
+│   ├── chatgpt-submission.md         # Blockers + portal run for the ChatGPT directory
+│   ├── claude-directory-submission.md # Status, portal run and listing material for the Claude directory
+│   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
+├── scripts/
+│   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
+│   ├── check-connector.mjs           # Manual: call a deployed connector and check tools, ui.domain, tier
+│   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
+├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
+├── Dockerfile                        # Image for Fly.io (two-stage build)
+├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
+├── server.json                       # Manifest for the official MCP registry
+├── AGENTS.md
+├── package.json
+├── tsconfig.json                     # Build + typecheck (excludes *.test.ts)
+└── tsconfig.test.json                # Type-checks the tests
+```
+
+Tests live beside their subjects: `lib/data-sources.test.ts`,
+`lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts`,
+`lib/public-url.test.ts` (pins the connector URL, its sandbox-domain hash and
+every published copy of the URL), `lib/scale.test.ts`, `lib/capabilities.test.ts`
+and `lib/web-mirror.test.ts` (both reach across into `web/src`, because
+`npm test` only walks `server/src`), and `serialisation-contract.test.ts`.
+
+---
+
+## Development
+
+```bash
+npm install
+npm run dev        # Skybridge dev server with DevTools emulator
+npm run typecheck  # tsc --noEmit over both tsconfigs (src and tests)
+npm test           # node --test over server/src/**/*.test.ts
+npm run build      # Production build
+npm run start      # Start production server (serves /mcp locally)
+```
+
+`.github/workflows/ci.yml` runs typecheck, test and build on every PR, and on
+every push to `master` deploys to Fly.io once those pass (see below).
+
+Note: `npm run typecheck` writes `dist/tsconfig.tsbuildinfo`. Because it does not
+emit, a following `npm run build` can believe the server output is already up to
+date and skip compiling it — if `dist/server/` looks stale, delete it and rebuild.
+
+`scripts/check-serialisation-precision.mjs` is deliberately outside CI: it needs a
+running server and the live catalogue. Run it by hand after touching cost code.
+
+### Deployment
+
+```bash
+fly deploy    # by hand, from the repo root; master normally deploys itself
+              # (`npm run deploy` runs the same)
+```
+
+The connector URL is **`https://optimtoken-mcp.optimnow.io/mcp`**. That is the
+URL `README.md` and `server.json` publish, and it is **one constant**,
+`PUBLIC_MCP_URL` in `lib/public-url.ts`; `public-url.test.ts` fails if any
+published copy drifts from it. It is a custom domain on the Fly app: a CNAME
+`optimtoken-mcp.optimnow.io -> ai-pricing-hub-mcp.fly.dev` in the `optimnow.io`
+zone (hosted on Wix DNS) plus a certificate from
+`fly certs add optimtoken-mcp.optimnow.io`. The `ai-pricing-hub-mcp.fly.dev`
+host still answers tool calls (the `deploy` job reads its version) but is not
+published, and widgets do not render through it (see the `ui.domain` note
+below). Locally, `npm run start` serves the same `/mcp` path.
+
+**Releases deploy themselves.** The `deploy` job in `ci.yml` runs
+`flyctl deploy --remote-only` on every push to `master`, after the `check` job
+has passed, then asks the live server for its `serverInfo.version` and fails
+unless it matches the `version` in `server/src/index.ts`. It needs the
+`FLY_API_TOKEN` repository secret (`fly tokens create deploy --app
+ai-pricing-hub-mcp`). It was added because the manual step was forgotten: see
+the 0.3.0 deploy below.
+
+Dependabot merges do **not** trigger it. Auto-merge is queued with
+`GITHUB_TOKEN`, and GitHub starts no workflow from a push made with that token.
+Those bumps ship with the next human merge, or at once from Actions → CI → Run
+workflow on `master`.
+
+**Docs-only pushes do not redeploy.** Every CI deploy labels its image with the
+commit SHA (`--image-label`), which the machines report back as
+`image_ref.tag`. Before deploying, the job diffs that live commit against
+`HEAD` and skips the rollout when every changed file is documentation:
+Markdown anywhere, `docs/`, or `LICENSE`. The version check still runs.
+It diffs against the **live commit, not the previous push**, because of the
+Dependabot rule above: a docs-only merge that follows Dependabot merges still
+carries their lockfile changes, so it deploys them. Whatever it cannot
+establish deploys: a manual run, an unlabelled image (any `fly deploy` by
+hand), machines on different images, or flyctl failing. A skip shows as a
+notice on the run. Before changing the file patterns, check the build context
+in `.dockerignore`: a file the image copies must never count as documentation.
+
+The Fly app already exists, so do not run `fly launch` in this repo again. On a
+Node project it generates its own `Dockerfile`, `fly.toml`, `.dockerignore` and
+`.github/workflows/fly-deploy.yml`, and adds `@flydotio/dockerfile` to
+`package.json`; all of that collides with the committed files.
+
+`Dockerfile` builds in two stages (`skybridge build`, then production
+dependencies plus `dist/`), `fly.toml` runs one `shared-cpu-1x` / 512 MB machine
+in `cdg` that scales to zero, and `.dockerignore` keeps the context to what the
+build copies. Verified 2026-10-07 by building the image and calling it: five
+tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
+~140 MB resident after a compute call.
+
+**The app runs one machine, and `fly.toml` does not enforce that.** On an app's
+first deploy Fly creates two machines for redundancy, whatever `fly.toml` says;
+later deploys update the machines that exist and keep the count. This app got
+two on 2026-10-07 and was scaled back with `fly scale count 1 --app
+ai-pricing-hub-mcp`. One is deliberate: each machine holds its own warm caches,
+so a second one makes a cold upstream fetch twice as likely, for redundancy a
+pricing lookup does not need. Check with `fly machine list`.
+
+**A manual `fly deploy` builds what is on disk, not what is on `master`.** The first
+deploy on 2026-10-07 answered `initialize` with `serverInfo.version` 0.3.0 and
+still offered the `Code` capability, while `master` was at 0.4.0: it had been
+run from a checkout that predated PR #42. Pull first, deploy, then check the
+version the live server announces against `package.json`:
+
+```bash
+curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
+  | grep -o '"serverInfo":{[^}]*}'
+```
+
+**Verify by calling, not by reading.** `node scripts/check-connector.mjs` runs
+`initialize` and `tools/list` against the published URL (or a URL you pass),
+reads every widget resource as `Claude-User` and checks `_meta.ui.domain`
+against the hash of the published URL, then calls `compare-llm-models` and
+checks `provenance.tier` is 1. Run it after every deploy and before touching
+the registry entry or the directory listing.
+
+Three things about Fly that matter here:
+
+- **The connector URL ends in `/mcp`.** The root is a 404 on Fly. Alpic mapped
+  the root to the MCP endpoint, which is why older connectors and docs used the
+  bare origin.
+- **`ui.domain` is pinned to the published URL.** Skybridge 0.35.21 hashes
+  the `x-alpic-forwarded-url` header when present, else
+  `https://<Host header><path>` per request. Fly passes Host through, so the
+  per-request form did work on the fly.dev host (verified live on 2026-10-07:
+  `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com`), but it follows
+  whichever hostname the request arrived on and anchors to no constant.
+  `pinPublicUrl` in `lib/public-url.ts` now sets that header on every request
+  from `PUBLIC_MCP_URL`, writing both `req.headers` and `rawHeaders` (the MCP
+  SDK rebuilds the request from the raw list through hono's Node adapter, so
+  the parsed object alone never reaches Skybridge). The resulting hash,
+  `6bc975b213d359f660adf536cb8cebab.claudemcpcontent.com`, is pinned by
+  `public-url.test.ts`. **Rendering confirmed by hand on Claude Desktop on
+  2026-10-09** with the connector added under exactly that URL: all five
+  widgets drew their frames. Consequences: users paste the URL exactly, with
+  `/mcp` and no trailing slash; the fly.dev host serves tool calls only. There is no
+  Host allow-list, so the 421 the Python FinOps server hit on Fly does not
+  apply here.
+- **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
+  outlives requests. With `min_machines_running = 0`, an idle machine stops, and
+  the next caller pays the machine start plus an upstream fetch (up to ~8 s on
+  `compare-compute-pricing`). Set it to 1 if that latency matters.
+
+`docker run` locally needs `--init`: without it the server is PID 1, ignores
+SIGINT and is only killed at the stop timeout. Fly runs its own init, so this
+does not affect the deployed machine.
+
+#### Publishing to the MCP registry
+
+`server.json` is what <https://registry.modelcontextprotocol.io> lists. Nothing
+publishes it automatically: it is a manual `mcp-publisher` run (the CLI is
+downloaded locally and git-ignored). **A published version can never be
+edited**, so any change to `server.json` (a new connector URL, a description)
+needs a version bump before the registry will show it. 0.4.0 went up on
+2026-10-05 with the Alpic URL, which is why the Fly URL shipped as 0.4.1, and
+the custom domain ships as 0.4.2.
+
+The version lives in four places — `package.json`, `package-lock.json`,
+`server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
+fails if they disagree. Release order:
+
+1. Merge the bump and wait for the `deploy` job in `ci.yml` to go green. It
+   deploys `master` and fails unless the live server announces the version this
+   commit declares, so green means the new version is live. Publishing first
+   would list a version the endpoint does not serve yet.
+2. `git pull` (`server.json` is read from disk), then from the repo root:
+   `mcp-publisher login github`, then `mcp-publisher publish`.
+3. Confirm the entry and its `remotes` URL:
+   `https://registry.modelcontextprotocol.io/v0/servers/io.github.OptimNow%2Fai-pricing-hub/versions/latest`
+   Not the `?search=` listing: right after the 0.4.1 publish on 2026-10-07 it
+   still showed 0.4.0 as latest while this endpoint already returned 0.4.1, so
+   it can make a successful publish look failed.
+
+#### Alpic (retired)
+
+Until 2026-10-07 the connector was `https://ai-pricing-hub-mcp-9604f763.alpic.live/`.
+That endpoint answered `initialize` with HTTP 402 from 2026-09-09: Alpic's
+shared free quota, which took every OptimNow connector down that day. The Cloud
+FinOps connector moved to Fly.io then (`OptimNow/cloud-finops-skills` PR #195).
+`alpic.json`, `.alpic/` and the `alpic` CLI were removed from the repo on
+2026-10-07, and `npm run deploy` now runs `fly deploy`. The Alpic project itself
+is not deleted by that: it lives on Alpic's side until removed in its dashboard.
+The Alpic-era measurements in **Constraints** below were taken on that platform.
+
+### Connecting to Claude Desktop
+
+Add it as a **custom connector** (Settings → Connectors → Add custom connector),
+pasting the URL above. Connectors are stored account-side, use the native HTTP
+transport, and are the only path on which widgets render.
+
+Two paths that look equivalent and are not (both verified 2026-08-19):
+
+- `claude_desktop_config.json` does **not** accept `"type": "http"` entries —
+  Desktop silently drops them from the file on its next config rewrite. This
+  section used to recommend exactly that; it never worked.
+- An `npx mcp-remote` wrapper in that file does connect, but its OAuth discovery
+  plus a GET SSE stream this server rejects push `initialize` past Desktop's
+  ~6 s timeout, so every conversation shows "Unable to reach" even though calls
+  then succeed — and widgets do not render through the STDIO proxy.
+
+Widget rendering on claude.ai additionally depends on `_meta.ui.domain`: the
+host validates it against `sha256(<connector URL exactly as the user pasted
+it>)[:32] + ".claudemcpcontent.com"` and otherwise leaves the frame blank
+("ui.domain validation failed" in the Desktop logs) while tool calls keep
+working. This server pins the value to `PUBLIC_MCP_URL` (see "Three things
+about Fly" above), so the URL must be pasted exactly, with `/mcp` and no
+trailing slash. Skybridge 0.35.21 or later is the floor: older versions ignore
+the header the pin relies on.
+
+---
+
+## Keeping in sync with cloud-sparkle-compare
+
+The surface that could drift has shrunk, but it has not gone.
+
+**No longer a concern.** The taxonomy (`category`, `license`) and the corrected
+prices now arrive from the site on tier 1 rather than being re-derived here.
+That closes the class of bug that produced a retired `Open Weights` category and
+an unrecognised `Llama 4` licence in this repo — both of which had already
+diverged before the switch.
+
+**Still a manual port, and still able to drift:**
+
+- `lib/llm-business-metrics.ts` — the cost formulas, efficiency scoring, use-case
+  profiles and FinOps badge. The site does not expose these, so this app computes
+  them. Kept **character-identical** to the original's; the coherence test is that
+  both apps produce the same cost to the cent for the same model and use case.
+- `lib/openness.ts` — the licence → self-hostability buckets. The site sends the
+  licence *string*; the bucketing is local, so a new licence string upstream
+  silently becomes `Unknown` here until it is added. This is exactly how `Llama 4`
+  broke.
+- `lib/llm-models.ts` tier 2 — the whole OpenRouter transform (ELO table,
+  categories, exclusions, licence prefixes) is a port and only runs when the site
+  is unreachable, so its drift is invisible until the day it matters.
+- `lib/compute-categories.ts` — instance categorisation, processor and use-case
+  inference. Applied locally to the site's rows.
+
+**One divergence that is now dormant, and must stay.** `optimizationLevers()`
+here refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
+returns the list cost exactly when no lever is pulled. The original applies batch
+pricing whenever both batch fields are present, which for Zhipu GLM 5.2 — batch
+$0.70/$2.20 against list $0.49/$1.54 — produced an "optimized" cost 34% dearer
+than list, reported as a 0% saving with both levers named as the reason.
+
+Upstream PR #60 (2026-08-19) closed the gap from the other end: it drops any
+`:batch` row whose rate sits above list, so GLM 5.2 now publishes no batch row at
+all and the bad input never reaches either formula. Measured 2026-08-19 over
+258 models x 8 profiles, against both the live API and the refreshed snapshot: the
+two formulas differ on **0 of 2,064 pairs**, so the two apps agree to the cent
+again.
+
+The guard is therefore dormant, not redundant — it is the only thing standing
+between a future upstream data regression and an "optimized" price dearer than
+list. Do not delete it to close a divergence that no longer shows up in the
+numbers. It stays pinned by four tests in `llm-business-metrics.test.ts`: two on
+synthetic dear-batch/dear-cache models, which is what keeps them meaningful now
+that no real row triggers them, and two whole-catalogue sweeps.
+
+Two things keep the two honest:
+
+- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0).
+- The cost formulas in `llm-business-metrics.ts` are kept **character-identical** to the original's. The coherence test is that both apps produce the same cost to the cent for the same model and use case.
+
+Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.
+
+### Capabilities: there is no `Code`
+
+The values are `LLM_CAPABILITIES` in `data/pricing-data.ts`: Text, Vision,
+Reasoning, Agents, Image Gen, Audio. The site removed `Code` on 2026-10-05 (its
+LLM schemaVersion 2.5): it was assigned to any model whose output cost $0.50 per
+1M tokens or more, 225 of 292 models, so it described a price and not an
+ability. This repo followed the same day. Three things hold it:
+
+- **One list.** The `LLMCapability` type and both tool descriptions
+  (`capability`, `requiredCapability`) are built from `LLM_CAPABILITIES`, so a
+  description cannot offer a value the data does not carry.
+- **The site's payload is filtered to that list** (`coerceSiteModel`). A
+  deployment a release behind, or rolled back, would otherwise put `Code` back
+  on its rows while the descriptions say it does not exist.
+- **The OpenRouter tier no longer assigns it** (`inferCapabilities`).
+
+`lib/capabilities.test.ts` pins all three and the snapshot.
+
+**`Reasoning` means the model exposes a reasoning control upstream**: OpenRouter
+lists `reasoning` in its `supported_parameters` (a thinking budget or effort
+setting). It is not a quality claim. The site moved to that rule on 2026-09-21;
+the OpenRouter tier here kept a name match ("-pro", "thinking", "o4", ...) until
+2026-10-05, so a caller filtering on `Reasoning` got a different set depending on
+which tier answered. Both tiers now use the parameter, and the same test file
+pins that a name alone never fires.
+
+---
+
+## Data Flow
+
+```
+optimtoken /api/llm-models → fetchLLMModels() → enrichModels() → filterModels() → structuredContent
+        ↓ (tier 2, uncorrected)                                          + provenance
+openrouter.ai/api/v1/models
+        ↓ (tier 3)
+pricing-data.ts (static snapshot)
+
+optimtoken /api/pricing?region= → fetchComputeInstances() → enrichInstances() → filter/sort
+        ↓ (tier 2)                                                      → structuredContent
+pricing-data.ts computeInstances                                          + provenance
+```
+
+Note the ordering on the LLM path: `enrichModels()` runs over the **full**
+catalogue before `filterModels()`, because the efficiency score and the FinOps
+badge are percentile ranks. Filtering first would make the badge mean something
+different depending on which filters the caller happened to pass.
+
+### Use Case Profiles (for cost estimation)
+- supportTicket, knowledgeQA, meetingSummary, marketingContent
+- codingTask, invoiceProcessing, callSummary, agentWorkflow
+
+Each profile defines typical input/output token counts per request.
+
+### Volume Presets
+- 10k, 100k, 1m requests/month
+
+---
+
+## Constraints
+
+- No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
+- No database — stateless tool execution
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
+- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
+  **This paragraph used to say 55 s and "do not tune it down"; that was correct advice against a 50.5 s cold path, and upstream PR #57 (2026-08-18) cut that path by ~6x.** The rule it was protecting has not changed — never size this budget from the LLM endpoint's profile — but the number that satisfies it has. Re-measure before moving it again, and move all four places together (the two constants, the guard tests, and this bullet). Do not restore 55 s just because this paragraph once said so.
+- **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s (measured 2026-08-17, against the 50.5 s rebuild; not re-run since PR #57, but the mechanism does not depend on the rebuild's duration): an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
+- **The compute catalogue is enriched once, not per request.** `servableCatalogue()`
+  in `index.ts` memoises `enrichInstances()` + the Linux filter in a `WeakMap`
+  keyed by the catalogue array's identity — the memo in `compute-pricing.ts` hands
+  back the same array for the life of an entry and a fresh one after a refresh, so
+  identity is exactly the right invalidation key. Enriching per request cost 7 ms
+  and ~2.6 MB every call, 41% of it on Windows rows the tool discards immediately.
+  `catalogSize` counts servable rows (~3,573), not the raw catalogue (~6,052):
+  a denominator that includes rows no query can reach is not a denominator.
+- **The caches are warmed at boot, for one region only.** `warmCaches()` at the
+  foot of `index.ts` fires `fetchLLMModels()` and `fetchComputeInstances(us-east)`
+  after `server.run()`, fire-and-forget. Measured against production on
+  2026-08-18: a freshly deployed process answered `compare-compute-pricing` in
+  **8.4 s** and then in ~250 ms — the first caller was funding the rebuild.
+  Locally, first call after boot is **231 ms without the warm-up and 23 ms with
+  it** (that gap is small only because the upstream edge cache happened to be
+  warm; on the edge MISS that follows a deploy it is the full ~8 s).
+
+  This is only worth doing because **the process outlives a request**. On Alpic
+  that was proven by three MCP sessions minutes apart reporting the same
+  `provenance.upstreamTimestamp`. On Fly.io it is true **per wake, not per
+  deploy**: `fly.toml` sets `auto_stop_machines = "stop"` and
+  `min_machines_running = 0`, so the machine stops after a few idle minutes and
+  restarts, with empty caches, on the next request. The warm-up then runs on
+  every wake, and it still earns its keep for the same reason: the first caller
+  of a wake would otherwise fund the fetch. Budget two upstream fetches per
+  wake plus two per deploy. That is cheap while the upstream edge cache is warm
+  (measured 205-324 ms per fetch on Alpic, 2026-08-18) and 7-11 s per fetch if
+  it is cold. Not yet re-measured on Fly: when the wake rate is known, decide
+  whether `min_machines_running = 1` (one machine always on, roughly $3 a
+  month) buys a memo that is worth more than the stopped machine saves. On a
+  per-request runtime the warm-up would be pure waste, so re-check this
+  before moving hosts again.
+
+  Three rules it must keep:
+  - **Never block `server.run()`.** The upstream can take 11 s; awaiting it turns
+    a slow site into a failed boot.
+  - **Never cache a failure.** The fetchers do not cache snapshot fallbacks, so a
+    failed warm leaves the cache empty and the first real caller pays what it
+    would have paid anyway. Keep it that way.
+  - **Never reach upstream from a test or a CI build.** Guarded by
+    `NODE_ENV === "test"` and `SKIP_CACHE_WARMUP=1`.
+
+- **Platform logs do not measure handler latency.** On Alpic, the `duration`
+  field of the first request after each boot read 3.1-3.6 s while 6-7 ms
+  elapsed between the handler's own START and END timestamps: it included
+  container start-up. Fly has no such field; `fly logs` carries the app's
+  stdout plus the proxy's machine start and stop lines, which is where the
+  cold-start cost of a wake shows up (the machine boot, then the warm-up).
+  Neither is something `warmCaches()` can remove, since it runs after the app
+  has booted. Time calls from the client instead, as `check-connector.mjs`
+  prints.
+
+- **Warming that was considered and deliberately rejected.** Each of these is a
+  plausible next step that costs more than it returns; do not add them without
+  new measurements that contradict the ones below.
+  - **All four regions at boot.** Four upstream rebuilds per process start — each
+    one six provider APIs assembled live — for three regions a given deployment
+    may never be asked about. The other three warm on first use for ~7 s once
+    (measured: asia-pacific 7.1 s cold, then 447 ms). Paying a known cost against
+    the site to avoid a maybe-cost is the wrong trade.
+  - **A periodic refresh timer.** The 60-minute TTL is already invisible to
+    callers: `fetchComputeInstances` serves the stale entry immediately and
+    refreshes behind it for up to 12 hours. A timer would only cover a gap longer
+    than 12 hours, at ~26 upstream rebuilds a day per region on an otherwise idle
+    server. Wrong ratio.
+  - **An external cron pinging the endpoint.** Same effect as the timer, plus
+    infrastructure. On Fly it would also keep the machine awake around the
+    clock, which is `min_machines_running = 1` with extra steps and none of the
+    savings; set that instead if a warm memo is ever worth paying for. (A
+    stopped machine runs no timers either, so the timer above cannot run on
+    Fly at all.)
+  - **Warming from `primeComputePricingCache()`.** That export is a test seam
+    that takes an already-built result; it is not a fetch and cannot warm
+    anything on its own.
+
+- **Both fetchers dedupe in-flight requests.** Five concurrent cold callers used
+  to produce five upstream rebuilds each. The `refreshing` set only ever covered
+  the stale-while-revalidate branch; the cold branch — the one callers wait on —
+  had none. Keep the `finally` that clears the shared promise, or one failure
+  pins every later caller to it.
+- **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (`app.json` used to be bound to it too; it was deleted once ChatGPT moved to submitting the MCP server directly.)
+- **Widgets are registered for the `mcp-app` host only.** Omitting `hosts` on `registerWidget` publishes each widget twice, under `ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`, with the same display name, so hosts list every widget twice in their resource pickers. `mcp-app` emits `text/html;profile=mcp-app` and `_meta.ui.resourceUri`, which is what both Claude and current ChatGPT want; `apps-sdk` is the legacy shape. See `docs/chatgpt-submission.md`.
+- Brand color: Chartreuse (#ACE849) for OptimNow identity
+- Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
+
+---
+
