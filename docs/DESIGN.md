@@ -65,6 +65,7 @@ second host.
 |---|---|---|---|
 | LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
 | Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
+| Every host of a model (`compare-model-hosts`) | `GET /api/model-hosts?id=` | — | — (the summary on the model rows answers instead) |
 
 The compute tool served the static array alone until optimtoken became the
 source of truth. Its `openWorldHint` was corrected to `true` at that point.
@@ -94,6 +95,8 @@ ai-pricing-hub-mcp/
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── compute-rates.ts      # A compute row's rates as text, and what each saves on on-demand
 │       │   ├── host-prices.ts        # Per-host prices: port of the site's reader, coercion, wording
+│       │   ├── model-hosts.ts        # Every host of a model: the site's /api/model-hosts, read on demand
+│       │   ├── deprecation.ts        # Retirement notices: reading the site's, and wording them
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
@@ -103,7 +106,7 @@ ai-pricing-hub-mcp/
 │       │   ├── compute-categories.ts # Instance category, processor, use cases: the site's file, copied whole
 │       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
 │       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
-│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, host-prices, http, llm-business-metrics, output-schema, public-url, self-hosting
+│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, public-url, self-hosting
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── docs/
@@ -399,19 +402,23 @@ not be reported as applied. Do not relax it to match the site's text; it is
 pinned by tests on synthetic dear-batch, dear-cache and dear-cache-under-batch
 models, and by two whole-catalogue sweeps.
 
-**One site rule is not applied here.** The site refuses the FinOps Friendly
-badge to a model with a vendor-announced deprecation, from a hand-curated table
-(`model-lifecycle.ts`, 48 entries) that its API does not publish. Copying the
-table would add a list that drifts in silence. The fix is for `/api/llm-models`
-to carry a deprecation flag; until then a deprecated model can hold the badge
-here and not there (none did on 2026-11-11).
+**The retirement gate is applied since 0.8.0.** The site refuses the FinOps
+Friendly badge to a model whose maker has announced its retirement, from a
+table it keeps by hand (`model-lifecycle.ts`, 48 entries). Until its schema 2.8
+the API did not publish that table, and this server left the rule out rather
+than copy a list that drifts in silence. Since 2.8 the notice arrives on the row
+(`deprecation`), `checkFinOpsFriendly` reads it, and `check-parity` compares
+both the notice and the badge. The table is still not copied here: see
+"Retirement notices" under Data Flow.
 
 **What the site sends that this server only repeats.** `outlierListing` and
 `promotionalListing` (schema 2.6 and 2.7) are verdicts the site reaches from its
 nightly per-host price fan-out. `coerceSiteModel` carries them, the badge refuses
 an outlier listing, and every text block labels both. Tiers 2 and 3 cannot
-compute either; the snapshot keeps the flags it was taken with. `openRouterId`
-and `hostPricing` (who sells the model, at what range) are not carried yet.
+compute either; the snapshot keeps the flags it was taken with. `deprecation`
+(schema 2.8) is carried the same way, on tier 1 only: the snapshot does not keep
+it. `hostPricing` and `openRouterId` travel beside the rows, not on them
+(decision 9b in `CLAUDE.md`).
 
 Three things keep the two honest:
 
@@ -419,6 +426,7 @@ Three things keep the two honest:
   both implementations, feeds them the live catalogue and counts where they
   disagree: list and optimized cost over every model x use case, efficiency
   score, badge, openness bucket, the outlier flag against the site's own rule,
+  the retirement notice against the site's own table,
   the formatters, the per-host price rules, and the category, processor and
   use cases of every row of the live compute catalogue. It exits 1 on any
   difference and lists the site's row fields this server does not carry. Outside CI because the site's repository
@@ -596,9 +604,88 @@ the maker's own, spread, promotional listings), dated by
   October, and applied blindly the list made this tool state, on 2026-11-11,
   that OpenAI's row "is not its standard rate" on a day when it was.
 
-What the site does not publish, and so this tool cannot say: the hosts between
-the cheapest and the dearest, and therefore whether a given platform (Bedrock,
-Azure, Vertex) sells a model unless it happens to be one of the named offers.
+Until 0.8.0 this tool could not name the hosts between the cheapest and the
+dearest, because the rows do not carry them. It now reads them from a second
+endpoint: see the next section.
+
+### Every host: `/api/model-hosts` (0.8.0)
+
+The site published `GET /api/model-hosts?id=` on 2026-11-11 (its own schema,
+1.0): for 1 to 4 upstream ids, every host with its rate, the platforms the
+model is listed on and the AWS regions where Amazon Bedrock lists it.
+`compare-model-hosts` asks it for the models it resolved
+(`lib/model-hosts.ts`) and adds to each: `offers`, `platforms`,
+`bedrockRegions`, and `quoted.matchingHosts`. `hostList` at the top level says
+whether the list was read and carries its three dates.
+
+- **A second request, never worth failing the answer for.** It is asked after
+  the catalogue, with an 8-second budget, on tier 1 only. When it fails, the
+  summary on the rows still answers, `hostList.available` is false with the
+  reason in a few words, and the text says only the cheapest, the dearest, the
+  maker's own and promotional listings are shown. The footnote keeps its
+  cautious wording unless every model with host data got its full list
+  (`hostFootnote(asOf, everyHost)`).
+- **Absent is not known, never "no".** The site leaves a key out when nothing
+  is on record. `coerceModelHosts` keeps that: an empty or malformed list
+  becomes an absent one, and the three fields are `null` in
+  `structuredContent`. No `platforms` is a model outside the site's hand-kept
+  list, not one sold nowhere. No `bedrockRegions` is a model whose name matched
+  no Bedrock model id, not one absent from Bedrock. The text says so once.
+- **The site's order is kept.** Offers arrive cheapest first on the 30/70
+  blended price, the maker first among hosts at one price. The workload cost
+  printed beside each is not always in that order (a host cheap on input and
+  dear on output moves with the token mix), so the heading names the order.
+- **Twelve hosts in the text, all of them in `structuredContent`.** One model
+  had 34 hosts on 2026-11-11. Beyond `MAX_HOST_LINES` the text prints the
+  cheapest and counts the rest; the dearest is already named above the list.
+- **"Another host" gets a name.** When the quoted price is not the maker's,
+  the hosts in the list publishing that rate are named
+  (`quoted.matchingHosts`): Llama 3.3 70B read "CoreWeave, Google".
+- **`platforms` is an estimate and is labelled as one.** It is the site's
+  curated list for the major models (Direct API, AWS Bedrock, Azure AI Foundry,
+  Google Vertex, OpenRouter), reviewed by hand on
+  `hostList.availabilityReviewedAt`. Bedrock regions come from AWS's own model
+  list, read weekly.
+- **Not cached like the catalogue.** A bounded memo keyed by the set of ids,
+  15 minutes. A failure is never remembered.
+
+### Retirement notices (0.8.0)
+
+A model maker announces the end of a model's API months ahead. The site keeps
+those notices in a table it re-reads by hand against each maker's deprecation
+page, and since schema 2.8 publishes them: `deprecation` on a row (`shutdown`,
+`replacement`, each only when the maker gives it) and
+`meta.deprecationsVerifiedAt`. On 2026-11-11: 35 of 311 models, verified on
+2026-10-20.
+
+- **Read, never copied.** `coerceSiteModel` carries the notice
+  (`lib/deprecation.ts`). There is no table here, and the snapshot does not
+  record the field (a test holds that): a notice kept in two places ages in
+  silence, and a stale one is worse than none. Tiers 2 and 3 therefore carry no
+  notice, and the warning that leads their answers says that this silence
+  proves nothing.
+- **What a notice is.** The maker's date for its own API. A cloud platform or
+  another host can set a later one, which is why a retired model still has a
+  price and hosts. The legend printed under any answer that shows one says so,
+  dates the notices, and says that no tag is "none on record", not a guarantee.
+- **The tag says whether the date has passed**: "retired by its maker on
+  2026-08-10" or "to be retired by its maker on 2026-11-30", with the
+  replacement. Compared against today's date in UTC.
+- **Labelled everywhere, removed from one place.** Every tool that prints a
+  model prints the tag, and `structuredContent` carries `deprecation` beside
+  the listing flags. `compare-llm-models` keeps retired models in the table.
+  `recommend-llm-model` does not recommend them: a recommendation is a model to
+  start on. They are set aside after the scoring (which stays over the whole
+  catalogue, as on the site) and before the picks, counted in
+  `retiredExcludedCount`, and the ones that met every constraint and outranked
+  the last pick are named in `retiredNotRecommended` with their notice. On
+  2026-11-11 that removed 21 ranked models; with a $3 budget on support tickets
+  it named GPT-5 Nano, which would otherwise have been the first pick.
+- **The badge refuses on the notice, not on its date.** As on the site: a
+  shutdown a year out is still a model not to start on.
+- **Self-hosting.** A notice ends the API side of the break-even, not the fleet
+  side: published weights do not expire with the maker's endpoint. The tool
+  says so when the model is open.
 
 ### API or own capacity: `estimate-self-hosting-breakeven` (0.7.0)
 

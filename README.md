@@ -66,15 +66,20 @@ This server replaces recall with a lookup:
 | Tool | What it answers |
 |---|---|
 | **`compare-llm-models`** | "What is out there?" Browse and filter the catalogue on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. Ordered by ELO, or by efficiency, cost for a workload, or price with `sortBy`. |
-| **`recommend-llm-model`** | "Just tell me which one." A ranked top 3 for one workload under your constraints (budget, minimum ELO, required capability, self-hostability), each with a per-constraint satisfied or violated breakdown as the evidence. Over-constrained queries return the nearest misses, labelled as such. |
+| **`recommend-llm-model`** | "Just tell me which one." A ranked top 3 for one workload under your constraints (budget, minimum ELO, required capability, self-hostability), each with a per-constraint satisfied or violated breakdown as the evidence. Over-constrained queries return the nearest misses, labelled as such. A model whose maker has announced its retirement is never recommended, and the ones that would have ranked are named. |
 | **`compare-models-side-by-side`** | "How do these specific ones compare?" 2 to 4 named models across all 8 use case profiles at a chosen monthly volume, list and optimized cost for each. |
 | **`estimate-llm-cost`** | "What will this cost us per month?" Per-request and monthly cost for your own volume, token shape, cache hit rate and batch eligibility. |
 | **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category: on-demand, spot, and 1- and 3-year commitments, each with what it saves against on-demand. |
-| **`compare-model-hosts`** | "Where do we buy it?" For 1 to 4 named models: how many hosts sell each, the cheapest, the dearest, the model maker's own rate, promotional listings, and what your workload costs at each. Says when the cheap host serves a quantized build. |
-
+| **`compare-model-hosts`** | "Where do we buy it?" For 1 to 4 named models: how many hosts sell each, the cheapest, the dearest, the model maker's own rate, promotional listings, then every host with its rate, the platforms that list the model and its Amazon Bedrock regions, and what your workload costs at each. Says when the cheap host serves a quantized build. |
 | **`estimate-self-hosting-breakeven`** | "API, or our own GPUs?" The monthly volume at which renting an instance costs the same as paying a model's API per token, at every rate the instance lists (on demand, spot, commitments) and against the API at list price, optimized, and at the cheapest host. It assumes no throughput and no staffing cost: give yours, or it states the tokens per second the break-even would require and says the figures are hardware rent only. |
 
 All seven are read-only and take no credentials. Nothing you send is stored.
+
+**End of life is on every answer.** A model whose maker has announced the retirement of
+its API is labelled with the date and the replacement the maker names, wherever it
+appears, and loses the FinOps Friendly badge. The notices are read by hand from each
+maker's deprecation page and dated in the response; a model with no label has no notice
+on record, which is not a guarantee.
 
 **Use case profiles** ship with realistic token shapes, so you do not have to invent them:
 Support Ticket, Knowledge Q&A, Meeting Summary, Marketing Content, Coding Task,

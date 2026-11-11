@@ -5,6 +5,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
 import {
+  buildsOf,
   declaredBuilds,
   describeOffer,
   describeVsQuoted,
@@ -86,10 +87,25 @@ import {
   fetchComputeInstances,
 } from "./lib/compute-pricing.js";
 import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
+import { deprecationLegend, deprecationTag, describeDeprecation } from "./lib/deprecation.js";
+import type { DeprecationInfo } from "./lib/deprecation.js";
+import { describeUpstreamFailure } from "./lib/optimtoken-api.js";
+import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./lib/model-hosts.js";
+import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
 // Mirror the structuredContent each tool returns, error paths included, so a
 // host and any downstream consumer get a contract instead of a guess.
+
+/** The model maker's retirement notice, as the site publishes it. Present
+ *  only on a model with a notice on record: absent is "none on record as of
+ *  `provenance.deprecationsVerifiedAt`", never "not deprecated". */
+const deprecationSchema = z.object({
+  // The maker's shutdown date for its own API (YYYY-MM-DD), when it gives one.
+  shutdown: z.string().optional(),
+  // The replacement the maker recommends, when it names one.
+  replacement: z.string().optional(),
+});
 
 const modelShape = {
   provider: z.string(),
@@ -111,6 +127,7 @@ const modelShape = {
   // or absent: absent means not flagged or unknown, never "a typical price".
   outlierListing: z.boolean().optional(),
   promotionalListing: z.boolean().optional(),
+  deprecation: deprecationSchema.optional(),
 };
 
 /** Where the cache and batch assumptions behind an optimized figure came from.
@@ -120,14 +137,26 @@ const modelShape = {
 const OPTIMIZATION_BASES = ["preset", "caller-supplied", "none-supplied"] as const;
 type OptimizationBasis = (typeof OPTIMIZATION_BASES)[number];
 
-/** Inline marker for a price the site flags, e.g. ` [promotional price]`. */
-function listingTags(m: { promotionalListing?: boolean; outlierListing?: boolean }): string {
+/** What the site flags on a row: the kind of price it quotes, and the maker's
+ *  retirement notice. */
+type Flagged = { promotionalListing?: boolean; outlierListing?: boolean; deprecation?: DeprecationInfo };
+
+/** Inline markers for the kind of price a row quotes, e.g. ` [promotional price]`.
+ *  For a line where the retirement notice is printed elsewhere. */
+function priceTags(m: Flagged): string {
   return (m.promotionalListing ? " [promotional price]" : "") + (m.outlierListing ? " [outlier listing]" : "");
 }
 
+/** Every inline marker for a row: the price tags above, then the maker's
+ *  retirement notice, e.g. ` [retired by its maker on 2026-08-10, replacement: GPT-5.6 Sol]`. */
+function listingTags(m: Flagged): string {
+  return priceTags(m) + deprecationTag(m);
+}
+
 /** One line per flag that appears in `models`, saying what the marker means.
- *  Empty when nothing is flagged, so an ordinary answer carries no boilerplate. */
-function listingLegend(models: { promotionalListing?: boolean; outlierListing?: boolean }[]): string {
+ *  Empty when nothing is flagged, so an ordinary answer carries no boilerplate.
+ *  `deprecationsVerifiedAt` dates the retirement notices, when any is shown. */
+function listingLegend(models: Flagged[], deprecationsVerifiedAt?: string): string {
   const lines: string[] = [];
   if (models.some(m => m.promotionalListing)) {
     lines.push(
@@ -141,6 +170,7 @@ function listingLegend(models: { promotionalListing?: boolean; outlierListing?: 
       "not typical of what the model costs elsewhere, and not eligible for the FinOps Friendly badge.",
     );
   }
+  lines.push(...deprecationLegend(models, deprecationsVerifiedAt));
   return lines.length > 0 ? `\n\n${lines.join("\n")}` : "";
 }
 
@@ -183,6 +213,10 @@ const llmProvenanceSchema = z.object({
   // The day the site last read each model's hosts: the date of the per-host
   // prices, and of the outlier and promotional flags decided from them.
   hostPricingAsOf: z.string().optional(),
+  // The day the site last re-read its retirement notices against each model
+  // maker's own page: the date of every `deprecation`, and of the lack of one.
+  // Absent on a fallback tier, where no model carries a notice at all.
+  deprecationsVerifiedAt: z.string().optional(),
   dataAsOf: z.string().optional(),
   notice: z.string().optional(),
 });
@@ -391,7 +425,12 @@ const modelHostsSchema = z.object({
     priceSource: z.enum(["vendor", "reference", "adjusted", "unknown"]),
     outlierListing: z.boolean().optional(),
     promotionalListing: z.boolean().optional(),
+    // The hosts in `offers` publishing the quoted rate, to within rounding.
+    // Present only when the full host list was read; it can be empty, when the
+    // quoted price is none of the rates the hosts publish.
+    matchingHosts: z.array(z.string()).optional(),
   }),
+  deprecation: deprecationSchema.optional(),
   // Null means no host data for this model: unknown, never "one host".
   hostCount: z.number().nullable(),
   cheapest: hostOfferSchema.nullable(),
@@ -406,13 +445,44 @@ const modelHostsSchema = z.object({
   // or when the cheapest listing is free.
   spread: z.number().nullable(),
   noteworthySpread: z.boolean(),
-  // The builds the offers above declare. Two or more: not like-for-like.
+  // The builds the offers declare: every host's when `offers` is known, the
+  // named ones above otherwise. Two or more: not like-for-like.
   quantizations: z.array(z.string()),
   promotions: z.array(hostOfferSchema),
+  // Every host publishing a usable rate, cheapest first on the blended price,
+  // each costed for the workload. Null when the full list is not known for
+  // this model: see `hostList`. Null is never "no other host".
+  offers: z.array(hostOfferSchema).nullable(),
+  // Where the site lists the model as sold, from a list it keeps by hand for
+  // the major models (`provenance` says how: "estimated"). Null when the model
+  // is not in that list, which is not "sold nowhere".
+  platforms: z.object({ names: z.array(z.string()), provenance: z.string() }).nullable(),
+  // AWS regions where Amazon Bedrock lists the model, in the region or through
+  // a geographic inference profile. Null when no Bedrock model id matched the
+  // model's name, which is not "not on Bedrock".
+  bedrockRegions: z.array(z.string()).nullable(),
+});
+
+/** Whether the full host list (the site's `/api/model-hosts`) was read for
+ *  this answer, and the dates of what it carries. */
+const hostListSchema = z.object({
+  available: z.boolean(),
+  // Why it is not, when it is not: a fallback tier, or the failed request.
+  unavailableReason: z.string().optional(),
+  upstreamSchemaVersion: z.string().optional(),
+  // The day the per-host rates were read (nightly).
+  hostPricingAsOf: z.string().optional(),
+  // The day the platforms list was last reviewed by hand.
+  availabilityReviewedAt: z.string().optional(),
+  // The day AWS's own model list was last read (weekly).
+  bedrockAvailabilityAsOf: z.string().optional(),
+  // Upstream ids the site's catalogue did not hold when asked.
+  notFound: z.array(z.string()),
 });
 
 const modelHostsOutputSchema = {
   models: z.array(modelHostsSchema),
+  hostList: hostListSchema.optional(),
   resolution: z.array(resolutionSchema),
   useCaseLabel: z.string(),
   volume: z.number(),
@@ -501,6 +571,9 @@ const selfHostingOutputSchema = {
       outputPricePer1M: z.number(),
       outlierListing: z.boolean().optional(),
       promotionalListing: z.boolean().optional(),
+      // The maker's retirement notice for its API. It does not reach weights
+      // already downloaded: an open model stays runnable on one's own fleet.
+      deprecation: deprecationSchema.optional(),
     })
     .nullable(),
   workload: z.object({
@@ -589,6 +662,9 @@ const recommendationSchema = z.object({
   constraints: z.array(constraintCheckSchema),
   outlierListing: z.boolean().optional(),
   promotionalListing: z.boolean().optional(),
+  // Only on an entry of `retiredNotRecommended`: a model with a retirement
+  // notice is never in `recommendations` or `nearMisses`.
+  deprecation: deprecationSchema.optional(),
 });
 
 const recommendOutputSchema = {
@@ -596,6 +672,14 @@ const recommendOutputSchema = {
   /** Populated only when `overConstrained` — the nearest models, each carrying
    *  the constraint it failed, so an impossible query still answers something. */
   nearMisses: z.array(recommendationSchema),
+  /** A recommendation is a model to start on, so a model whose maker has
+   *  announced its retirement is left out of the two lists above. This is how
+   *  many ranked models that removed, and the ones among them that satisfied
+   *  every constraint and would have ranked at or above the last pick (three
+   *  at most), so the exclusion can be checked. Zero and empty on a fallback
+   *  tier, where no model carries a notice. */
+  retiredExcludedCount: z.number(),
+  retiredNotRecommended: z.array(recommendationSchema),
   overConstrained: z.boolean(),
   useCaseLabel: z.string(),
   volumeLabel: z.string(),
@@ -878,9 +962,9 @@ tool(
               `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
               `≤ $${finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, plus a top-30% efficiency score, ` +
-              `a stable release and a price that is not an outlier listing — ` +
+              `a stable release, a price that is not an outlier listing and no retirement notice from its maker — ` +
               `${finopsBadge.qualifying} of ${finopsBadge.ranked} ranked models qualify.\n\n` +
-              lines.join("\n") + listingLegend(results),
+              lines.join("\n") + listingLegend(results, provenance.deprecationsVerifiedAt),
           },
         ],
         isError: false,
@@ -1108,7 +1192,7 @@ tool(
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n\n` +
               `Cost estimates for ${targetModels.length} model(s) at ${volume.toLocaleString()} requests/month:\n\n` +
-              lines.join("\n\n") + listingLegend(targetModels),
+              lines.join("\n\n") + listingLegend(targetModels, provenance.deprecationsVerifiedAt),
           },
         ],
         isError: false,
@@ -1264,7 +1348,7 @@ tool(
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n` +
               `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
-              `${header.join("\n")}${listingLegend(withCosts)}\n\n${rows.join("\n\n")}`,
+              `${header.join("\n")}${listingLegend(withCosts, provenance.deprecationsVerifiedAt)}\n\n${rows.join("\n\n")}`,
           },
         ],
         isError: false,
@@ -1300,8 +1384,10 @@ tool(
       "FinOps flag, volatility, and a per-constraint satisfied/violated breakdown. " +
       "When nothing satisfies every constraint the query is reported as over-constrained, " +
       "`recommendations` is empty, and the nearest misses are returned in `nearMisses` instead, each " +
-      "carrying the constraint it failed and flagged as a miss in the text. The ranking is computed " +
-      "server-side and is final.",
+      "carrying the constraint it failed and flagged as a miss in the text. A model whose maker has " +
+      "announced its retirement is never recommended: it is left out, counted in `retiredExcludedCount`, " +
+      "and the ones that would have ranked are named in `retiredNotRecommended` with the notice. The " +
+      "ranking is computed server-side and is final.",
     inputSchema: {
       useCasePreset: z.enum(USE_CASE_KEYS).describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k)."),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
@@ -1324,6 +1410,8 @@ tool(
     const emptyOutput = {
       recommendations: [] as unknown[],
       nearMisses: [] as unknown[],
+      retiredExcludedCount: 0,
+      retiredNotRecommended: [] as unknown[],
       overConstrained: false,
       useCaseLabel: USE_CASE_PROFILES[ucKey].label,
       volumeLabel: volumeEntry?.label ?? vol,
@@ -1427,7 +1515,15 @@ tool(
         return total;
       };
 
-      const evaluated = ranked.map(m => ({ m, constraints: checks(m), shortfall: shortfall(m) }));
+      // A recommendation is a model to start on, so a model whose maker has
+      // announced its retirement is set aside here: after the scoring, which
+      // stays over the whole catalogue as on the site, and before the picks.
+      // It is counted and, where it would have ranked, named: left out is not
+      // the same as hidden. No row carries a notice on tiers 2 and 3, so
+      // nothing is set aside there and the notice that leads the text says why.
+      const evaluatedAll = ranked.map(m => ({ m, constraints: checks(m), shortfall: shortfall(m) }));
+      const evaluated = evaluatedAll.filter(e => !e.m.deprecation);
+      const retired = evaluatedAll.filter(e => e.m.deprecation);
       const passing = evaluated.filter(e => e.constraints.every(c => c.satisfied));
 
       // Over-constrained: rather than an empty list, return the models that came
@@ -1480,11 +1576,41 @@ tool(
         // most needs the label: the budget it was chosen on will rise.
         outlierListing: e.m.outlierListing,
         promotionalListing: e.m.promotionalListing,
+        deprecation: e.m.deprecation,
       });
 
       const results = shortlist.map(build);
       const useCaseLabel = USE_CASE_PROFILES[ucKey].label;
       const volumeLabel = volumeEntry?.label ?? vol;
+
+      // The retired models that met every constraint and sat above the last
+      // pick: the ones a reader could wonder about. With fewer than three
+      // picks, any of them would have made the list.
+      const rankOf = (e: (typeof evaluatedAll)[number]): number =>
+        efficiencyRank.get(modelKey(e.m)) ?? Number.POSITIVE_INFINITY;
+      const lastPickRank = shortlist.length === 3 ? rankOf(shortlist[2]) : Number.POSITIVE_INFINITY;
+      const retiredResults = overConstrained
+        ? []
+        : retired
+            .filter(e => e.constraints.every(c => c.satisfied) && rankOf(e) < lastPickRank)
+            .slice(0, 3)
+            .map(build);
+      const retiredNote =
+        retired.length === 0
+          ? ""
+          : `\n\nLeft out: ${retired.length} ranked ${retired.length === 1 ? "model" : "models"} whose maker has ` +
+            `announced ${retired.length === 1 ? "its" : "their"} retirement` +
+            (provenance.deprecationsVerifiedAt ? ` (notices last verified on ${provenance.deprecationsVerifiedAt})` : "") +
+            `. A recommendation is a model to start on.` +
+            (retiredResults.length > 0
+              ? ` Would have ranked here otherwise:\n` +
+                retiredResults
+                  .map(r =>
+                    `  - ${r.provider} ${r.model}${listingTags(r)} — efficiency ${r.efficiencyScore ?? "n/a"} ` +
+                    `(rank ${r.efficiencyRank ?? "n/a"} of ${r.rankedOutOf}), ${formatMonthlyBudget(r.monthlyBudget)}/mo list`,
+                  )
+                  .join("\n")
+              : "");
 
       const lines = results.map(r =>
         `${r.rank}. ${r.provider} ${r.model}${listingTags(r)} — ELO ${r.eloScore ?? "n/a"}, ` +
@@ -1506,7 +1632,7 @@ tool(
         ? `No model satisfies every constraint. Closest ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
           `(${ranked.length} ranked of ${allModels.length} catalogue entries), each with the constraint it failed:`
         : `Top ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
-          `(${passing.length} of ${ranked.length} ranked models satisfy all constraints; ${allModels.length} catalogue entries):`;
+          `(${passing.length} of ${evaluated.length} ranked models satisfy all constraints; ${allModels.length} catalogue entries):`;
 
       const roiUrl = roiCalculatorUrl({
         useCase: ucKey,
@@ -1519,6 +1645,8 @@ tool(
           ...emptyOutput,
           recommendations: overConstrained ? [] : results,
           nearMisses: overConstrained ? results : [],
+          retiredExcludedCount: retired.length,
+          retiredNotRecommended: retiredResults,
           overConstrained,
           candidateCount: passing.length,
           rankedCount: ranked.length,
@@ -1537,7 +1665,8 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `${preamble}\n\n${lines.join("\n")}${listingLegend(results)}\n\n` +
+              `${preamble}\n\n${lines.join("\n")}${retiredNote}` +
+              `${listingLegend([...results, ...retiredResults], provenance.deprecationsVerifiedAt)}\n\n` +
               `ROI calculator for this scenario: ${roiUrl}`,
           },
         ],
@@ -1702,6 +1831,11 @@ tool(
 const roundPricePer1MOrUndefined = (price: number | undefined): number | undefined =>
   price === undefined ? undefined : roundPricePer1M(price);
 
+/** How many hosts of one model the text prints. Beyond it the cheapest are
+ *  shown and the rest counted: four models with thirty hosts each would bury
+ *  the answer. `structuredContent` always carries all of them. */
+const MAX_HOST_LINES = 12;
+
 tool(
   "compare-model-hosts",
   {
@@ -1718,10 +1852,14 @@ tool(
       "70B cheapest', 'is the price you quoted the maker's own', 'how much does the choice of host matter " +
       "for this model'. To cost a workload at the quoted price with caching and batch, use estimate-llm-cost. " +
       "Read the caveats it returns: the cheapest host may serve a quantized build, which is not the same " +
-      "product, or a promotional rate that ends. Only the cheapest, the dearest, the maker's own and " +
-      "promotional listings are known; the hosts in between are not. Per-host prices are list prices read " +
-      "nightly and dated by `provenance.hostPricingAsOf`, and a model with no host data says so rather than " +
-      "reading as sold by one host.",
+      "product, or a promotional rate that ends. It also lists every host with its rate, cheapest first, " +
+      "the platforms the model is listed on (Direct API, AWS Bedrock, Azure AI Foundry, Google Vertex, " +
+      "OpenRouter: a hand-kept estimate for the major models) and the AWS regions where Amazon Bedrock lists " +
+      "it. `hostList.available` says whether that full list was read: without it only the cheapest, the " +
+      "dearest, the maker's own and promotional listings are known, and the text says so. A missing platform " +
+      "or region is not known, never 'not sold there'. Per-host prices are list prices read nightly and dated " +
+      "by `provenance.hostPricingAsOf`, and a model with no host data says so rather than reading as sold by " +
+      "one host.",
     inputSchema: {
       models: z
         .array(z.string())
@@ -1781,12 +1919,43 @@ tool(
       };
       type Costed = ReturnType<typeof costed>;
 
+      // The full host list is a second request, to the site only, asked by
+      // upstream id for the models that have a host summary. It is never worth
+      // failing the answer for: when it cannot be read, the summary on the rows
+      // still stands and the text says the hosts in between are not shown.
+      const hostIds = [
+        ...new Set(
+          selected
+            .map(m => hostPricing.get(hostPricingKey(m))?.openRouterId)
+            .filter((id): id is string => !!id),
+        ),
+      ].slice(0, MAX_MODEL_HOST_IDS);
+      let hostList: ModelHostsResult | null = null;
+      let hostListUnavailable: string | undefined;
+      if (provenance.tier !== 1) {
+        hostListUnavailable = "the catalogue came from a fallback tier, which has no per-host prices";
+      } else if (hostIds.length === 0) {
+        hostListUnavailable = "none of these models has per-host pricing to look up";
+      } else {
+        try {
+          hostList = await fetchModelHosts(hostIds);
+        } catch (error) {
+          hostListUnavailable = describeHostListFailure(error);
+          console.warn("[compare-model-hosts] full host list unavailable:", describeUpstreamFailure(error).summary);
+        }
+      }
+
       const entries = selected.map(m => {
         const entry = hostPricing.get(hostPricingKey(m));
         const summary = entry?.summary;
         const quotedCost = costOf(m.inputPricePer1M, m.outputPricePer1M);
         const quotedPair = { input: m.inputPricePer1M, output: m.outputPricePer1M };
         const maker = makerOffer(entry, quotedPair);
+        const detail: ModelHostsDetail | undefined = entry?.openRouterId
+          ? hostList?.byId.get(entry.openRouterId)
+          : undefined;
+        // Null, not empty, when the list is not known for this model.
+        const offers = summary && detail?.offers ? detail.offers.map(offer => costed(offer, quotedCost)) : null;
         return {
           m,
           summary,
@@ -1797,9 +1966,20 @@ tool(
           dearest: summary ? costed(summary.dearest, quotedCost) : null,
           vendor: maker.offer ? costed(maker.offer, quotedCost) : null,
           promotions: (summary?.promotions ?? []).map(offer => costed(offer, quotedCost)),
-          builds: declaredBuilds(summary),
+          offers,
+          matchingHosts: offers
+            ? offers.filter(c => matchesOffer(quotedPair, c.offer)).map(c => c.offer.host)
+            : undefined,
+          platforms: detail?.platforms ?? null,
+          bedrockRegions: detail?.bedrockRegions ?? null,
+          // Every host's build when the list is known, the named offers' otherwise.
+          builds: offers
+            ? buildsOf([...offers.map(c => c.offer), ...(summary?.promotions ?? [])])
+            : declaredBuilds(summary),
         };
       });
+      // True when every model that has host data also has its full list.
+      const everyHost = entries.some(e => e.summary) && entries.every(e => !e.summary || e.offers !== null);
 
       const money = (cost: number): string => `${formatMicroCost(cost)}/req, ${formatMonthlyBudget(cost * volume)}/mo`;
       const offerLine = (c: Costed): string => {
@@ -1809,10 +1989,16 @@ tool(
 
       const blocks = entries.map(e => {
         const { m, summary } = e;
-        const head = `${m.provider} ${m.model}` + (m.eloScore ? ` (ELO ${m.eloScore})` : "");
+        const head = `${m.provider} ${m.model}${deprecationTag(m)}` + (m.eloScore ? ` (ELO ${m.eloScore})` : "");
+        // Named only when the quoted price is another host's rate: with the
+        // full list in hand, "another host" can be said by name.
+        const matching =
+          e.priceSource === "reference" && e.matchingHosts && e.matchingHosts.length > 0
+            ? ` Among the hosts listed below, it is the rate of: ${e.matchingHosts.join(", ")}.`
+            : "";
         const quoted =
-          `  Quoted by this server: $${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${listingTags(m)}` +
-          ` → ${money(e.quotedCost)}. ${provenanceExplanation(e.priceSource, summary)}`;
+          `  Quoted by this server: $${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${priceTags(m)}` +
+          ` → ${money(e.quotedCost)}. ${provenanceExplanation(e.priceSource, summary)}${matching}`;
         if (!summary || !e.cheapest || !e.dearest) {
           return `${head} — no per-host pricing.\n${quoted}`;
         }
@@ -1857,6 +2043,21 @@ tool(
         if (e.promotions.length > 0) {
           lines.push(`  Promotional listings — ${e.promotions.map(c => describeOffer(c.offer)).join("; ")}. A promotion can end without notice.`);
         }
+        if (e.offers) {
+          const shown = e.offers.slice(0, MAX_HOST_LINES);
+          // The site's order, which is by blended price and not by the cost
+          // of this workload: said here so that costs out of order below do
+          // not read as a sorting fault.
+          lines.push(`  Every host (${e.offers.length}), cheapest first on the blended price:`);
+          shown.forEach((c, i) => lines.push(`    ${i + 1}. ${offerLine(c)}`));
+          const rest = e.offers.length - shown.length;
+          if (rest > 0) {
+            lines.push(
+              `    … and ${rest} dearer ${rest === 1 ? "host" : "hosts"}, up to the dearest named above. ` +
+              `All ${e.offers.length} are in structuredContent (models[].offers).`,
+            );
+          }
+        }
         if (e.builds.length > 1) {
           lines.push(
             `  Not like-for-like — these listings declare different builds (${e.builds.join(", ")}): a quantized ` +
@@ -1864,6 +2065,14 @@ tool(
           );
         } else if (e.builds.length === 1) {
           lines.push(`  Build — the listings above that declare one serve ${e.builds[0]}.`);
+        }
+        if (e.platforms) {
+          lines.push(
+            `  Platforms — ${e.platforms.names.join(", ")} (the site's hand-kept list, ${e.platforms.provenance}).`,
+          );
+        }
+        if (e.bedrockRegions) {
+          lines.push(`  Amazon Bedrock regions (${e.bedrockRegions.length}) — ${e.bedrockRegions.join(", ")}.`);
         }
         return lines.join("\n");
       });
@@ -1894,6 +2103,28 @@ tool(
               `than the last nightly read. That is unknown, not "sold by one host".`
             : "";
 
+      // Said only where the list was expected and did not come: on a fallback
+      // tier `noHostData` above already covers it.
+      const hostListNote =
+        provenance.tier === 1 && hostList === null && known > 0
+          ? `\nThe full list of hosts could not be read (${hostListUnavailable}): only the cheapest, the dearest, ` +
+            `the model maker's own and promotional listings are shown below.`
+          : hostList !== null && !everyHost && known > 0
+            ? `\nThe full list of hosts is not on record for every model below: where no "Every host" list ` +
+              `appears, only the cheapest, the dearest, the maker's own and promotional listings are known.`
+            : "";
+
+      // What a platform or a region line is, and what its absence is not.
+      const availabilityNote =
+        hostList === null
+          ? ""
+          : `\nPlatforms are the site's hand-kept list for the major models` +
+            (hostList.meta.availabilityReviewedAt ? `, reviewed on ${hostList.meta.availabilityReviewedAt}` : "") +
+            `: an estimate, not a live check. Amazon Bedrock regions come from AWS's own model list` +
+            (hostList.meta.bedrockAvailabilityAsOf ? `, read on ${hostList.meta.bedrockAvailabilityAsOf}` : "") +
+            `, in the region or through a geographic inference profile. A model with no Platforms or Bedrock ` +
+            `line, and a platform or region missing from one, is not known: never "not sold there".`;
+
       return {
         structuredContent: {
           ...emptyOutput,
@@ -1910,7 +2141,9 @@ tool(
               priceSource: e.priceSource,
               outlierListing: e.m.outlierListing,
               promotionalListing: e.m.promotionalListing,
+              matchingHosts: e.matchingHosts,
             },
+            deprecation: e.m.deprecation,
             hostCount: e.summary?.hosts ?? null,
             cheapest: e.cheapest ? offerOut(e.cheapest) : null,
             dearest: e.dearest ? offerOut(e.dearest) : null,
@@ -1920,7 +2153,19 @@ tool(
             noteworthySpread: hasNoteworthySpread(e.summary),
             quantizations: e.builds,
             promotions: e.promotions.map(offerOut),
+            offers: e.offers ? e.offers.map(offerOut) : null,
+            platforms: e.platforms,
+            bedrockRegions: e.bedrockRegions,
           })),
+          hostList: {
+            available: hostList !== null,
+            unavailableReason: hostListUnavailable,
+            upstreamSchemaVersion: hostList?.meta.schemaVersion,
+            hostPricingAsOf: hostList?.meta.hostPricingAsOf,
+            availabilityReviewedAt: hostList?.meta.availabilityReviewedAt,
+            bedrockAvailabilityAsOf: hostList?.meta.bedrockAvailabilityAsOf,
+            notFound: hostList?.notFound ?? [],
+          },
           resolution,
           source,
           eloAsOf,
@@ -1939,10 +2184,11 @@ tool(
               `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out tokens) costs at each ` +
               `host's list price, at ${volume.toLocaleString()} requests/month.` +
               (provenance.hostPricingAsOf ? ` Per-host prices were read on ${provenance.hostPricingAsOf}.` : "") +
-              `${noHostData}\n\n` +
+              `${noHostData}${hostListNote}\n\n` +
               `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
-              `${blocks.join("\n\n")}${listingLegend(selected)}\n\n` +
-              hostFootnote(provenance.hostPricingAsOf),
+              `${blocks.join("\n\n")}${listingLegend(selected, provenance.deprecationsVerifiedAt)}\n\n` +
+              hostFootnote(provenance.hostPricingAsOf, everyHost) +
+              availabilityNote,
           },
         ],
         isError: false,
@@ -2193,10 +2439,17 @@ tool(
               `figures only apply if the workload can move to an open model that this hardware runs.`
             : `Weights: licence not established. Whether this model can be self-hosted is unknown; confirm it before ` +
               `reading the fleet figures as an option.`;
+      // A retirement notice ends the API side of the comparison, not the fleet
+      // side: published weights do not expire with the maker's endpoint.
+      const retirementLine = m.deprecation
+        ? `\nAPI retirement: this model is ${describeDeprecation(m.deprecation)}. The API prices below last only ` +
+          `as long as a host still serves it` +
+          (selfHostable === true ? `; weights you run yourself are not affected.` : `.`)
+        : "";
 
       const money = (cost: number): string => `${formatMicroCost(cost)}/req → ${formatMonthlyBudget(cost * volume)}/mo`;
       const apiLines = [
-        `  API list price ($${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${listingTags(m)}): ${money(listCost)}`,
+        `  API list price ($${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${priceTags(m)}): ${money(listCost)}`,
         saving > 0
           ? `  API optimized: ${money(optimizedCost)} — save ${saving}% with ${leverSummary(levers)}`
           : basis === "none-supplied"
@@ -2280,6 +2533,7 @@ tool(
             outputPricePer1M: m.outputPricePer1M,
             outlierListing: m.outlierListing,
             promotionalListing: m.promotionalListing,
+            deprecation: m.deprecation,
           },
           api: [
             {
@@ -2367,12 +2621,12 @@ tool(
               `Name resolution: ${resolution.map(describe).join(" ")}\n\n` +
               `API or own capacity — ${m.provider} ${m.model} for ${profile.label} (${profile.inputTokens} in + ` +
               `${profile.outputTokens} out tokens) at ${volume.toLocaleString()} requests/month.\n` +
-              `${weightsLine}\n\n` +
+              `${weightsLine}${retirementLine}\n\n` +
               `Paying per token:\n${apiLines.join("\n")}\n\n` +
               `${fleetLines.join("\n")}\n\n` +
               `${optionBlocks.join("\n")}` +
               ratesLegend(instance ? [instance] : [], computeProvenance?.priceTypes, computeProvenance?.awsSavingsPlansAsOf) +
-              `${listingLegend([m])}\n\n` +
+              `${listingLegend([m], provenance.deprecationsVerifiedAt)}\n\n` +
               selfHostingFootnote(monthlyOperationsCost !== undefined, capacity !== null),
           },
         ],
@@ -2401,7 +2655,7 @@ tool(
 function createServer(): McpServer {
   const server = new McpServer({
     name: "ai-pricing-hub",
-    version: "0.7.0",
+    version: "0.8.0",
   });
   for (const register of tools) register(server);
   return server;

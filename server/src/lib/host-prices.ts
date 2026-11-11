@@ -291,12 +291,26 @@ export function describeOffer(offer: HostOffer): string {
   );
 }
 
-/** The caveats printed once under the host table. */
-export function hostFootnote(asOf: string | undefined): string {
+/** The builds a list of offers declares, in the order they first appear. */
+export function buildsOf(offers: readonly (HostOffer | undefined)[]): string[] {
+  return [...new Set(offers.map((o) => o?.quantization).filter((q): q is string => !!q))];
+}
+
+/**
+ * The caveats printed once under the host table.
+ *
+ * `everyHost` is true when the full list of hosts was read for every model
+ * shown that has host data. Otherwise only the offers the site's summary names
+ * are known, and the footnote must say so: a reader who sees two hosts has to
+ * know there may be others in between.
+ */
+export function hostFootnote(asOf: string | undefined, everyHost = false): string {
   return (
     `${HOST_DEFINITION}\n` +
-    `Only the cheapest host, the dearest, the model maker's own and any promotional listing are carried here; ` +
-    `the hosts in between are not.\n` +
+    (everyHost
+      ? `Every host publishing a usable rate is listed, cheapest first on the blended price (30% input, 70% output).\n`
+      : `Only the cheapest host, the dearest, the model maker's own and any promotional listing are carried here; ` +
+        `the hosts in between are not.\n`) +
     `List prices as published${asOf ? ` on ${asOf}` : ""}, via OpenRouter. Negotiated rates, committed-use ` +
     `discounts and provisioned capacity are not shown, and cache and batch rates are not published per host: ` +
     `every cost at a host's rate is a list-price cost.\n` +

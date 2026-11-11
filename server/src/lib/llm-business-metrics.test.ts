@@ -349,6 +349,27 @@ test("an outlier listing is refused the badge and stays in the ranking", () => {
   );
 });
 
+test("a model with a retirement notice is refused the badge and stays in the ranking", () => {
+  const field = Array.from({ length: 9 }, (_, i) => ranked(`Field ${i}`, 1300 + i * 10, 1 + i, 4 + i * 4));
+  const candidate = ranked("Candidate", 1480, 0.07, 1.4);
+  const clean = enrichModels([...field, candidate], "100k", "supportTicket");
+  assert.equal(clean[9].isFinOpsFriendly, true, "sanity: it earns the badge with no notice");
+
+  // The site refuses on the notice itself, not on its date: a shutdown a year
+  // out is still a model not to start on, and a notice with no date is one too.
+  const notices = [{ shutdown: "2099-01-01", replacement: "Next" }, { shutdown: "2020-01-01" }, {}];
+  for (const deprecation of notices) {
+    const retired = enrichModels([...field, { ...candidate, deprecation }], "100k", "supportTicket");
+    assert.equal(retired[9].isFinOpsFriendly, false, `refused with ${JSON.stringify(deprecation)}`);
+    assert.equal(retired[9].efficiencyScore, clean[9].efficiencyScore, "its own score is unchanged");
+    assert.deepEqual(
+      retired.slice(0, 9).map(m => [m.efficiencyScore, m.isFinOpsFriendly]),
+      clean.slice(0, 9).map(m => [m.efficiencyScore, m.isFinOpsFriendly]),
+      "and every other model keeps its score and its badge: the model is labelled, not removed",
+    );
+  }
+});
+
 // ── Ordering ─────────────────────────────────────────────────────────
 //
 // compare-llm-models returned the catalogue in arrival order (Arena ELO

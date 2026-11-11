@@ -405,12 +405,13 @@ export const FINOPS_MIN_PRICE_PERCENTILE = 30;
  *  listing stays IN the ranking, exactly as on the site: its own score and
  *  every other model's percentile are unchanged.
  *
- *  One site rule is NOT applied here: the site also refuses the badge to a
- *  model with a vendor-announced deprecation, from a hand-curated table
- *  (its model-lifecycle.ts) that its API does not publish. Copying the table
- *  would add a list that drifts in silence; the fix is for the API to carry a
- *  deprecation flag. Until then a deprecated model can hold the badge here and
- *  not there. None did when this was written (2026-11-11). */
+ *  A fifth gate follows the site too: a model whose maker has announced its
+ *  retirement never holds the badge, whatever its name and release date say.
+ *  The site decides it from a table it keeps by hand (its model-lifecycle.ts)
+ *  and publishes the notice as `deprecation` on the row (schemaVersion 2.8),
+ *  which is what is read here. The table itself is not copied: a list kept by
+ *  hand in two places drifts in silence. On tiers 2 and 3 no row carries a
+ *  notice, so the gate cannot bite there, and the response says so. */
 export function checkFinOpsFriendly(
   model: LLMModel,
   components: ScoreComponents,
@@ -422,6 +423,7 @@ export function checkFinOpsFriendly(
   if (score < efficiencyThreshold) return false;
   if (pricePercentile < FINOPS_MIN_PRICE_PERCENTILE) return false;
   if (model.outlierListing === true) return false;
+  if (model.deprecation) return false;
 
   // "Unknown" (no release date published) still passes: a metadata gap is not
   // evidence of instability, and dropping those models would silently penalise

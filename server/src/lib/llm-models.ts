@@ -15,6 +15,7 @@ import { isRecognisedLicence, opennessOf } from "./openness.js";
 import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
 import { coerceHostPricing } from "./host-prices.js";
 import type { ModelHostPricing } from "./host-prices.js";
+import { NO_DEPRECATION_DATA, coerceDeprecation } from "./deprecation.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
 
@@ -823,6 +824,11 @@ export interface LLMProvenance {
    *  `hostPricing`, and the outlier and promotional flags decided from it:
    *  those come from a nightly job, not from the request. */
   hostPricingAsOf?: string;
+  /** The day the site last re-read its table of retirement notices against
+   *  each model maker's own page (tier 1 only). It dates every `deprecation`
+   *  on a row, and the absence of one. Absent on tiers 2 and 3, which carry no
+   *  notice at all. */
+  deprecationsVerifiedAt?: string;
   dataAsOf?: string;
   /** Loud warning when the prices are not the site's corrected ones. */
   notice?: string;
@@ -871,6 +877,7 @@ interface SiteModelsResponse {
     timestamp?: string;
     eloAsOf?: string;
     hostPricingAsOf?: unknown;
+    deprecationsVerifiedAt?: unknown;
   };
 }
 
@@ -936,6 +943,9 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
     // both from its per-host fan-out; this server only repeats the verdict.
     outlierListing: flag(m.outlierListing),
     promotionalListing: flag(m.promotionalListing),
+    // Schema 2.8: the maker's retirement notice, from the site's hand-kept
+    // table. Repeated as sent; this server keeps no copy of that table.
+    deprecation: coerceDeprecation(m.deprecation),
   };
 }
 
@@ -1031,6 +1041,10 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
       eloAsOf,
       hostPricingAsOf:
         typeof meta.hostPricingAsOf === "string" && meta.hostPricingAsOf ? meta.hostPricingAsOf : undefined,
+      deprecationsVerifiedAt:
+        typeof meta.deprecationsVerifiedAt === "string" && meta.deprecationsVerifiedAt
+          ? meta.deprecationsVerifiedAt
+          : undefined,
     },
   };
 }
@@ -1079,7 +1093,7 @@ async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
         label: "openrouter.ai direct — list prices as published, uncorrected",
         pricesVerified: false,
         eloAsOf: ELO_AS_OF,
-        notice: UNVERIFIED_PRICING_NOTICE,
+        notice: `${UNVERIFIED_PRICING_NOTICE} ${NO_DEPRECATION_DATA}`,
       },
     };
   } finally {
@@ -1105,7 +1119,7 @@ function fetchFromSnapshot(): LLMFetchResult {
       dataAsOf: dataLastUpdated,
       notice:
         `STALE PRICING: both live sources were unreachable, so these figures come from a ` +
-        `snapshot taken on ${dataLastUpdated} and may be out of date.`,
+        `snapshot taken on ${dataLastUpdated} and may be out of date. ${NO_DEPRECATION_DATA}`,
     },
   };
 }

@@ -57,6 +57,7 @@ const site = await load(join(sitePath, "src/lib/llm-business-metrics.ts"));
 const siteOpenness = await load(join(sitePath, "src/lib/openness.ts"));
 const siteHosts = await load(join(sitePath, "src/lib/host-prices.ts"));
 const siteHostView = await load(join(sitePath, "src/lib/host-pricing-view.ts"));
+const siteLifecycle = await load(join(sitePath, "src/lib/model-lifecycle.ts"));
 const mcpHosts = await load(join(repoRoot, "server/src/lib/host-prices.ts"));
 
 const response = await fetch(API_URL, { headers: { Accept: "application/json" } });
@@ -123,6 +124,7 @@ const scoreDiff = [];
 const badgeDiff = [];
 const opennessDiff = [];
 const outlierDiff = [];
+const retirementDiff = [];
 here_.forEach((a, i) => {
   const b = there[i];
   const name = `${a.provider} ${a.model}`;
@@ -134,11 +136,20 @@ here_.forEach((a, i) => {
   // the price they display. The two have to be the same verdict.
   const outlierThere = siteHosts.isOutlierQuote({ input: b.inputPricePer1M, output: b.outputPricePer1M }, b.hostPricing);
   if ((a.outlierListing === true) !== outlierThere) outlierDiff.push(`${name}: flag ${a.outlierListing === true}, isOutlierQuote ${outlierThere}`);
+  // Same for retirement: the badge here reads the API's `deprecation`, the
+  // site's reads its own table. A difference means the checkout and the
+  // deployed site hold two tables, or this server dropped part of a notice.
+  const noticeHere = JSON.stringify(a.deprecation ?? null);
+  const noticeThere = JSON.stringify(siteLifecycle.deprecationOf(b.provider, b.model) ?? null);
+  if (noticeHere !== noticeThere) retirementDiff.push(`${name}: ${noticeHere} here, ${noticeThere} in the site's table`);
 });
 report("efficiency score", scoreDiff.length, here_.length, scoreDiff);
 report("FinOps Friendly badge", badgeDiff.length, here_.length, badgeDiff);
 report("openness bucket", opennessDiff.length, here_.length, opennessDiff);
 report("outlierListing flag against the site's own rule", outlierDiff.length, here_.length, outlierDiff);
+report("retirement notice against the site's own table", retirementDiff.length, here_.length, retirementDiff);
+const retiredWithBadge = here_.filter((m) => m.deprecation && m.isFinOpsFriendly).map((m) => `${m.provider} ${m.model}`);
+report("retired models holding the badge", retiredWithBadge.length, here_.filter((m) => m.deprecation).length || 1, retiredWithBadge);
 
 const unknownLicences = [...new Set(rows.map((r) => r.license).filter((l) => l && !mcpOpenness.isRecognisedLicence(l)))];
 report("licence strings openness.ts cannot bucket", unknownLicences.length, unknownLicences.length || 1, unknownLicences);
