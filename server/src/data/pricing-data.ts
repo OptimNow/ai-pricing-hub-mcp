@@ -61,6 +61,21 @@ export interface LLMModel {
    *  with an end date. Set by the site (schemaVersion 2.7). The price is what
    *  is charged today, so it is labelled, not corrected. */
   promotionalListing?: boolean;
+  /** The model maker's retirement notice for this model's API, from the table
+   *  the site keeps by hand and publishes on the row (schemaVersion 2.8).
+   *  Absent means no notice on record, never "not deprecated": the table is
+   *  re-read on the day `provenance.deprecationsVerifiedAt` states. Tier 1
+   *  only: the snapshot below does not carry it, on purpose (a copy of a
+   *  hand-kept table ages in silence). Refuses the FinOps Friendly badge. */
+  deprecation?: DeprecationInfo;
+}
+
+/** A model maker's retirement notice, as the site publishes it. */
+export interface DeprecationInfo {
+  /** The maker's shutdown date for its own API, YYYY-MM-DD, when it gives one. */
+  shutdown?: string;
+  /** The replacement the maker recommends, when it names one. */
+  replacement?: string;
 }
 
 /* ── Data sourcing metadata ── */

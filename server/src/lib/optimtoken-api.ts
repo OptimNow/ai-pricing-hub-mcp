@@ -102,10 +102,16 @@ export function describeUpstreamFailure(error: unknown): {
   return { kind: "unknown", summary: `unknown: ${message}` };
 }
 
-export function optimtokenUrl(path: string, params?: Record<string, string | undefined>): string {
+/** A query parameter: one value, or several for a parameter the site reads
+ *  repeated (`?id=a&id=b`). */
+export type QueryValue = string | readonly string[] | undefined;
+
+export function optimtokenUrl(path: string, params?: Record<string, QueryValue>): string {
   const url = new URL(path, `${OPTIMTOKEN_BASE_URL}/`);
   for (const [key, value] of Object.entries(params ?? {})) {
-    if (value !== undefined) url.searchParams.set(key, value);
+    if (value === undefined) continue;
+    if (typeof value === "string") url.searchParams.set(key, value);
+    else for (const item of value) url.searchParams.append(key, item);
   }
   return url.toString();
 }
@@ -121,7 +127,7 @@ export function optimtokenUrl(path: string, params?: Record<string, string | und
  */
 export async function fetchOptimtokenJson<T>(
   path: string,
-  options: { params?: Record<string, string | undefined>; timeoutMs: number },
+  options: { params?: Record<string, QueryValue>; timeoutMs: number },
 ): Promise<T> {
   const url = optimtokenUrl(path, options.params);
   const controller = new AbortController();

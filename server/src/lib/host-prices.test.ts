@@ -8,6 +8,7 @@ import {
   blendPair,
   coerceHostOffer,
   coerceHostPricing,
+  buildsOf,
   declaredBuilds,
   describeOffer,
   describeVsQuoted,
@@ -225,4 +226,27 @@ test("the footnote says what is not shown, and dates the prices when it can", ()
   assert.match(dated, /cache and batch rates are not published per host/);
   assert.match(dated, /not a recommendation to buy there/);
   assert.match(hostFootnote(undefined), /List prices as published, via OpenRouter\./);
+});
+
+test("the footnote stops saying hosts are missing once every host is listed", () => {
+  const full = hostFootnote("2026-11-11", true);
+  assert.match(full, /Every host publishing a usable rate is listed, cheapest first/);
+  assert.doesNotMatch(full, /the hosts in between are not/);
+  // The caveats that do not depend on the list are still there.
+  assert.match(full, /Negotiated rates, committed-use discounts and provisioned capacity are not shown/);
+  assert.match(full, /not a recommendation to buy there/);
+  // The default is the cautious wording: nothing claims a full list by accident.
+  assert.match(hostFootnote("2026-11-11", false), /the hosts in between are not/);
+});
+
+test("the builds of a full list are read from every host", () => {
+  const offers = [
+    { host: "A", input: 1, output: 2, quantization: "fp8" },
+    { host: "B", input: 1, output: 2 },
+    { host: "C", input: 1, output: 2, quantization: "bf16" },
+    { host: "D", input: 1, output: 2, quantization: "fp8" },
+    undefined,
+  ];
+  assert.deepEqual(buildsOf(offers), ["fp8", "bf16"]);
+  assert.deepEqual(buildsOf([]), []);
 });

@@ -427,6 +427,62 @@ test("the listing flags are carried when true and only when true", () => {
   }
 });
 
+test("a retirement notice survives the trip from the site", () => {
+  const notice = { shutdown: "2026-11-30", replacement: "Claude Next" };
+  assert.deepEqual(coerceSiteModel(siteRow({ deprecation: notice }))?.deprecation, notice);
+  // An empty object is a notice with nothing more known; absent stays absent.
+  assert.deepEqual(coerceSiteModel(siteRow({ deprecation: {} }))?.deprecation, {});
+  for (const notANotice of [undefined, null, true, "2026-11-30"]) {
+    assert.equal(coerceSiteModel(siteRow({ deprecation: notANotice }))?.deprecation, undefined, String(notANotice));
+  }
+});
+
+test("retirement notices are dated on tier 1, and absent with a warning on the fallback tiers", async (t) => {
+  t.after(restoreFetch);
+
+  reset();
+  const models: Record<string, unknown>[] = siteModels();
+  models[0] = { ...models[0], deprecation: { shutdown: "2026-12-11", replacement: "Alpha 1" } };
+  const base = siteModelsResponse();
+  stubFetch(url =>
+    isSite(url)
+      ? { body: { ...base, models, meta: { ...base.meta, deprecationsVerifiedAt: "2026-10-20" } } }
+      : { throws: true },
+  );
+  const tier1 = await fetchLLMModels();
+  assert.equal(tier1.provenance.deprecationsVerifiedAt, "2026-10-20", "the notices carry their own date");
+  assert.deepEqual(tier1.models.find(m => m.model === "Alpha 0")?.deprecation, {
+    shutdown: "2026-12-11",
+    replacement: "Alpha 1",
+  });
+  assert.equal(tier1.models.filter(m => m.deprecation).length, 1, "and no other model gained one");
+
+  // Below tier 1 nobody holds the table. No model carries a notice, and the
+  // warning that leads every answer says that this silence proves nothing.
+  reset();
+  stubFetch(url => {
+    if (isSite(url)) return { status: 503 };
+    if (isOpenRouter(url)) return { body: openRouterPayload() };
+    return { throws: true };
+  });
+  const tier2 = await fetchLLMModels();
+  reset();
+  stubFetch(() => ({ throws: true }));
+  const tier3 = await fetchLLMModels();
+
+  for (const [name, result] of [["tier 2", tier2], ["tier 3", tier3]] as const) {
+    assert.equal(result.provenance.deprecationsVerifiedAt, undefined, `${name} dates no notice`);
+    assert.equal(result.models.filter(m => m.deprecation).length, 0, `${name} carries no notice`);
+    assert.match(result.provenance.notice ?? "", /Retirement notices are served by optimtoken\.optimnow\.io only/, name);
+  }
+});
+
+test("the snapshot holds no copy of the site's retirement table", () => {
+  // The table is kept by hand on the site and published on its rows. A copy
+  // here would age in silence, which is the one way a notice becomes wrong.
+  assert.equal(llmModels.filter(m => m.deprecation !== undefined).length, 0);
+});
+
 test("each snapshot states its own date", () => {
   // The compute rows and the LLM snapshot are refreshed by different means, at
   // different times. While they shared one constant, refreshing the LLM
