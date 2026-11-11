@@ -123,6 +123,13 @@ test("the fields fixed by each past regression are still rounded", () => {
     "optimizedUseCaseCost",
     "optimizedMonthlyBudget",
     "maxBlendedPrice",
+    // estimate-self-hosting-breakeven: every one is derived (a rate times 730
+    // hours, a difference of two bills), so every one can carry float noise.
+    "hourlyRate",
+    "monthlyCost",
+    "monthlyOperationsCost",
+    "fullLoadCostPerRequest",
+    "fleetMinusApiMonthly",
   ]) {
     assert.ok(rounded.has(field), `${field} is no longer rounded at the boundary`);
   }
@@ -168,6 +175,7 @@ test("every tool declares provenance in its output schema", () => {
     "sideBySideOutputSchema",
     "recommendOutputSchema",
     "modelHostsOutputSchema",
+    "selfHostingOutputSchema",
   ]) {
     const start = schemaRegion.indexOf(`const ${schema} = {`);
     assert.ok(start > -1, `${schema} not found`);
@@ -192,14 +200,15 @@ test("every structuredContent that reached upstream carries provenance", () => {
     b => !/^\{\s*\.\.\.emptyOutput,\s*error:[^,}]+\}$/.test(b.trim().replace(/\s+/g, " ")),
   );
 
-  // 6 successes, plus three paths that fail *after* a good fetch and so still
+  // 7 successes, plus five paths that fail *after* a good fetch and so still
   // owe the caller provenance: estimate-llm-cost's no-match path,
-  // compare-models-side-by-side's "fewer than 2 names resolved", and
-  // compare-model-hosts's "no name resolved".
+  // compare-models-side-by-side's "fewer than 2 names resolved",
+  // compare-model-hosts's "no name resolved", and
+  // estimate-self-hosting-breakeven's "no model matched" and "no such instance".
   assert.equal(
     reachedUpstream.length,
-    9,
-    `expected 9 upstream-backed outputs (6 successes + 3 post-fetch failures), saw ${reachedUpstream.length}`,
+    12,
+    `expected 12 upstream-backed outputs (7 successes + 5 post-fetch failures), saw ${reachedUpstream.length}`,
   );
   for (const block of reachedUpstream) {
     assert.match(
@@ -239,7 +248,7 @@ test("every tool emits a 2020-12 outputSchema", () => {
   // reject before the handler runs — the bug that made every tool here
   // uncallable from Claude Code. See lib/output-schema.ts.
   const declarations = [...source.matchAll(/outputSchema:\s*([^,\n]+)/g)].map(m => m[1].trim());
-  assert.equal(declarations.length, 6, `expected 6 outputSchema declarations, saw ${declarations.length}`);
+  assert.equal(declarations.length, 7, `expected 7 outputSchema declarations, saw ${declarations.length}`);
   for (const declaration of declarations) {
     assert.match(
       declaration,

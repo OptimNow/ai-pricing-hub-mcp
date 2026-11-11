@@ -9,7 +9,7 @@ keeps what an agent needs in every session and lists the sections below.
 Runtime:      Node, the official MCP SDK, node:http. No framework.
 Language:     TypeScript
 Build:        tsc (dist/server/src/index.js)
-UI:           none. Six tools; each answers with text and structuredContent
+UI:           none. Seven tools; each answers with text and structuredContent
 Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
 Transport:    Streamable HTTP at /mcp, stateless (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
@@ -66,6 +66,9 @@ second host.
 | LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
 | Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
 
+The compute tool served the static array alone until optimtoken became the
+source of truth. Its `openWorldHint` was corrected to `true` at that point.
+
 **Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
 published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
 derived monthly figure. Every response therefore carries a `provenance` object
@@ -82,7 +85,7 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # The 6 tools, createServer(), listen, cache warm-up
+│       ├── index.ts                  # The 7 tools, createServer(), listen, cache warm-up
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
@@ -97,8 +100,10 @@ ai-pricing-hub-mcp/
 │       │   ├── roi-link.ts           # Deep link into the sister AI ROI Calculator
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
-│       │   ├── compute-categories.ts # Compute instance categorization + enrichment
-│       │   └── *.test.ts             # capabilities, compute-rates, data-sources, host-prices, http, llm-business-metrics, output-schema, public-url
+│       │   ├── compute-categories.ts # Instance category, processor, use cases: the site's file, copied whole
+│       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
+│       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
+│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, host-prices, http, llm-business-metrics, output-schema, public-url, self-hosting
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── docs/
@@ -348,7 +353,18 @@ diverged before the switch.
   categories, exclusions, licence prefixes) is a port and only runs when the site
   is unreachable, so its drift is invisible until the day it matters.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
-  inference. Applied locally to the site's rows.
+  inference, applied locally to the site's rows. It is the site's file copied
+  whole (only its two imports differ), with `lib/azure-size-name.ts` holding the
+  one function it needs from the site's `azure-vm-sizes.ts`. It had not been
+  copied since March 2026 while the site rewrote its rules in October (its
+  review finding C6), and nothing compared the two: on 2026-11-11, 826 of the
+  3,555 Linux rows in us-east carried another processor here than on the site
+  (121 of the 211 GPU rows: `g6e` read "NVIDIA L4", it is an L40S; every
+  `m6gd`, `c7gn` and `m5ad` read Intel) and 138 another category (`trn1` read
+  Burstable, `hpc7g` Storage Optimized). Copied again that day at the site's
+  commit `c4a6916`; `check-parity` now compares all three labels over the live
+  compute catalogue. Do not edit the rules here: a fix made in this copy does
+  not reach the site, and the next copy erases it.
 - `lib/host-prices.ts`, first half — whose price the quoted one is
   (`priceProvenance`, the 2% `sameRate` tolerance), when a spread is worth
   saying, the standard rate behind a promotion, and
@@ -403,8 +419,9 @@ Three things keep the two honest:
   both implementations, feeds them the live catalogue and counts where they
   disagree: list and optimized cost over every model x use case, efficiency
   score, badge, openness bucket, the outlier flag against the site's own rule,
-  and the formatters. It exits 1 on any difference and lists the site's row
-  fields this server does not carry. Outside CI because the site's repository
+  the formatters, the per-host price rules, and the category, processor and
+  use cases of every row of the live compute catalogue. It exits 1 on any
+  difference and lists the site's row fields this server does not carry. Outside CI because the site's repository
   is private. **Run it before each release and after any change to the cost
   code.** 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
   scores, 3 badges, 17 openness buckets. After: none.
@@ -582,6 +599,67 @@ the maker's own, spread, promotional listings), dated by
 What the site does not publish, and so this tool cannot say: the hosts between
 the cheapest and the dearest, and therefore whether a given platform (Bedrock,
 Azure, Vertex) sells a model unless it happens to be one of the named offers.
+
+### API or own capacity: `estimate-self-hosting-breakeven` (0.7.0)
+
+The server already held both halves of the question: what a model's API costs
+per request, and what a GPU instance costs per hour. The seventh tool puts them
+on one line. An API bill grows with every request and a rented instance costs
+the same busy or idle, so there is a monthly volume at which the two are equal:
+`fleet monthly cost / API cost per request`. Below it the API is cheaper, above
+it the fleet is.
+
+**The fleet** is `instanceCount` instances billed 730 hours a month (the compute
+catalogue's own month: its `onDemandMonthly` is the hourly rate times 730), at
+every rate the instance lists: on demand, spot, and the 1- and 3-year
+commitments, each tagged `static` or `interruptible` where that applies. A
+caller with hardware the catalogue does not list (a GPU cloud, a quoted rate,
+owned hardware amortised per hour) passes `hourlyRate` instead and gets one
+option. Giving both, or neither, is refused.
+
+**The API** is three baselines: the quoted list price, that price with the
+caching and batch levers the workload allows (`optimizedUseCaseCost`, so the
+conditions of decision 3f apply), and the cheapest host when the per-host data
+knows one below the quoted price. Comparing a fleet with the list price alone
+flatters the fleet; the cheapest host of an open model is often several times
+below the quoted rate, and the break-even moves out by the same factor.
+
+**What it refuses to assume**, and why the answer is shaped the way it is:
+
+- **A throughput.** Tokens per second depend on the model, its quantization, the
+  serving stack and the batch size, and this server holds no measurement of any
+  of them. A default table would put an invented number at the centre of an
+  answer callers are told to quote. Without `outputTokensPerSecond` each
+  break-even states the output tokens per second the fleet would have to
+  generate around the clock to reach it, which a reader can hold against a
+  benchmark; the caller's own volume states the same, and the comparison at
+  that volume is worded "if the fleet can serve it". With a measured
+  throughput the tool gives the fleet's capacity, each break-even as a share
+  of it (`utilizationPct`, `reachable`), the cost of one request flat out, and
+  the instances the caller's volume takes. A fleet too small for the volume
+  says so and leaves the comparison at that volume out of the text.
+- **An operations cost.** Engineer time usually outweighs the hardware rent
+  (OptimNow's own reference on self-hosted inference makes this its main
+  point). `monthlyOperationsCost` is added once to the fleet's rent when
+  given; when it is not, the text says the figures are hardware rent only.
+- **That the instance can hold the model.** The catalogue carries no GPU count
+  or memory. The text says so on every answer.
+
+It also reports whether the model's weights are published (`selfHostable`, from
+`opennessOf`). A proprietary model is still costed, because the question "what
+would our Claude bill buy in GPUs" is a real one, but the text says the fleet
+figures only apply if the workload can move to an open model.
+
+**Not a port.** The site has no break-even page, so `lib/self-hosting.ts` is the
+one calculation `check-parity` does not cover. Its inputs are ported
+(`useCaseCost`, `optimizedUseCaseCost`) or read (`hostPricing`, the instance
+rates); the arithmetic on top is held by `lib/self-hosting.test.ts`. If the
+site gains a break-even calculator, port it here rather than keep two.
+
+**Two provenances.** The answer draws on both catalogues, so `structuredContent`
+carries `provenance` (API prices) and `computeProvenance` (instance rates). The
+compute notice lists every provider's static columns; it leads the text only on
+a fallback tier or when one of them belongs to the instance's own provider.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

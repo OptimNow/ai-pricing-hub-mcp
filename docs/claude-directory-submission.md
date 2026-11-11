@@ -93,9 +93,9 @@ documentation as it read that day:
 | Requirement | Status |
 |---|---|
 | Remote server, `https://`, Streamable HTTP | `https://optimtoken-mcp.optimnow.io/mcp` on Fly.io |
-| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All six carry `title`, `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` (`compare-model-hosts` was added in 0.6.0) |
-| Tool names at most 64 characters | Longest is 27 |
-| Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the six tools stays |
+| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All seven carry `title`, `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` (`compare-model-hosts` was added in 0.6.0, `estimate-self-hosting-breakeven` in 0.7.0) |
+| Tool names at most 64 characters | Longest is 31 (`estimate-self-hosting-breakeven`) |
+| Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the seven tools stays |
 | Authentication | `none`; allowed for public data, and the portal has a "No authentication" option |
 | Validation errors are actionable | A bad `limit` returns `-32602` naming the field; an unknown model name says so |
 | Responses reasonably sized | Largest observed about 43,000 characters, roughly 11,000 tokens (`compare-llm-models` at `limit: 50`, measured on the 0.6.0 build; `compare-compute-pricing` at `limit: 50` is about 36,000 characters now that each row prints its commitment rates), against a ceiling of about 150,000 characters in claude.ai and 25,000 tokens in Claude Code |
@@ -137,6 +137,7 @@ policy asks a server to be "frugal with their use of tokens".
   | `estimate-llm-cost` | "About 800 input tokens and 200 output, four million requests a month, 60% of the prompt cached: what does that cost on Claude Opus 5.5?" |
   | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, and what a 3-year commitment saves on each." |
   | `compare-model-hosts` | "Who sells DeepSeek V4.1 Flash, and what would a coding workload cost at the cheapest host?" |
+  | `estimate-self-hosting-breakeven` | "At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B on support tickets?" |
 - **URLs.** Documentation `https://optimtoken.optimnow.io/mcp`, privacy
   `https://optimtoken.optimnow.io/privacy`, support
   `https://www.optimnow.io/contact`, company `https://optimnow.io`.
@@ -151,7 +152,7 @@ Progress saves in the browser between steps.
 1. **Connection.** Paste `https://optimtoken-mcp.optimnow.io/mcp`, or pick
    the custom connector already on the account. Universal URL: every user
    connects to the same one.
-2. **Tools.** Synced from the server. All six should land in the read-only
+2. **Tools.** Synced from the server. All seven should land in the read-only
    group with no "missing title or annotation" flag. If one is flagged, fix
    the server before continuing; the portal reads the live tool list.
 3. **Listing.** Name, one-liner, description, categories, documentation URL,

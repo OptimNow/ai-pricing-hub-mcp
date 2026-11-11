@@ -3,7 +3,7 @@
 **Project:** AI Pricing Hub MCP
 **Stack:** Node and the official MCP SDK (`@modelcontextprotocol/sdk`). No framework, no UI.
 **Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
-**Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp, since 2026-10-07)
+**Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp). A push to `master` deploys it once CI passes (`.github/workflows/ci.yml`), so merging a pull request is a production release.
 
 ---
 
@@ -13,9 +13,9 @@ Do not add `Co-Authored-By`, `Claude-Session` or "Generated with Claude Code" li
 
 ## What This Project Does
 
-A remote MCP (Model Context Protocol) server that gives an AI assistant six read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, and cloud compute pricing. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
+A remote MCP (Model Context Protocol) server that gives an AI assistant seven read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, cloud compute pricing, and the break-even between paying an API and renting capacity. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
 
-**It is not an MCP App.** Until 0.5.0 each tool also rendered a React widget through the Skybridge framework. Both were removed on 2026-11-11, on the owner's decision: the server is tools only. Do not add a UI layer back, a `ui://` resource, or a framework around the SDK, unless that decision is reopened.
+**It is not an MCP App.** The server is tools only, on the owner's decision: the React widgets and the Skybridge framework went in 0.5.0 (see Architecture in `docs/DESIGN.md`). Do not add a UI layer back, a `ui://` resource, or a framework around the SDK, unless that decision is reopened.
 
 **Origin:** Business logic copied from the standalone web app cloud-sparkle-compare, which has since been renamed to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (private). The local checkout is still the `cloud-sparkle-compare` folder, and this file uses the old name throughout. It is deployed at `optimtoken.optimnow.io`, which is what this app reads its pricing from. The original app remains untouched.
 
@@ -50,11 +50,16 @@ A remote MCP (Model Context Protocol) server that gives an AI assistant six read
 - **Output:** Per model: the quoted price and whose rate it is (`priceSource`: vendor / reference / adjusted / unknown), host count, the cheapest, dearest and maker's own listing, the spread, promotional listings, the builds declared (quantization), each offer costed for the workload and compared with the quoted cost. Plus a `resolution` entry per name.
 - **Data Source:** `hostPricing` on the rows of `/api/llm-models` (tier 1 only, dated by `provenance.hostPricingAsOf`). Only the cheapest, dearest, maker's and promotional listings exist there: the hosts in between are not published.
 
+### Tool 7: `estimate-self-hosting-breakeven`
+- **Input:** `model` (one name) + a fleet: `instanceType` from the compute catalogue (with `provider`, `region`) OR `hourlyRate` of the caller's own; optional `instanceCount`, `outputTokensPerSecond` (measured, per instance), `monthlyOperationsCost`; a workload (`useCasePreset`, default supportTicket, or custom tokens with `cacheHitRate` / `batchEligible`) and `monthlyVolume`.
+- **Output:** The fleet's monthly cost at every rate the instance lists (on demand, spot, commitments), and for each the volume at which it costs the same as the API at list price, at the optimized price and at the cheapest host known: requests/month, tokens/day, and the output tokens per second that volume asks of the fleet. With a throughput: the fleet's capacity, each break-even as a share of it and whether it is out of reach. Plus the difference at the caller's volume, and whether the model's weights are published at all.
+- **Data Source:** both catalogues (`provenance` for the API prices, `computeProvenance` for the instance rates). The arithmetic is local and has no counterpart on the site.
+
 ---
 
 ## Key Design Decisions
 
-1. **One MCP server per request.** Tools are declared once with `tool()` in `index.ts` and registered on a new `McpServer` for every HTTP request (`createServer`, called by `lib/http.ts`). The SDK refuses a second `connect()` on a connected server, so a shared instance answers every request that overlaps another with HTTP 500: under Skybridge, eight concurrent calls behind one slow upstream fetch gave seven 500s in production (2026-11-11). Assistants call tools in parallel. `lib/http.test.ts` holds this with eight concurrent requests; do not hoist the server to module scope.
+1. **One MCP server per request.** Tools are declared once with `tool()` in `index.ts` and registered on a new `McpServer` for every HTTP request (`createServer`, called by `lib/http.ts`). The SDK refuses a second `connect()` on a connected server, so a shared instance answers every request that overlaps another with HTTP 500, and assistants call tools in parallel (the production incident is in `docs/DESIGN.md`, Architecture). `lib/http.test.ts` holds this with eight concurrent requests; do not hoist the server to module scope.
 1b. **The text block is what the model reads.** With no widget, `content` is the answer and `structuredContent` is the same figures for a host that uses them. A fact that exists only in `structuredContent` may never reach the reader, so anything a FinOps answer depends on (a caveat, a label, which lever applied) goes in the text too.
 2. **optimtoken.optimnow.io is the source of truth** for both LLM and compute pricing. Direct OpenRouter is kept as a working second tier for LLM models only, never as the preferred one.
 3. **Static fallback** in `data/pricing-data.ts` ensures the app works without network access
@@ -72,12 +77,13 @@ sentence. A bare 0% saving reads as a bug; "this model publishes no batch rate"
 reads as an answer.
 4. **ELO scores** from Chatbot Arena are merged with pricing data for quality ranking
 5. **Business metrics** (use-case profiles, efficiency scoring) from `llm-business-metrics.ts` add FinOps context
-6. **Compute pricing** comes from `GET /api/pricing` (~6,000 instances across 7 providers), with the 137-row static array in `data/pricing-data.ts` as fallback only. Category, processor and use-case enrichment is applied locally to whichever rows arrive. It stopped being a static-only tool when optimtoken became the source of truth, and `openWorldHint` was corrected to `true` to match.
+6. **Compute pricing** comes from `GET /api/pricing` (~6,000 instances across 7 providers), with the 137-row static array in `data/pricing-data.ts` as fallback only. Category, processor and use-case enrichment is applied locally to whichever rows arrive. The tool reads a live source, so its `openWorldHint` is `true`.
 7. **Price tier and openness are separate axes.** `category` is Frontier / Mid-tier / Budget / Image and answers "what does it cost". `openness` (derived from the licence in `openness.ts`) answers "whose hardware can run it". They used to be folded together as an "Open Weights" category, which forced every open model to give up one label to earn the other — do not reintroduce it.
 8. **The FinOps Friendly badge gates on percentiles, not fixed numbers:** top 40% on ELO, top 30% on efficiency, cheapest 70% on list price, a stable release, and a price the site does not flag as an outlier listing. Ties share a rank. The tool also returns what those percentiles land on today (`finopsBadge.minElo`, `finopsBadge.maxBlendedPrice`) so the badge is auditable.
 9. **A price the site flags is labelled, never hidden.** `promotionalListing` (a temporary discounted rate) and `outlierListing` (one host's rate, input near free) arrive on the site's rows and are repeated in `structuredContent` and in every text block, with one line saying what the label means. A budget built on a promotional price rises when the promotion ends.
 9b. **Host prices travel beside the model rows, never on them.** `fetchLLMModels()` returns `hostPricing` as a map keyed by `hostPricingKey()`. Every tool spreads a model row into `structuredContent`, and the output schemas refuse undeclared properties, so a field added to `LLMModel` reaches all of them at once and a strict host rejects them. A model with no entry is unknown, never "sold by one host". The maker's row is not quoted for the ids in `MAKER_ROW_NOT_STANDARD_RATE`, but only while that row differs from the quoted price (`makerOffer`).
-10. **The cost, score, badge and host-price logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogue and must report no difference before a release. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
+10. **The cost, score, badge, host-price and instance-categorisation logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogues and must report no difference before a release. `lib/compute-categories.ts` is the site's file copied whole: change the rules there, then copy again. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
+11. **The break-even assumes nothing it cannot read.** `lib/self-hosting.ts` is the one calculation that is not a port. It never supplies a throughput, an operations cost or a GPU memory: this server holds no measurement of any of them, and a default would be an invented fact in an answer the caller is told to quote. Without a throughput it states the one each break-even requires, and says a comparison at the caller's volume holds only if the fleet can serve it. Do not add default tokens-per-second tables or a default staffing cost.
 
 ---
 
@@ -85,13 +91,12 @@ reads as an answer.
 
 - `@modelcontextprotocol/sdk` — the MCP server and its Streamable HTTP transport. The only runtime dependency besides `zod`: the HTTP side is `node:http` in `lib/http.ts`.
 - `zod` — input and output schemas
-- `typescript`, `tsx`, `@types/node` (devDependencies) — `npm run build` is `tsc`, `npm test` runs `node --test` through `tsx`, `npm run dev` is `tsx watch`
+- `typescript`, `tsx`, `@types/node` (devDependencies) — `npm run build` is `tsc`, `npm test` runs `node --test` through `tsx`, `npm run dev` is `tsx watch`. `tsx` does not type-check: run `npm run typecheck` as well, CI does.
 
 ## Where the rest lives
 
-`docs/DESIGN.md` holds the other sections of this file, moved verbatim on 2026-11-08. It is not
-loaded automatically: read the section your task touches. A reference to "CLAUDE.md, <section>"
-means that section in `docs/DESIGN.md`.
+`docs/DESIGN.md` holds the reference sections, the history and the reasoning. It is not
+loaded automatically: read the section your task touches.
 
 Sections in `docs/DESIGN.md`:
 
