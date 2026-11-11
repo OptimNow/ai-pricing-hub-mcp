@@ -66,6 +66,9 @@ second host.
 | LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
 | Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
 
+The compute tool served the static array alone until optimtoken became the
+source of truth. Its `openWorldHint` was corrected to `true` at that point.
+
 **Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
 published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
 derived monthly figure. Every response therefore carries a `provenance` object
