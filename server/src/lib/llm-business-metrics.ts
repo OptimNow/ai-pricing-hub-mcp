@@ -595,3 +595,70 @@ export function enrichModels(
     } as EnrichedLLMModel;
   });
 }
+
+// ── Ordering ──
+
+/** The orders compare-llm-models can return its table in. Each reads best
+ *  first, so there is no direction argument: quality and value descend, costs
+ *  and prices ascend. */
+export const LLM_SORT_KEYS = ["elo", "efficiency", "cost", "optimizedCost", "inputPrice", "outputPrice"] as const;
+export type LLMSortKey = (typeof LLM_SORT_KEYS)[number];
+
+/** The order the catalogue arrives in (`sortModels` in llm-models.ts), and what
+ *  the tool returned before it took a `sortBy`. */
+export const DEFAULT_LLM_SORT: LLMSortKey = "elo";
+
+/** A figure that is missing sorts last, whatever the direction. For a price
+ *  that includes zero: a non-positive price is a side with no published rate,
+ *  not the cheapest one, the same reading `computeScoreComponents` takes. */
+const priced = (value: number): number | null => (Number.isFinite(value) && value > 0 ? value : null);
+
+const SORT_SPECS: Record<LLMSortKey, { value: (m: EnrichedLLMModel) => number | null; descending: boolean }> = {
+  elo: { value: (m) => m.eloScore || null, descending: true },
+  efficiency: { value: (m) => m.efficiencyScore, descending: true },
+  cost: { value: (m) => priced(m.useCaseCost), descending: false },
+  optimizedCost: { value: (m) => priced(m.optimizedUseCaseCost), descending: false },
+  inputPrice: { value: (m) => priced(m.inputPricePer1M), descending: false },
+  outputPrice: { value: (m) => priced(m.outputPricePer1M), descending: false },
+};
+
+/**
+ * Order an enriched table by one of `LLM_SORT_KEYS`, best first.
+ *
+ * Returns a new array. The sort is stable, so models tied on the sorted figure,
+ * and models missing it, keep the order they came in: handed the catalogue as
+ * `fetchLLMModels` returns it, that is Arena ELO descending, and `elo` gives
+ * the input back unchanged. Costs are compared as raw floats, before the
+ * rounding applied at serialisation, which would manufacture ties.
+ */
+export function sortEnrichedModels<T extends EnrichedLLMModel>(
+  models: readonly T[],
+  sortBy: LLMSortKey = DEFAULT_LLM_SORT,
+): T[] {
+  const { value, descending } = SORT_SPECS[sortBy];
+  return [...models].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    if (va === null || vb === null) return va === vb ? 0 : va === null ? 1 : -1;
+    return descending ? vb - va : va - vb;
+  });
+}
+
+/** How an order reads after "sorted by", for the text block. The two cost
+ *  orders depend on the workload, so they name it. */
+export function describeSort(sortBy: LLMSortKey, useCaseLabel: string): string {
+  switch (sortBy) {
+    case "elo":
+      return "Arena ELO, highest first (models with no score last)";
+    case "efficiency":
+      return "efficiency score, highest first (models with no score last)";
+    case "cost":
+      return `${useCaseLabel} cost per request at list price, cheapest first`;
+    case "optimizedCost":
+      return `${useCaseLabel} optimized cost per request, cheapest first`;
+    case "inputPrice":
+      return "input price per 1M tokens, cheapest first";
+    case "outputPrice":
+      return "output price per 1M tokens, cheapest first";
+  }
+}

@@ -14,10 +14,14 @@
  *    hit for a cold miss and return less data.
  *  - Prices are per-column, not per-row: `meta.priceTypes` says which of a
  *    provider's six price columns are live, which are static constants, and
- *    which are unavailable. AWS Savings Plans and GCP CUDs are `static` —
- *    us-east-1 numbers scaled by a region multiplier. Serving those next to a
- *    live on-demand rate without saying which is which produces a FinOps answer
- *    nobody can audit, so that distinction is carried through to the caller.
+ *    which are unavailable. GCP CUDs are `static` (us-east-1 numbers scaled by
+ *    a region multiplier), and so were AWS Savings Plans until the site's
+ *    schema 1.3: those now come from AWS's published price files, read weekly
+ *    and dated by `meta.awsSavingsPlansAsOf`, and fall back to the scaled
+ *    estimate when a region's file could not be read. Serving a static figure
+ *    next to a live on-demand rate without saying which is which produces a
+ *    FinOps answer nobody can audit, so that distinction, and that date, are
+ *    carried through to the caller.
  */
 
 import { computeInstances, computeDataLastUpdated } from "../data/pricing-data.js";
@@ -195,6 +199,11 @@ export interface ComputeProvenance {
   staticPriceColumns: string[];
   /** Flattened "Provider.column" list of every column upstream cannot supply. */
   unavailablePriceColumns: string[];
+  /** AWS's own publication date of the Savings Plan price files behind every
+   *  AWS savingsPlan1yr/3yr in the response. The site reads them weekly, so
+   *  those columns are as fresh as this date, not as `upstreamTimestamp`.
+   *  Absent when upstream could not read the region's files. */
+  awsSavingsPlansAsOf?: string;
   /** Non-fatal upstream failures, e.g. a provider API that 404'd this run. */
   upstreamErrors?: string[];
   /**
@@ -246,6 +255,7 @@ interface SitePricingResponse {
     sources?: Record<string, string>;
     sourceRegions?: Record<string, string>;
     priceTypes?: Record<string, Record<string, string>>;
+    awsSavingsPlansAsOf?: unknown;
     total?: number;
     catalogTotal?: number;
     errors?: string[];
@@ -385,6 +395,8 @@ async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<
       priceTypes: meta.priceTypes,
       staticPriceColumns,
       unavailablePriceColumns,
+      awsSavingsPlansAsOf:
+        typeof meta.awsSavingsPlansAsOf === "string" && meta.awsSavingsPlansAsOf ? meta.awsSavingsPlansAsOf : undefined,
       upstreamErrors: Array.isArray(meta.errors) && meta.errors.length ? meta.errors : undefined,
       notice,
     },

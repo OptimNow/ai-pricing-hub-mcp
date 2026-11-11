@@ -3,7 +3,21 @@ import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
+import { fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
+import {
+  declaredBuilds,
+  describeOffer,
+  describeVsQuoted,
+  hasNoteworthySpread,
+  hostFootnote,
+  makerOffer,
+  matchesOffer,
+  priceProvenance,
+  provenanceExplanation,
+  standardRateOf,
+  vsQuotedPct,
+} from "./lib/host-prices.js";
+import type { HostOffer } from "./lib/host-prices.js";
 import type { ResolutionStatus } from "./lib/llm-models.js";
 import type { LLMModel, ComputeInstance } from "./data/pricing-data.js";
 import { LLM_CAPABILITIES } from "./data/pricing-data.js";
@@ -12,6 +26,10 @@ import {
   USE_CASE_PROFILES,
   VOLUME_PRESETS,
   enrichModels,
+  sortEnrichedModels,
+  describeSort,
+  LLM_SORT_KEYS,
+  DEFAULT_LLM_SORT,
   summarizeFinOpsBadge,
   useCaseCost,
   optimizedUseCaseCost,
@@ -19,13 +37,14 @@ import {
   formatMonthlyBudget,
   roundPerRequestCost,
   roundMonthlyCost,
+  roundPricePer1M,
   roundPricePer1MOrNull,
   optimizationLevers,
   savingsPct,
   leverSummary,
   NO_ASSUMPTIONS_NOTE,
 } from "./lib/llm-business-metrics.js";
-import { OPENNESS_VALUES } from "./lib/openness.js";
+import { OPENNESS_VALUES, opennessOf } from "./lib/openness.js";
 import { createHttpServer } from "./lib/http.js";
 import type {
   UseCaseProfile,
@@ -38,6 +57,7 @@ import { roiCalculatorUrl } from "./lib/roi-link.js";
 import { enrichInstances } from "./lib/compute-categories.js";
 import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
+import { describeRates, rateSavings, ratesLegend } from "./lib/compute-rates.js";
 import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
@@ -138,6 +158,9 @@ const llmProvenanceSchema = z.object({
   upstreamSchemaVersion: z.string().optional(),
   catalogTotal: z.number().optional(),
   eloAsOf: z.string(),
+  // The day the site last read each model's hosts: the date of the per-host
+  // prices, and of the outlier and promotional flags decided from them.
+  hostPricingAsOf: z.string().optional(),
   dataAsOf: z.string().optional(),
   notice: z.string().optional(),
 });
@@ -159,6 +182,9 @@ const computeProvenanceSchema = z.object({
   priceTypes: z.record(z.string(), z.record(z.string(), z.string())).optional(),
   staticPriceColumns: z.array(z.string()),
   unavailablePriceColumns: z.array(z.string()),
+  // AWS's publication date of the Savings Plan price files: the date of the
+  // AWS savingsPlan1yr/3yr columns, which upstream reads weekly.
+  awsSavingsPlansAsOf: z.string().optional(),
   upstreamErrors: z.array(z.string()).optional(),
   // Tier-2 diagnostics. `fallbackReason` says why tier 1 was missed, classified
   // and timed; `unappliedFilters` names the arguments this tier accepted and
@@ -179,6 +205,8 @@ const compareModelsOutputSchema = {
   source: z.string(),
   matchingCount: z.number(),
   catalogSize: z.number(),
+  // The order `models` is in, and so what "the first N" of a longer match means.
+  sortedBy: z.enum(LLM_SORT_KEYS),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
   // What the badge's percentile gates land on for this catalogue, so "top 40%"
@@ -247,6 +275,14 @@ const computePricingOutputSchema = {
       savingsPlan3yr: z.number().nullable(),
       reserved1yr: z.number().nullable(),
       reserved3yr: z.number().nullable(),
+      // Whole-percent saving of each rate against this row's on-demand rate.
+      // Null when the rate is missing or is not below on-demand: there is
+      // then no saving to state, and it is never a negative number.
+      spotSavingsPct: z.number().nullable(),
+      savingsPlan1yrSavingsPct: z.number().nullable(),
+      savingsPlan3yrSavingsPct: z.number().nullable(),
+      reserved1yrSavingsPct: z.number().nullable(),
+      reserved3yrSavingsPct: z.number().nullable(),
     }),
   ),
   matchingCount: z.number(),
@@ -287,6 +323,76 @@ const useCaseCostSchema = z.object({
 const sideBySideOutputSchema = {
   models: z.array(z.object({ ...modelShape, useCaseCosts: z.array(useCaseCostSchema) })),
   resolution: z.array(resolutionSchema),
+  volume: z.number(),
+  volumeLabel: z.string(),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  provenance: llmProvenanceSchema.optional(),
+  error: z.string().optional(),
+};
+
+/** One host's listing for a model, costed for the chosen workload. */
+const hostOfferSchema = z.object({
+  host: z.string(),
+  inputPricePer1M: z.number(),
+  outputPricePer1M: z.number(),
+  // The build this host serves, when it declares one (fp8, int4...). A
+  // quantized build is not the same product as the full-precision one.
+  quantization: z.string().optional(),
+  // On a promotional listing only: the share taken off the host's standard
+  // rate (already applied to the two prices above), and that standard rate.
+  discount: z.number().optional(),
+  standardInputPricePer1M: z.number().optional(),
+  standardOutputPricePer1M: z.number().optional(),
+  // List-price cost of the workload at this host's rate.
+  perRequest: z.number(),
+  monthly: z.number(),
+  // Whole-percent difference against the cost at the quoted price: negative
+  // is cheaper than quoted. Null when there is no quoted cost to compare with.
+  vsQuotedPct: z.number().nullable(),
+});
+
+const modelHostsSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  eloScore: z.number().optional(),
+  openness: z.string(),
+  // The price every other tool here quotes for this model, and whose rate it
+  // is: the maker's own ("vendor"), another host's ("reference"), a figure no
+  // host currently publishes ("adjusted"), or "unknown" without host data.
+  quoted: z.object({
+    inputPricePer1M: z.number(),
+    outputPricePer1M: z.number(),
+    perRequest: z.number(),
+    monthly: z.number(),
+    priceSource: z.enum(["vendor", "reference", "adjusted", "unknown"]),
+    outlierListing: z.boolean().optional(),
+    promotionalListing: z.boolean().optional(),
+  }),
+  // Null means no host data for this model: unknown, never "one host".
+  hostCount: z.number().nullable(),
+  cheapest: hostOfferSchema.nullable(),
+  dearest: hostOfferSchema.nullable(),
+  // The model maker's own endpoint. Null when it sells none, when there is no
+  // host data, or when `vendorRowNotStandardRate` is true.
+  vendor: hostOfferSchema.nullable(),
+  // True when the row upstream lists under the maker's name is a discount
+  // tier rather than its standard rate, so it is not quoted as the maker's.
+  vendorRowNotStandardRate: z.boolean(),
+  // Dearest over cheapest on the 30/70 blended price. Null with no host data
+  // or when the cheapest listing is free.
+  spread: z.number().nullable(),
+  noteworthySpread: z.boolean(),
+  // The builds the offers above declare. Two or more: not like-for-like.
+  quantizations: z.array(z.string()),
+  promotions: z.array(hostOfferSchema),
+});
+
+const modelHostsOutputSchema = {
+  models: z.array(modelHostsSchema),
+  resolution: z.array(resolutionSchema),
+  useCaseLabel: z.string(),
   volume: z.number(),
   volumeLabel: z.string(),
   source: z.string(),
@@ -392,6 +498,54 @@ function modelKey(m: { provider: string; model: string }): string {
   return `${m.provider}/${m.model}`;
 }
 
+/** Resolve each requested name against the catalogue: one pass per name,
+ *  keeping the caller's order and recording every miss. Dropping a name
+ *  silently is the failure mode to avoid. Shared by the tools that take a
+ *  list of free-text model names. */
+function resolveNames(
+  allModels: LLMModel[],
+  requested: string[],
+): { selected: LLMModel[]; resolution: ResolutionEntry[] } {
+  const seen = new Set<string>();
+  const resolution: ResolutionEntry[] = [];
+  const selected: LLMModel[] = [];
+
+  for (const query of requested) {
+    const r = resolveModel(allModels, query);
+    if (!r.matched) {
+      resolution.push({ query, status: "not-found", alternatives: [], totalMatches: 0 });
+      continue;
+    }
+    const resolved = `${r.matched.provider} ${r.matched.model}`;
+    if (seen.has(modelKey(r.matched))) {
+      resolution.push({ query, status: "duplicate", resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
+      continue;
+    }
+    seen.add(modelKey(r.matched));
+    selected.push(r.matched);
+    resolution.push({ query, status: r.status, resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
+  }
+
+  return { selected, resolution };
+}
+
+/** One sentence per requested name. `slot` is what a matched name earns in the
+ *  tool's answer (a "column", an "entry"), so a miss can say it earned none. */
+function describeResolution(r: ResolutionEntry, slot: string): string {
+  switch (r.status) {
+    case "not-found": return `"${r.query}" matched no model — no ${slot} for it.`;
+    case "duplicate": return `"${r.query}" resolved to ${r.resolved}, already selected by an earlier name — no extra ${slot}.`;
+    case "ambiguous": {
+      const undisclosed = r.totalMatches - 1 - r.alternatives.length;
+      return `"${r.query}" matched ${r.totalMatches} models; used ${r.resolved}` +
+        (r.alternatives.length > 0
+          ? ` (also matched: ${r.alternatives.join(", ")}${undisclosed > 0 ? `, and ${undisclosed} more` : ""})`
+          : "") + ".";
+    }
+    default: return `"${r.query}" → ${r.resolved}.`;
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -439,7 +593,10 @@ tool(
     description:
       "Browse and filter the whole LLM catalogue and get back a ranked table: price, quality (ELO), " +
       "efficiency and capabilities. Use this when the user wants to SEE THE FIELD — 'show me models " +
-      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300'. " +
+      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300', " +
+      "'the ten cheapest models for a coding task'. " +
+      "The table is ordered by Arena ELO unless `sortBy` asks for efficiency, cost or price, and `limit` " +
+      "keeps the first rows of that order. " +
       "For a single PICK under a budget use recommend-llm-model; to weigh 2-4 NAMED models against " +
       "each other use compare-models-side-by-side. " +
       "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
@@ -458,11 +615,13 @@ tool(
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
-      limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
+      sortBy: z.enum(LLM_SORT_KEYS).optional().describe("Order of the table, best first. elo: Arena ELO, highest first (default). efficiency: value score out of 100, highest first. cost: list-price cost per request for the use case, cheapest first. optimizedCost: the same after caching and batch. inputPrice / outputPrice: price per 1M tokens, cheapest first. A model missing the sorted figure comes last, and ties keep the ELO order. Cheapest first says nothing about quality: read the ELO beside each row."),
+      limit: z.number().min(1).max(50).optional().describe("Max models to return, counted after sorting (default: 15)"),
     },
     outputSchema: outputSchema(compareModelsOutputSchema),
   },
-  async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, limit }) => {
+  async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, sortBy, limit }) => {
+    const sortedBy = sortBy ?? DEFAULT_LLM_SORT;
     const emptyOutput = {
       models: [],
       useCaseLabel: "",
@@ -470,6 +629,7 @@ tool(
       source: "error",
       matchingCount: 0,
       catalogSize: 0,
+      sortedBy,
       eloAsOf: "",
     };
 
@@ -496,8 +656,10 @@ tool(
         provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo,
       });
 
+      // Sorted after filtering and before the cut, on the unrounded figures:
+      // `limit` keeps the first rows of the order the caller asked for.
       const maxCount = limit || 15;
-      const results = filtered.slice(0, maxCount);
+      const results = sortEnrichedModels(filtered, sortedBy).slice(0, maxCount);
 
       const volumeLabel = VOLUME_PRESETS.find(p => p.key === vol)?.label || vol;
       const useCaseLabel = USE_CASE_PROFILES[ucKey].label;
@@ -508,7 +670,10 @@ tool(
         `${m.category}, ${m.openness}` +
         `, Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M` +
         listingTags(m) +
-        (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
+        // Both are printed even when missing: in a table sorted by price, a row
+        // with no ELO has to say so, or it reads as a ranked model.
+        `, ELO: ${m.eloScore || "n/a"}` +
+        `, Efficiency: ${m.efficiencyScore === null ? "n/a" : `${m.efficiencyScore}/100`}` +
         `, ${useCaseLabel} cost: ${formatMicroCost(m.useCaseCost)}/req` +
         ` (optimized: ${formatMicroCost(m.optimizedUseCaseCost)}/req)` +
         `, Monthly (${volumeLabel}): ${formatMonthlyBudget(m.monthlyBudget)}` +
@@ -533,6 +698,7 @@ tool(
           source,
           matchingCount: filtered.length,
           catalogSize: allModels.length,
+          sortedBy,
           eloAsOf,
           dataAsOf,
           provenance,
@@ -552,7 +718,8 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `${filtered.length} of ${allModels.length} models match (showing top ${results.length}). ` +
+              `${filtered.length} of ${allModels.length} models match; showing the first ${results.length}, ` +
+              `sorted by ${describeSort(sortedBy, useCaseLabel)}. ` +
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
               `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
@@ -860,42 +1027,8 @@ tool(
         };
       }
 
-      // One pass per requested name, keeping the caller's order and recording
-      // every miss: dropping a column silently is the failure mode to avoid.
-      const seen = new Set<string>();
-      const resolution: ResolutionEntry[] = [];
-      const selected: LLMModel[] = [];
-
-      for (const query of requested) {
-        const r = resolveModel(allModels, query);
-        if (!r.matched) {
-          resolution.push({ query, status: "not-found", alternatives: [], totalMatches: 0 });
-          continue;
-        }
-        const resolved = `${r.matched.provider} ${r.matched.model}`;
-        if (seen.has(modelKey(r.matched))) {
-          resolution.push({ query, status: "duplicate", resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
-          continue;
-        }
-        seen.add(modelKey(r.matched));
-        selected.push(r.matched);
-        resolution.push({ query, status: r.status, resolved, alternatives: r.alternatives, totalMatches: r.totalMatches });
-      }
-
-      const describe = (r: ResolutionEntry): string => {
-        switch (r.status) {
-          case "not-found": return `"${r.query}" matched no model — no column for it.`;
-          case "duplicate": return `"${r.query}" resolved to ${r.resolved}, already selected by an earlier name — no extra column.`;
-          case "ambiguous": {
-            const undisclosed = r.totalMatches - 1 - r.alternatives.length;
-            return `"${r.query}" matched ${r.totalMatches} models; used ${r.resolved}` +
-              (r.alternatives.length > 0
-                ? ` (also matched: ${r.alternatives.join(", ")}${undisclosed > 0 ? `, and ${undisclosed} more` : ""})`
-                : "") + ".";
-          }
-          default: return `"${r.query}" → ${r.resolved}.`;
-        }
-      };
+      const { selected, resolution } = resolveNames(allModels, requested);
+      const describe = (r: ResolutionEntry): string => describeResolution(r, "column");
 
       if (selected.length < 2) {
         const message =
@@ -1280,7 +1413,10 @@ tool(
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
       "Filter by region, provider, vCPUs, memory, category, processor, or use case. " +
-      "All prices are Linux on-demand list prices in USD. " +
+      "Use this for 'the cheapest 8 vCPU / 32 GiB instance in Europe', and for what a commitment saves: " +
+      "each row gives the Linux list price in USD per hour on demand, on spot, and under a 1-year and " +
+      "3-year commitment (savings plan, Google CUD, reservation) as an effective hourly rate, each with " +
+      "its saving against that row's on-demand rate. A row with no commitment rate says so. " +
       "Not every price column is live: `provenance.priceTypes` says which of each provider's price " +
       "columns come from a live API, which are static constants, and which are unavailable, and " +
       "`provenance.staticPriceColumns` lists the non-live ones outright; a savings-plan or reserved " +
@@ -1357,18 +1493,19 @@ tool(
             (unapplied.length ? ` Filters accepted but NOT applied: ${unapplied.join(", ")}.` : "")
           : "";
 
-      // Build text summary
+      // Build text summary. Every rate the row carries is printed, with its
+      // saving against on-demand: the commitment rates used to exist in
+      // structuredContent only, where the reader of the text never saw them.
       const lines = results.map((inst, i) =>
         `${i + 1}. ${inst.provider} ${inst.instanceType} — ` +
         `${inst.vCPUs} vCPUs, ${inst.memory} GiB, ${inst.processor}, ` +
-        `$${inst.onDemandHourly?.toFixed(4)}/hr ($${inst.onDemandMonthly?.toFixed(2)}/mo)` +
-        (inst.spot ? `, Spot: $${inst.spot.toFixed(4)}/hr` : "") +
+        describeRates(inst, provenance.priceTypes) +
         ` [${inst.category}]`
       );
 
       return {
         structuredContent: {
-          instances: results,
+          instances: results.map(inst => ({ ...inst, ...rateSavings(inst) })),
           matchingCount: filtered.length,
           catalogSize: enriched.length,
           source,
@@ -1384,7 +1521,11 @@ tool(
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
                 : "") +
               `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
-              `Linux on-demand list prices.${subsetCaveat}\n\n` + lines.join("\n"),
+              `Linux list prices in USD per hour. Spot and commitment rates show their saving against the ` +
+              `same row's on-demand rate; commitment rates are effective hourly, no upfront where the ` +
+              `provider offers it (CUD is Google's committed use discount).${subsetCaveat}\n\n` +
+              lines.join("\n") +
+              ratesLegend(results, provenance.priceTypes, provenance.awsSavingsPlansAsOf),
           },
         ],
         isError: false,
@@ -1395,6 +1536,269 @@ tool(
       return {
         structuredContent: { ...emptyOutput, error: message },
         content: [{ type: "text", text: `Error comparing compute pricing: ${message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─── Tool 6: Compare Model Hosts ────────────────────────────────────
+
+/** Undefined-tolerant variant, for the standard rate behind a promotion. */
+const roundPricePer1MOrUndefined = (price: number | undefined): number | undefined =>
+  price === undefined ? undefined : roundPricePer1M(price);
+
+tool(
+  "compare-model-hosts",
+  {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    title: "Compare Model Hosts",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      "Who sells a model, and at what price. Most models are sold by several hosts (the model maker, a " +
+      "cloud platform such as Amazon Bedrock, Azure or Vertex, or an independent host) at different rates, " +
+      "and every other tool here quotes ONE of them. For 1-4 named models this returns how many hosts sell " +
+      "each, the cheapest, the dearest, the model maker's own rate, the spread between them, any promotional " +
+      "listing, and what a workload costs per request and per month at each. Use it for 'where is Llama 3.3 " +
+      "70B cheapest', 'is the price you quoted the maker's own', 'how much does the choice of host matter " +
+      "for this model'. To cost a workload at the quoted price with caching and batch, use estimate-llm-cost. " +
+      "Read the caveats it returns: the cheapest host may serve a quantized build, which is not the same " +
+      "product, or a promotional rate that ends. Only the cheapest, the dearest, the maker's own and " +
+      "promotional listings are known; the hosts in between are not. Per-host prices are list prices read " +
+      "nightly and dated by `provenance.hostPricingAsOf`, and a model with no host data says so rather than " +
+      "reading as sold by one host.",
+    inputSchema: {
+      models: z
+        .array(z.string())
+        .min(1)
+        .max(4)
+        .describe("1-4 model names, e.g. ['Llama 3.3 70B'] or ['Claude Sonnet 5', 'DeepSeek V4']"),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload the costs are computed for, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600), callSummary (2k / 700), agentWorkflow (6k / 3k). Default: supportTicket"),
+      volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+    },
+    outputSchema: outputSchema(modelHostsOutputSchema),
+  },
+  async ({ models: requested, useCasePreset, volumePreset }) => {
+    const vol = (volumePreset || "100k") as VolumePreset;
+    const volumeEntry = VOLUME_PRESETS.find(p => p.key === vol);
+    const volume = volumeEntry?.value ?? 100_000;
+    const volumeLabel = volumeEntry?.label ?? vol;
+    const profile = USE_CASE_PROFILES[useCasePreset || "supportTicket"];
+
+    const emptyOutput = {
+      models: [] as unknown[],
+      resolution: [] as ResolutionEntry[],
+      useCaseLabel: profile.label,
+      volume,
+      volumeLabel,
+      source: "error",
+      eloAsOf: "",
+    };
+
+    try {
+      const { models: allModels, hostPricing, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
+
+      if (allModels.length === 0) {
+        return {
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
+          isError: true,
+        };
+      }
+
+      const { selected, resolution } = resolveNames(allModels, requested);
+      const describe = (r: ResolutionEntry): string => describeResolution(r, "entry");
+
+      if (selected.length === 0) {
+        const message = `No requested name matched a model. ${resolution.map(describe).join(" ")}`;
+        return {
+          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      // Raw floats drive the arithmetic; rounding happens once, on the way out.
+      const costOf = (input: number, output: number): number => useCaseCost(input, output, profile);
+      const costed = (offer: HostOffer, quotedCost: number) => {
+        const cost = costOf(offer.input, offer.output);
+        return { offer, cost, pct: vsQuotedPct(cost, quotedCost) };
+      };
+      type Costed = ReturnType<typeof costed>;
+
+      const entries = selected.map(m => {
+        const entry = hostPricing.get(hostPricingKey(m));
+        const summary = entry?.summary;
+        const quotedCost = costOf(m.inputPricePer1M, m.outputPricePer1M);
+        const quotedPair = { input: m.inputPricePer1M, output: m.outputPricePer1M };
+        const maker = makerOffer(entry, quotedPair);
+        return {
+          m,
+          summary,
+          quotedCost,
+          maker,
+          priceSource: priceProvenance(quotedPair, summary),
+          cheapest: summary ? costed(summary.cheapest, quotedCost) : null,
+          dearest: summary ? costed(summary.dearest, quotedCost) : null,
+          vendor: maker.offer ? costed(maker.offer, quotedCost) : null,
+          promotions: (summary?.promotions ?? []).map(offer => costed(offer, quotedCost)),
+          builds: declaredBuilds(summary),
+        };
+      });
+
+      const money = (cost: number): string => `${formatMicroCost(cost)}/req, ${formatMonthlyBudget(cost * volume)}/mo`;
+      const offerLine = (c: Costed): string => {
+        const delta = describeVsQuoted(c.pct);
+        return `${describeOffer(c.offer)} → ${money(c.cost)}${delta ? ` (${delta})` : ""}`;
+      };
+
+      const blocks = entries.map(e => {
+        const { m, summary } = e;
+        const head = `${m.provider} ${m.model}` + (m.eloScore ? ` (ELO ${m.eloScore})` : "");
+        const quoted =
+          `  Quoted by this server: $${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${listingTags(m)}` +
+          ` → ${money(e.quotedCost)}. ${provenanceExplanation(e.priceSource, summary)}`;
+        if (!summary || !e.cheapest || !e.dearest) {
+          return `${head} — no per-host pricing.\n${quoted}`;
+        }
+
+        const lines = [`${head} — sold by ${summary.hosts} ${summary.hosts === 1 ? "host" : "hosts"}.`, quoted];
+        // Cheapest and dearest at one rate bound every host between them, so
+        // "cheapest" and "dearest" would name two hosts for no difference.
+        const oneRate = summary.hosts > 1 && matchesOffer(summary.cheapest, summary.dearest);
+        if (summary.hosts === 1) {
+          lines.push(`  Only host — ${offerLine(e.cheapest)}`);
+        } else if (oneRate) {
+          lines.push(
+            `  All ${summary.hosts} hosts — one rate, to rounding (${summary.cheapest.host} and ` +
+            `${summary.dearest.host} among them): ${offerLine(e.cheapest).replace(`${summary.cheapest.host}: `, "")}`,
+          );
+        } else {
+          lines.push(`  Cheapest host — ${offerLine(e.cheapest)}`);
+          lines.push(`  Dearest host — ${offerLine(e.dearest)}`);
+        }
+
+        if (e.vendor) {
+          lines.push(`  Model maker's own — ${offerLine(e.vendor)}`);
+        } else if (e.maker.notStandardRate && summary.vendor) {
+          lines.push(
+            `  Model maker's own — not quoted: the row listed under the maker's name (${describeOffer(summary.vendor)}) ` +
+            `is a discount tier on this model, not its standard rate.`,
+          );
+        } else {
+          // Absence in the listings, not a claim about the maker's business.
+          lines.push(`  Model maker's own — none among these listings.`);
+        }
+
+        if (summary.hosts > 1 && !oneRate) {
+          lines.push(
+            summary.spread === undefined
+              ? `  Spread — not computed: the cheapest listing is free.`
+              : hasNoteworthySpread(summary)
+                ? `  Spread — the dearest host is ${summary.spread.toFixed(1)}x the cheapest on the blended price (30% input, 70% output).`
+                : `  Spread — under 10%: these hosts publish the same rate, to rounding.`,
+          );
+        }
+        if (e.promotions.length > 0) {
+          lines.push(`  Promotional listings — ${e.promotions.map(c => describeOffer(c.offer)).join("; ")}. A promotion can end without notice.`);
+        }
+        if (e.builds.length > 1) {
+          lines.push(
+            `  Not like-for-like — these listings declare different builds (${e.builds.join(", ")}): a quantized ` +
+            `build is not the same product as the full-precision one, and the ELO above was not measured on it.`,
+          );
+        } else if (e.builds.length === 1) {
+          lines.push(`  Build — the listings above that declare one serve ${e.builds[0]}.`);
+        }
+        return lines.join("\n");
+      });
+
+      const offerOut = (c: Costed) => {
+        const standard = standardRateOf(c.offer);
+        return {
+          host: c.offer.host,
+          inputPricePer1M: c.offer.input,
+          outputPricePer1M: c.offer.output,
+          quantization: c.offer.quantization,
+          discount: c.offer.discount,
+          standardInputPricePer1M: roundPricePer1MOrUndefined(standard?.input),
+          standardOutputPricePer1M: roundPricePer1MOrUndefined(standard?.output),
+          perRequest: roundPerRequestCost(c.cost),
+          monthly: roundMonthlyCost(c.cost * volume),
+          vsQuotedPct: c.pct,
+        };
+      };
+
+      const known = entries.filter(e => e.summary).length;
+      const noHostData =
+        provenance.tier !== 1
+          ? `\nPer-host prices are served by optimtoken.optimnow.io only. This response came from a fallback ` +
+            `tier, so none is available: every model below reads "no per-host pricing".`
+          : known < entries.length
+            ? `\n${entries.length - known} of ${entries.length} models have no per-host pricing: a listing newer ` +
+              `than the last nightly read. That is unknown, not "sold by one host".`
+            : "";
+
+      return {
+        structuredContent: {
+          ...emptyOutput,
+          models: entries.map(e => ({
+            provider: e.m.provider,
+            model: e.m.model,
+            eloScore: e.m.eloScore,
+            openness: opennessOf(e.m.license),
+            quoted: {
+              inputPricePer1M: e.m.inputPricePer1M,
+              outputPricePer1M: e.m.outputPricePer1M,
+              perRequest: roundPerRequestCost(e.quotedCost),
+              monthly: roundMonthlyCost(e.quotedCost * volume),
+              priceSource: e.priceSource,
+              outlierListing: e.m.outlierListing,
+              promotionalListing: e.m.promotionalListing,
+            },
+            hostCount: e.summary?.hosts ?? null,
+            cheapest: e.cheapest ? offerOut(e.cheapest) : null,
+            dearest: e.dearest ? offerOut(e.dearest) : null,
+            vendor: e.vendor ? offerOut(e.vendor) : null,
+            vendorRowNotStandardRate: e.maker.notStandardRate,
+            spread: e.summary?.spread ?? null,
+            noteworthySpread: hasNoteworthySpread(e.summary),
+            quantizations: e.builds,
+            promotions: e.promotions.map(offerOut),
+          })),
+          resolution,
+          source,
+          eloAsOf,
+          dataAsOf,
+          provenance,
+        },
+        content: [
+          {
+            type: "text",
+            // The notice leads: a caller told to report prices exactly as
+            // returned must see "unverified" before it sees the prices.
+            text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+              `Data source: ${provenance.label}` +
+              (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              `Who sells ${entries.length === 1 ? "this model" : `these ${entries.length} models`}, and what ` +
+              `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out tokens) costs at each ` +
+              `host's list price, at ${volume.toLocaleString()} requests/month.` +
+              (provenance.hostPricingAsOf ? ` Per-host prices were read on ${provenance.hostPricingAsOf}.` : "") +
+              `${noHostData}\n\n` +
+              `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
+              `${blocks.join("\n\n")}${listingLegend(selected)}\n\n` +
+              hostFootnote(provenance.hostPricingAsOf),
+          },
+        ],
+        isError: false,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error("[compare-model-hosts] failed:", error);
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: `Error comparing model hosts: ${message}` }],
         isError: true,
       };
     }
@@ -1412,7 +1816,7 @@ tool(
 function createServer(): McpServer {
   const server = new McpServer({
     name: "ai-pricing-hub",
-    version: "0.5.0",
+    version: "0.6.0",
   });
   for (const register of tools) register(server);
   return server;

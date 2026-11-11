@@ -65,13 +65,14 @@ This server replaces recall with a lookup:
 
 | Tool | What it answers |
 |---|---|
-| **`compare-llm-models`** | "What is out there?" Browse and filter the catalogue on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. |
+| **`compare-llm-models`** | "What is out there?" Browse and filter the catalogue on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. Ordered by ELO, or by efficiency, cost for a workload, or price with `sortBy`. |
 | **`recommend-llm-model`** | "Just tell me which one." A ranked top 3 for one workload under your constraints (budget, minimum ELO, required capability, self-hostability), each with a per-constraint satisfied or violated breakdown as the evidence. Over-constrained queries return the nearest misses, labelled as such. |
 | **`compare-models-side-by-side`** | "How do these specific ones compare?" 2 to 4 named models across all 8 use case profiles at a chosen monthly volume, list and optimized cost for each. |
 | **`estimate-llm-cost`** | "What will this cost us per month?" Per-request and monthly cost for your own volume, token shape, cache hit rate and batch eligibility. |
-| **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category. |
+| **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category: on-demand, spot, and 1- and 3-year commitments, each with what it saves against on-demand. |
+| **`compare-model-hosts`** | "Where do we buy it?" For 1 to 4 named models: how many hosts sell each, the cheapest, the dearest, the model maker's own rate, promotional listings, and what your workload costs at each. Says when the cheap host serves a quantized build. |
 
-All five are read-only and take no credentials. Nothing you send is stored.
+All six are read-only and take no credentials. Nothing you send is stored.
 
 **Use case profiles** ship with realistic token shapes, so you do not have to invent them:
 Support Ticket, Knowledge Q&A, Meeting Summary, Marketing Content, Coding Task,
@@ -123,7 +124,7 @@ unrefreshed fallback ages silently.
 
 ```text
 ai-pricing-hub-mcp/
-├─ server/src/index.ts              # the five tools
+├─ server/src/index.ts              # the six tools
 ├─ server/src/lib/http.ts           # Streamable HTTP at /mcp, one MCP server per request
 ├─ server/src/lib/optimtoken-api.ts # the one base URL constant, fetch and timeout discipline
 ├─ server/src/lib/                  # ranking, efficiency scoring, provenance, normalisation

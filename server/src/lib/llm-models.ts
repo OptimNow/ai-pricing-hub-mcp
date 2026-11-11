@@ -13,8 +13,15 @@ import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
 import { isRecognisedLicence, opennessOf } from "./openness.js";
 import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
+import { coerceHostPricing } from "./host-prices.js";
+import type { ModelHostPricing } from "./host-prices.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
+
+/** The key `LLMFetchResult.hostPricing` is indexed by. */
+export function hostPricingKey(m: { provider: string; model: string }): string {
+  return `${m.provider}/${m.model}`;
+}
 
 /**
  * Which tier of the fallback chain served the response.
@@ -812,6 +819,10 @@ export interface LLMProvenance {
   /** Catalogue size upstream reports, before our filters. */
   catalogTotal?: number;
   eloAsOf: string;
+  /** The day the site last read each model's hosts (tier 1 only). It dates
+   *  `hostPricing`, and the outlier and promotional flags decided from it:
+   *  those come from a nightly job, not from the request. */
+  hostPricingAsOf?: string;
   dataAsOf?: string;
   /** Loud warning when the prices are not the site's corrected ones. */
   notice?: string;
@@ -819,6 +830,16 @@ export interface LLMProvenance {
 
 export interface LLMFetchResult {
   models: LLMModel[];
+  /**
+   * Who sells each model and at what range, keyed by `hostPricingKey()`.
+   *
+   * Kept beside the models rather than on them: every tool spreads a model
+   * row into `structuredContent`, whose schemas refuse undeclared properties,
+   * so a field added to `LLMModel` reaches all of them at once. Empty on
+   * tiers 2 and 3, which have no host data, and missing a model whose listing
+   * is newer than the site's last read. Absent means unknown, never "one host".
+   */
+  hostPricing: ReadonlyMap<string, ModelHostPricing>;
   source: ModelSource;
   eloAsOf: string;
   dataAsOf?: string;
@@ -849,6 +870,7 @@ interface SiteModelsResponse {
     source?: string;
     timestamp?: string;
     eloAsOf?: string;
+    hostPricingAsOf?: unknown;
   };
 }
 
@@ -961,9 +983,24 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
     );
   }
 
-  const models = sortModels(
-    (payload.models as unknown[]).map(coerceSiteModel).filter((m): m is LLMModel => m !== null),
-  );
+  // One pass, so each host summary stays with the row it arrived on. It goes
+  // into a map beside the models, not onto them: see LLMFetchResult.hostPricing.
+  const accepted: LLMModel[] = [];
+  const hostPricing = new Map<string, ModelHostPricing>();
+  for (const row of payload.models as unknown[]) {
+    const model = coerceSiteModel(row);
+    if (model === null) continue;
+    accepted.push(model);
+    const raw = row as Record<string, unknown>;
+    const summary = coerceHostPricing(raw.hostPricing);
+    if (summary) {
+      hostPricing.set(hostPricingKey(model), {
+        summary,
+        openRouterId: typeof raw.openRouterId === "string" && raw.openRouterId ? raw.openRouterId : undefined,
+      });
+    }
+  }
+  const models = sortModels(accepted);
 
   if (models.length < MIN_PLAUSIBLE_CATALOGUE) {
     throw new Error(
@@ -979,6 +1016,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
 
   return {
     models,
+    hostPricing,
     source: "optimtoken",
     eloAsOf,
     provenance: {
@@ -991,6 +1029,8 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
       upstreamSchemaVersion: meta.schemaVersion,
       catalogTotal: typeof meta.catalogTotal === "number" ? meta.catalogTotal : undefined,
       eloAsOf,
+      hostPricingAsOf:
+        typeof meta.hostPricingAsOf === "string" && meta.hostPricingAsOf ? meta.hostPricingAsOf : undefined,
     },
   };
 }
@@ -1029,6 +1069,8 @@ async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
 
     return {
       models,
+      // The host fan-out is the site's nightly job; this tier has none.
+      hostPricing: new Map(),
       source: "openrouter",
       eloAsOf: ELO_AS_OF,
       provenance: {
@@ -1050,6 +1092,7 @@ async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
 function fetchFromSnapshot(): LLMFetchResult {
   return {
     models: staticFallback(),
+    hostPricing: new Map(),
     source: "static-fallback",
     eloAsOf: ELO_AS_OF,
     dataAsOf: dataLastUpdated,

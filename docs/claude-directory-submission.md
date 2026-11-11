@@ -2,9 +2,10 @@
 
 Status as of 2026-11-11: **not submitted, and not ready to be.** Version 0.5.0
 makes the server tools only (no MCP App, no widgets) and fixes a defect that
-would have failed review, but **0.5.0 is not deployed yet**: production still
-runs 0.4.2. The portal reads the live server, so deploy first, then work
-through "Before you submit" below.
+would have failed review. It was deployed on 2026-11-11 and
+`scripts/check-connector.mjs` passed against production the same day. The
+portal reads the live server, so run that script again after any later deploy,
+then work through "Before you submit" below.
 
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
@@ -47,9 +48,9 @@ returns them as `structuredContent` too.
 
 In this order. The first three are blocking.
 
-1. **Deploy 0.5.0 and run `node scripts/check-connector.mjs`.** It must pass
-   against the published URL. Against 0.4.2 it fails on two counts, both of
-   which a reviewer would meet:
+1. **Done on 2026-11-11: 0.5.0 is deployed and `node scripts/check-connector.mjs`
+   passes against the published URL.** Run it again after every deploy. Against
+   0.4.2 it failed on two counts, both of which a reviewer would have met:
    - **Concurrent calls fail.** Under 0.4.2, a tool call that overlaps another
      is answered HTTP 500 "Internal server error": eight concurrent calls
      behind one slow upstream fetch gave seven 500s in production on
@@ -58,7 +59,7 @@ In this order. The first three are blocking.
      as Internal Server Error ... fail review"; the listing's health badge
      turns Degraded above a 5% error rate. Fixed in 0.5.0 (one MCP server per
      request).
-   - The five widget resources are still listed.
+   - The five widget resources were still listed.
 2. **Make the documentation and privacy pages readable without a browser.**
    `https://optimtoken.optimnow.io/mcp` and `/privacy` answered HTTP 429 with a
    "Vercel Security Checkpoint" page to every non-browser client tried on
@@ -92,12 +93,12 @@ documentation as it read that day:
 | Requirement | Status |
 |---|---|
 | Remote server, `https://`, Streamable HTTP | `https://optimtoken-mcp.optimnow.io/mcp` on Fly.io |
-| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All five carry `title`, `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` |
+| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All six carry `title`, `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` (`compare-model-hosts` was added in 0.6.0) |
 | Tool names at most 64 characters | Longest is 27 |
-| Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the five tools stays |
+| Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the six tools stays |
 | Authentication | `none`; allowed for public data, and the portal has a "No authentication" option |
 | Validation errors are actionable | A bad `limit` returns `-32602` naming the field; an unknown model name says so |
-| Responses reasonably sized | Largest observed about 10,000 tokens (`compare-llm-models` at `limit: 50`), against a ceiling of about 150,000 characters in claude.ai and 25,000 tokens in Claude Code |
+| Responses reasonably sized | Largest observed about 43,000 characters, roughly 11,000 tokens (`compare-llm-models` at `limit: 50`, measured on the 0.6.0 build; `compare-compute-pricing` at `limit: 50` is about 36,000 characters now that each row prints its commitment rates), against a ceiling of about 150,000 characters in claude.ai and 25,000 tokens in Claude Code |
 | Every response validates against its `outputSchema` | 14 of 14 sampled calls, error paths included |
 | Live data | `provenance.tier` is 1 for the LLM tools and for compute |
 | Privacy policy | <https://optimtoken.optimnow.io/privacy> names the MCP server, Fly.io and a GDPR contact (see item 2 above) |
@@ -134,7 +135,8 @@ policy asks a server to be "frugal with their use of tokens".
   | `recommend-llm-model` | "Recommend a model for support tickets under $500 a month." |
   | `compare-models-side-by-side` | "Compare Claude Opus 5.5 and Gemini 4 Argon side by side." |
   | `estimate-llm-cost` | "About 800 input tokens and 200 output, four million requests a month, 60% of the prompt cached: what does that cost on Claude Opus 5.5?" |
-  | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first." |
+  | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, and what a 3-year commitment saves on each." |
+  | `compare-model-hosts` | "Who sells DeepSeek V4.1 Flash, and what would a coding workload cost at the cheapest host?" |
 - **URLs.** Documentation `https://optimtoken.optimnow.io/mcp`, privacy
   `https://optimtoken.optimnow.io/privacy`, support
   `https://www.optimnow.io/contact`, company `https://optimnow.io`.
@@ -149,7 +151,7 @@ Progress saves in the browser between steps.
 1. **Connection.** Paste `https://optimtoken-mcp.optimnow.io/mcp`, or pick
    the custom connector already on the account. Universal URL: every user
    connects to the same one.
-2. **Tools.** Synced from the server. All five should land in the read-only
+2. **Tools.** Synced from the server. All six should land in the read-only
    group with no "missing title or annotation" flag. If one is flagged, fix
    the server before continuing; the portal reads the live tool list.
 3. **Listing.** Name, one-liner, description, categories, documentation URL,
