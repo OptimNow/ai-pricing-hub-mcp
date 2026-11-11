@@ -480,6 +480,29 @@ test("a static price column is visible in the response, not swallowed", async (t
   assert.match(provenance.notice ?? "", /AWS\.savingsPlan1yr/, "the notice must name the affected columns");
 });
 
+test("the date of the AWS savings plan rates reaches the caller", async (t) => {
+  t.after(restoreFetch);
+  const base = sitePricingResponse();
+  const withMeta = (extra: Record<string, unknown>) => ({ ...base, meta: { ...base.meta, ...extra } });
+
+  // Since the site's schema 1.3 those two columns come from AWS's published
+  // price files, read weekly: they are as fresh as this date, not as the
+  // response's own timestamp, and the text quotes it beside the rates.
+  reset();
+  stubFetch(url => (isSite(url) ? { body: withMeta({ awsSavingsPlansAsOf: "2026-11-10T21:57:13Z" }) } : { throws: true }));
+  assert.equal((await fetchComputeInstances("europe")).provenance.awsSavingsPlansAsOf, "2026-11-10T21:57:13Z");
+
+  // Absent upstream means the region's files could not be read. Nothing is
+  // invented in its place, and a value that is not a date string is dropped.
+  reset();
+  stubFetch(url => (isSite(url) ? { body: base } : { throws: true }));
+  assert.equal((await fetchComputeInstances("europe")).provenance.awsSavingsPlansAsOf, undefined);
+
+  reset();
+  stubFetch(url => (isSite(url) ? { body: withMeta({ awsSavingsPlansAsOf: 20261110 }) } : { throws: true }));
+  assert.equal((await fetchComputeInstances("europe")).provenance.awsSavingsPlansAsOf, undefined);
+});
+
 test("the region is passed through to the site", async (t) => {
   t.after(restoreFetch);
   reset();

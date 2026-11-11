@@ -98,7 +98,7 @@ documentation as it read that day:
 | Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the five tools stays |
 | Authentication | `none`; allowed for public data, and the portal has a "No authentication" option |
 | Validation errors are actionable | A bad `limit` returns `-32602` naming the field; an unknown model name says so |
-| Responses reasonably sized | Largest observed about 10,000 tokens (`compare-llm-models` at `limit: 50`), against a ceiling of about 150,000 characters in claude.ai and 25,000 tokens in Claude Code |
+| Responses reasonably sized | Largest observed about 43,000 characters, roughly 11,000 tokens (`compare-llm-models` at `limit: 50`, measured on the 0.6.0 build; `compare-compute-pricing` at `limit: 50` is about 36,000 characters now that each row prints its commitment rates), against a ceiling of about 150,000 characters in claude.ai and 25,000 tokens in Claude Code |
 | Every response validates against its `outputSchema` | 14 of 14 sampled calls, error paths included |
 | Live data | `provenance.tier` is 1 for the LLM tools and for compute |
 | Privacy policy | <https://optimtoken.optimnow.io/privacy> names the MCP server, Fly.io and a GDPR contact (see item 2 above) |
@@ -135,7 +135,7 @@ policy asks a server to be "frugal with their use of tokens".
   | `recommend-llm-model` | "Recommend a model for support tickets under $500 a month." |
   | `compare-models-side-by-side` | "Compare Claude Opus 5.5 and Gemini 4 Argon side by side." |
   | `estimate-llm-cost` | "About 800 input tokens and 200 output, four million requests a month, 60% of the prompt cached: what does that cost on Claude Opus 5.5?" |
-  | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first." |
+  | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, and what a 3-year commitment saves on each." |
 - **URLs.** Documentation `https://optimtoken.optimnow.io/mcp`, privacy
   `https://optimtoken.optimnow.io/privacy`, support
   `https://www.optimnow.io/contact`, company `https://optimnow.io`.

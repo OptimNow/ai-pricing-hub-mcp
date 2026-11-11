@@ -478,6 +478,49 @@ hand. `sortBy` now takes `elo` (default, unchanged), `efficiency`, `cost`,
 orders differently for a support ticket and for a meeting summary. That is the
 point of them over `inputPrice` and `outputPrice`.
 
+### Commitment rates in the compute text (0.6.0)
+
+`compare-compute-pricing` has always returned `savingsPlan1yr/3yr` and
+`reserved1yr/3yr`, but its text printed on-demand and spot only. With no widget
+the text is what the model reads (decision 1b), so the commitment discount,
+the first thing a FinOps answer about compute is asked for, usually never
+reached the reader. `lib/compute-rates.ts` now writes every rate a row
+carries:
+
+```
+On-demand: $0.0832/hr ($60.74/mo), Spot: $0.0250/hr (-70%),
+Savings plan 1-yr: $0.0607/hr (-27%), 3-yr: $0.0416/hr (-50%),
+Reserved 1-yr: $0.0524/hr (-37%), 3-yr: $0.0358/hr (-57%)
+```
+
+- **Each saving is against the same row's on-demand rate**, as a whole
+  percentage, and is also returned as `spotSavingsPct`,
+  `savingsPlan1yrSavingsPct` and so on. Null when the rate is missing or is not
+  below on-demand: the field is never negative, and the text then says "not
+  below on-demand" in words. No such row existed in `us-east` on 2026-11-11.
+- **A row with no commitment rate says "no commitment rate listed".**
+  DigitalOcean, OVH and OCI publish none here; silence read as "nothing to add".
+- **The `savingsPlan*` columns are called CUD on GCP rows** and Savings plan
+  elsewhere. What they hold, per the site's OpenAPI: effective hourly, no
+  upfront where the provider offers it; `reserved*` is the published no-upfront
+  hourly rate on AWS and the term total divided by term hours on Azure.
+- **A `static` figure is tagged where it is printed**, `(-37%, static)`, with
+  one line under the table saying what static means. The notice at the top
+  already lists the static columns of the whole catalogue; the tag is for a
+  reader who quotes one row. On tier 2 there are no price types and no tags:
+  the notice says the whole response is the snapshot.
+- **AWS Savings Plan rates are dated separately.** Since the site's pricing
+  schema 1.3 they come from AWS's published Compute Savings Plan price files
+  (No Upfront, shared tenancy), read by a weekly job, and
+  `meta.awsSavingsPlansAsOf` is AWS's publication date. It is carried as
+  `provenance.awsSavingsPlansAsOf` and quoted under the table when an AWS
+  savings plan rate is shown. If upstream could not read a region's files the
+  date is absent and the columns fall back to the scaled estimate, marked
+  static.
+
+Not done: the table cannot be sorted by a commitment rate, so "the cheapest
+3-year commitment" is read off the cheapest on-demand rows.
+
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
 - codingTask, invoiceProcessing, callSummary, agentWorkflow

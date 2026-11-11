@@ -69,7 +69,7 @@ This server replaces recall with a lookup:
 | **`recommend-llm-model`** | "Just tell me which one." A ranked top 3 for one workload under your constraints (budget, minimum ELO, required capability, self-hostability), each with a per-constraint satisfied or violated breakdown as the evidence. Over-constrained queries return the nearest misses, labelled as such. |
 | **`compare-models-side-by-side`** | "How do these specific ones compare?" 2 to 4 named models across all 8 use case profiles at a chosen monthly volume, list and optimized cost for each. |
 | **`estimate-llm-cost`** | "What will this cost us per month?" Per-request and monthly cost for your own volume, token shape, cache hit rate and batch eligibility. |
-| **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category. |
+| **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category: on-demand, spot, and 1- and 3-year commitments, each with what it saves against on-demand. |
 
 All five are read-only and take no credentials. Nothing you send is stored.
 

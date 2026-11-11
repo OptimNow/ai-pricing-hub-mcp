@@ -42,6 +42,7 @@ import { roiCalculatorUrl } from "./lib/roi-link.js";
 import { enrichInstances } from "./lib/compute-categories.js";
 import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
+import { describeRates, rateSavings, ratesLegend } from "./lib/compute-rates.js";
 import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
@@ -163,6 +164,9 @@ const computeProvenanceSchema = z.object({
   priceTypes: z.record(z.string(), z.record(z.string(), z.string())).optional(),
   staticPriceColumns: z.array(z.string()),
   unavailablePriceColumns: z.array(z.string()),
+  // AWS's publication date of the Savings Plan price files: the date of the
+  // AWS savingsPlan1yr/3yr columns, which upstream reads weekly.
+  awsSavingsPlansAsOf: z.string().optional(),
   upstreamErrors: z.array(z.string()).optional(),
   // Tier-2 diagnostics. `fallbackReason` says why tier 1 was missed, classified
   // and timed; `unappliedFilters` names the arguments this tier accepted and
@@ -253,6 +257,14 @@ const computePricingOutputSchema = {
       savingsPlan3yr: z.number().nullable(),
       reserved1yr: z.number().nullable(),
       reserved3yr: z.number().nullable(),
+      // Whole-percent saving of each rate against this row's on-demand rate.
+      // Null when the rate is missing or is not below on-demand: there is
+      // then no saving to state, and it is never a negative number.
+      spotSavingsPct: z.number().nullable(),
+      savingsPlan1yrSavingsPct: z.number().nullable(),
+      savingsPlan3yrSavingsPct: z.number().nullable(),
+      reserved1yrSavingsPct: z.number().nullable(),
+      reserved3yrSavingsPct: z.number().nullable(),
     }),
   ),
   matchingCount: z.number(),
@@ -1299,7 +1311,10 @@ tool(
     description:
       "Compare cloud compute instance pricing across AWS, Azure, GCP, DigitalOcean, OCI, OVH, and Alibaba. " +
       "Filter by region, provider, vCPUs, memory, category, processor, or use case. " +
-      "All prices are Linux on-demand list prices in USD. " +
+      "Use this for 'the cheapest 8 vCPU / 32 GiB instance in Europe', and for what a commitment saves: " +
+      "each row gives the Linux list price in USD per hour on demand, on spot, and under a 1-year and " +
+      "3-year commitment (savings plan, Google CUD, reservation) as an effective hourly rate, each with " +
+      "its saving against that row's on-demand rate. A row with no commitment rate says so. " +
       "Not every price column is live: `provenance.priceTypes` says which of each provider's price " +
       "columns come from a live API, which are static constants, and which are unavailable, and " +
       "`provenance.staticPriceColumns` lists the non-live ones outright; a savings-plan or reserved " +
@@ -1376,18 +1391,19 @@ tool(
             (unapplied.length ? ` Filters accepted but NOT applied: ${unapplied.join(", ")}.` : "")
           : "";
 
-      // Build text summary
+      // Build text summary. Every rate the row carries is printed, with its
+      // saving against on-demand: the commitment rates used to exist in
+      // structuredContent only, where the reader of the text never saw them.
       const lines = results.map((inst, i) =>
         `${i + 1}. ${inst.provider} ${inst.instanceType} — ` +
         `${inst.vCPUs} vCPUs, ${inst.memory} GiB, ${inst.processor}, ` +
-        `$${inst.onDemandHourly?.toFixed(4)}/hr ($${inst.onDemandMonthly?.toFixed(2)}/mo)` +
-        (inst.spot ? `, Spot: $${inst.spot.toFixed(4)}/hr` : "") +
+        describeRates(inst, provenance.priceTypes) +
         ` [${inst.category}]`
       );
 
       return {
         structuredContent: {
-          instances: results,
+          instances: results.map(inst => ({ ...inst, ...rateSavings(inst) })),
           matchingCount: filtered.length,
           catalogSize: enriched.length,
           source,
@@ -1403,7 +1419,11 @@ tool(
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
                 : "") +
               `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
-              `Linux on-demand list prices.${subsetCaveat}\n\n` + lines.join("\n"),
+              `Linux list prices in USD per hour. Spot and commitment rates show their saving against the ` +
+              `same row's on-demand rate; commitment rates are effective hourly, no upfront where the ` +
+              `provider offers it (CUD is Google's committed use discount).${subsetCaveat}\n\n` +
+              lines.join("\n") +
+              ratesLegend(results, provenance.priceTypes, provenance.awsSavingsPlansAsOf),
           },
         ],
         isError: false,

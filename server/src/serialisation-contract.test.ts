@@ -67,6 +67,14 @@ const PASS_THROUGH = new Set([
   "savingsPlan3yr",
   "reserved1yr",
   "reserved3yr",
+  // Whole-number percentages from Math.round() in lib/compute-rates.ts: the
+  // saving of the rate above against on-demand. They match the pattern on the
+  // column name they carry, and hold no cents to be noisy in.
+  "spotSavingsPct",
+  "savingsPlan1yrSavingsPct",
+  "savingsPlan3yrSavingsPct",
+  "reserved1yrSavingsPct",
+  "reserved3yrSavingsPct",
 ]);
 
 /** Every field name declared in the output schemas. */
