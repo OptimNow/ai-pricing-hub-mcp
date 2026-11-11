@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchLLMModels, resetLLMModelCache } from "./llm-models.js";
+import { coerceSiteModel, fetchLLMModels, resetLLMModelCache } from "./llm-models.js";
+import { llmModels, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
   resetComputePricingCache,
@@ -16,7 +17,7 @@ import {
   fetchOptimtokenJson,
   UpstreamFetchError,
 } from "./optimtoken-api.js";
-import { opennessOf } from "./openness.js";
+import { isRecognisedLicence, opennessOf } from "./openness.js";
 
 /**
  * The fallback chain is the part of this server that only runs when something
@@ -371,6 +372,67 @@ test("Llama 4 is a recognised open-weights licence", () => {
   assert.equal(opennessOf("Llama 3.x"), "Open weights");
   assert.equal(opennessOf("Proprietary"), "Proprietary");
   assert.equal(opennessOf(undefined), "Unknown");
+});
+
+test("every licence in the snapshot is one the buckets know", () => {
+  // The site sends the licence as a string and the bucketing is local, so a
+  // string added upstream reads "Unknown" here and nothing fails. On 2026-11-11
+  // that was 14 strings and 17 models, three months after the last one.
+  //
+  // The snapshot is the site's own catalogue, re-taken by `npm run
+  // refresh-fallback`, so this holds the buckets to whatever the site was
+  // sending on the day of the last refresh: a refresh that brings in a new
+  // licence string fails here until openness.ts has it.
+  const unknown = [...new Set(
+    llmModels.map(m => m.license).filter((l): l is string => !!l && !isRecognisedLicence(l)),
+  )];
+  assert.deepEqual(unknown, [], `licence strings openness.ts cannot bucket: ${unknown.join(", ")}`);
+
+  // And the ones that had gone missing land where the site puts them.
+  for (const licence of ["Kimi K3 License", "DeepSeek License", "NVIDIA Open Model License", "OpenMDW 1.1"]) {
+    assert.equal(opennessOf(licence), "Open weights", licence);
+  }
+});
+
+// ── The fields the site added after the port ────────────────────────
+
+const siteRow = (over: Record<string, unknown> = {}) => ({
+  provider: "Anthropic", model: "Claude Test", inputPricePer1M: 4, outputPricePer1M: 20,
+  contextWindow: "1M", category: "Frontier", capabilities: ["Text"], license: "Proprietary",
+  ...over,
+});
+
+test("the cache-write rate survives the trip from the site", () => {
+  // Dropping it is not neutral: the optimized cost then credits every cache
+  // read without charging the write behind it.
+  assert.equal(coerceSiteModel(siteRow({ cacheWritePricePer1M: 5 }))?.cacheWritePricePer1M, 5);
+  // Absent stays absent, and a value that is not a usable price is dropped.
+  assert.equal(coerceSiteModel(siteRow())?.cacheWritePricePer1M, undefined);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "5", null]) {
+    assert.equal(coerceSiteModel(siteRow({ cacheWritePricePer1M: bad }))?.cacheWritePricePer1M, undefined, String(bad));
+  }
+});
+
+test("the listing flags are carried when true and only when true", () => {
+  const flagged = coerceSiteModel(siteRow({ outlierListing: true, promotionalListing: true }));
+  assert.equal(flagged?.outlierListing, true);
+  assert.equal(flagged?.promotionalListing, true);
+
+  // The site sends `true` or nothing. A flag that refuses a badge must not be
+  // set by a truthy string, and absent must stay absent rather than false.
+  for (const notTrue of [false, "true", 1, null, undefined]) {
+    const row = coerceSiteModel(siteRow({ outlierListing: notTrue, promotionalListing: notTrue }));
+    assert.equal(row?.outlierListing, undefined, `outlierListing ${String(notTrue)}`);
+    assert.equal(row?.promotionalListing, undefined, `promotionalListing ${String(notTrue)}`);
+  }
+});
+
+test("each snapshot states its own date", () => {
+  // The compute rows and the LLM snapshot are refreshed by different means, at
+  // different times. While they shared one constant, refreshing the LLM
+  // snapshot re-dated compute rows it had not touched.
+  assert.match(dataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(computeDataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
 });
 
 // ── Compute ─────────────────────────────────────────────────────────

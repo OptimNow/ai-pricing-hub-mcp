@@ -6,16 +6,47 @@ keeps what an agent needs in every session and lists the sections below.
 ## Architecture
 
 ```
-Framework:    Skybridge (MCP App Framework)
+Runtime:      Node, the official MCP SDK, node:http. No framework.
 Language:     TypeScript
-Build:        Vite + Skybridge plugins
-UI:           React widgets (rendered via structuredContent)
+Build:        tsc (dist/server/src/index.js)
+UI:           none. Five tools; each answers with text and structuredContent
 Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
-Transport:    Streamable HTTP at /mcp (https://optimtoken-mcp.optimnow.io/mcp)
+Transport:    Streamable HTTP at /mcp, stateless (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
               → direct OpenRouter (LLM only, uncorrected)
               → static fallback in data/pricing-data.ts
 ```
+
+### Why there is no framework and no UI (0.5.0, 2026-11-11)
+
+Up to 0.4.2 this was an MCP App on Skybridge (Alpic's framework): every tool
+also rendered a React widget, built with Vite and served from `/assets`. Both
+went in 0.5.0, on the owner's decision to run a plain MCP server. What that
+removed, so nobody rebuilds it by accident:
+
+- `web/` (five widgets, a shared component set, `format.ts`, `scale.ts`), and
+  with it React, Vite and Skybridge: `npm ci` went from 280 packages to 99.
+- The `ui://widgets/ext-apps/*` resources and each tool's `_meta.ui.resourceUri`.
+  `resources/list` is now "Method not found".
+- `pinPublicUrl` and the pinned `_meta.ui.domain` hash. claude.ai compared that
+  hash with the URL the user had pasted, which is why the URL had to be pasted
+  exactly. It no longer has to be: `/mcp` and `/mcp/` both answer, on any
+  hostname that reaches the machine.
+- `web-mirror.test.ts` and `scale.test.ts`, which held the widget bundle to the
+  server.
+
+What it fixed on the way: Skybridge 0.35 connected one shared MCP server to a
+new transport on every request, and the MCP SDK refuses a second `connect()` on
+a connected server. Any request that overlapped another was answered HTTP 500
+"Internal server error". Measured against production on 2026-11-11: eight
+concurrent `compare-compute-pricing` calls behind a cold `europe` fetch, seven
+500s. `lib/http.ts` builds one server per request instead, which is the SDK's
+own stateless pattern, and `lib/http.test.ts` sends eight at once.
+
+The HTTP surface is three things: `POST /mcp` (and `/mcp/`), `GET /healthz`
+(200, liveness only), and 404 for everything else. `GET` and `DELETE` on `/mcp`
+are 405, as the transport specifies for a server with no SSE stream and no
+sessions. Request bodies over 1 MB are refused with 413.
 
 ### Data sources and the fallback chain
 
@@ -51,11 +82,12 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # MCP server — 5 tool/widget definitions
+│       ├── index.ts                  # The 5 tools, createServer(), listen, cache warm-up
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
+│       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
-│       │   ├── public-url.ts         # PUBLIC_MCP_URL, the widget sandbox domain hash, pinPublicUrl middleware
+│       │   ├── public-url.ts         # PUBLIC_MCP_URL, the one published URL
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
@@ -64,30 +96,17 @@ ai-pricing-hub-mcp/
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
 │       │   ├── compute-categories.ts # Compute instance categorization + enrichment
-│       │   └── *.test.ts             # data-sources, llm-business-metrics, output-schema, public-url, scale, web-mirror
+│       │   └── *.test.ts             # capabilities, data-sources, http, llm-business-metrics, output-schema, public-url
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
-├── web/
-│   ├── src/
-│   │   ├── helpers.ts                # Skybridge widget helpers (generateHelpers)
-│   │   ├── index.css                 # Colour tokens on :root + dark-mode overrides
-│   │   ├── format.ts                 # formatCost / formatBudget / savingsPct / leverSummary
-│   │   ├── scale.ts                  # log10 axis maths for the cost/ELO scatter
-│   │   ├── components/index.tsx      # WidgetShell, Badge, Card, Notice, error/empty states
-│   │   └── widgets/
-│   │       ├── compare-llm-models/index.tsx
-│   │       ├── estimate-llm-cost/index.tsx
-│   │       ├── compare-models-side-by-side/index.tsx
-│   │       ├── recommend-llm-model/index.tsx
-│   │       └── compare-compute-pricing/index.tsx
-│   └── vite.config.ts                # Skybridge Vite plugin
 ├── docs/
 │   ├── chatgpt-submission.md         # Blockers + portal run for the ChatGPT directory
 │   ├── claude-directory-submission.md # Status, portal run and listing material for the Claude directory
 │   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
-│   ├── check-connector.mjs           # Manual: call a deployed connector and check tools, ui.domain, tier
+│   ├── check-site-parity.mjs         # Manual: run this server's logic and the site's over the live catalogue
+│   ├── check-connector.mjs           # Manual: call a deployed connector: tools, tier, eight calls at once
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
@@ -101,10 +120,10 @@ ai-pricing-hub-mcp/
 
 Tests live beside their subjects: `lib/data-sources.test.ts`,
 `lib/llm-business-metrics.test.ts`, `lib/output-schema.test.ts`,
-`lib/public-url.test.ts` (pins the connector URL, its sandbox-domain hash and
-every published copy of the URL), `lib/scale.test.ts`, `lib/capabilities.test.ts`
-and `lib/web-mirror.test.ts` (both reach across into `web/src`, because
-`npm test` only walks `server/src`), and `serialisation-contract.test.ts`.
+`lib/http.test.ts` (the HTTP layer over a real socket, eight requests at
+once), `lib/public-url.test.ts` (pins the connector URL and every published
+copy of it), `lib/capabilities.test.ts`, `serialisation-contract.test.ts` and
+`version.test.ts`.
 
 ---
 
@@ -112,19 +131,19 @@ and `lib/web-mirror.test.ts` (both reach across into `web/src`, because
 
 ```bash
 npm install
-npm run dev        # Skybridge dev server with DevTools emulator
+npm run dev        # tsx watch on server/src/index.ts, http://localhost:3000/mcp
 npm run typecheck  # tsc --noEmit over both tsconfigs (src and tests)
 npm test           # node --test over server/src/**/*.test.ts
-npm run build      # Production build
-npm run start      # Start production server (serves /mcp locally)
+npm run build      # Empties dist/, then tsc: dist/server/src/index.js
+npm run start      # node dist/server/src/index.js (serves /mcp on $PORT, default 3000)
 ```
 
 `.github/workflows/ci.yml` runs typecheck, test and build on every PR, and on
 every push to `master` deploys to Fly.io once those pass (see below).
 
-Note: `npm run typecheck` writes `dist/tsconfig.tsbuildinfo`. Because it does not
-emit, a following `npm run build` can believe the server output is already up to
-date and skip compiling it — if `dist/server/` looks stale, delete it and rebuild.
+The port comes from `PORT` (Fly sets 8080), default 3000. `npm run build`
+deletes `dist/` first, so a stale file from an earlier build cannot be started
+by mistake.
 
 `scripts/check-serialisation-precision.mjs` is deliberately outside CI: it needs a
 running server and the live catalogue. Run it by hand after touching cost code.
@@ -143,9 +162,8 @@ published copy drifts from it. It is a custom domain on the Fly app: a CNAME
 `optimtoken-mcp.optimnow.io -> ai-pricing-hub-mcp.fly.dev` in the `optimnow.io`
 zone (hosted on Wix DNS) plus a certificate from
 `fly certs add optimtoken-mcp.optimnow.io`. The `ai-pricing-hub-mcp.fly.dev`
-host still answers tool calls (the `deploy` job reads its version) but is not
-published, and widgets do not render through it (see the `ui.domain` note
-below). Locally, `npm run start` serves the same `/mcp` path.
+host answers too (the `deploy` job reads its version) but is not published.
+Locally, `npm run start` serves the same `/mcp` path.
 
 **Releases deploy themselves.** The `deploy` job in `ci.yml` runs
 `flyctl deploy --remote-only` on every push to `master`, after the `check` job
@@ -178,12 +196,15 @@ Node project it generates its own `Dockerfile`, `fly.toml`, `.dockerignore` and
 `.github/workflows/fly-deploy.yml`, and adds `@flydotio/dockerfile` to
 `package.json`; all of that collides with the committed files.
 
-`Dockerfile` builds in two stages (`skybridge build`, then production
-dependencies plus `dist/`), `fly.toml` runs one `shared-cpu-1x` / 512 MB machine
-in `cdg` that scales to zero, and `.dockerignore` keeps the context to what the
-build copies. Verified 2026-10-07 by building the image and calling it: five
-tools, five `ext-apps` widgets, compute tier 1 (cold `europe` call 7.8 s),
-~140 MB resident after a compute call.
+`Dockerfile` builds in two stages (`npm run build`, then production
+dependencies plus `dist/`) and starts `node dist/server/src/index.js`,
+`fly.toml` runs one `shared-cpu-1x` / 512 MB machine in `cdg` that scales to
+zero, and `.dockerignore` keeps the context to what the build copies. The
+Skybridge-era image was verified on 2026-10-07 by building it and calling it
+(compute tier 1, cold `europe` call 7.8 s, ~140 MB resident after a compute
+call). **The 0.5.0 image has not been built yet:** the server was verified by
+running the compiled output on a workstation (2026-11-11), not in Docker. Build
+and call the image, or watch the first CI deploy, before relying on it.
 
 **The app runs one machine, and `fly.toml` does not enforce that.** On an app's
 first deploy Fly creates two machines for redundancy, whatever `fly.toml` says;
@@ -208,41 +229,33 @@ curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
 
 **Verify by calling, not by reading.** `node scripts/check-connector.mjs` runs
 `initialize` and `tools/list` against the published URL (or a URL you pass),
-reads every widget resource as `Claude-User` and checks `_meta.ui.domain`
-against the hash of the published URL, then calls `compare-llm-models` and
-checks `provenance.tier` is 1. Run it after every deploy and before touching
-the registry entry or the directory listing.
+checks each tool's title, annotations and schema dialect, checks that no
+`ui://` resource is offered, calls `compare-llm-models` and checks
+`provenance.tier` is 1, sends eight tool calls at once and expects eight
+answers, and reads `/healthz`. Run it after every deploy and before touching
+the registry entry or the directory listing. Against 0.4.2 in production it
+fails on purpose: the widget resources are still listed, and the eight
+concurrent calls are not all answered.
 
 Three things about Fly that matter here:
 
 - **The connector URL ends in `/mcp`.** The root is a 404 on Fly. Alpic mapped
   the root to the MCP endpoint, which is why older connectors and docs used the
   bare origin.
-- **`ui.domain` is pinned to the published URL.** Skybridge 0.35.21 hashes
-  the `x-alpic-forwarded-url` header when present, else
-  `https://<Host header><path>` per request. Fly passes Host through, so the
-  per-request form did work on the fly.dev host (verified live on 2026-10-07:
-  `8bf8b3efa6b75e7783dc914439490bd5.claudemcpcontent.com`), but it follows
-  whichever hostname the request arrived on and anchors to no constant.
-  `pinPublicUrl` in `lib/public-url.ts` now sets that header on every request
-  from `PUBLIC_MCP_URL`, writing both `req.headers` and `rawHeaders` (the MCP
-  SDK rebuilds the request from the raw list through hono's Node adapter, so
-  the parsed object alone never reaches Skybridge). The resulting hash,
-  `6bc975b213d359f660adf536cb8cebab.claudemcpcontent.com`, is pinned by
-  `public-url.test.ts`. **Rendering confirmed by hand on Claude Desktop on
-  2026-10-09** with the connector added under exactly that URL: all five
-  widgets drew their frames. Consequences: users paste the URL exactly, with
-  `/mcp` and no trailing slash; the fly.dev host serves tool calls only. There is no
-  Host allow-list, so the 421 the Python FinOps server hit on Fly does not
-  apply here.
+- **No Host allow-list.** The server answers on any hostname that reaches it,
+  so the 421 the Python FinOps server hit on Fly does not apply here. Nothing
+  depends on the hostname any more: the pinned `ui.domain` hash went with the
+  widgets.
 - **Scale-to-zero drops the warm caches.** The boot warm-up assumes the process
   outlives requests. With `min_machines_running = 0`, an idle machine stops, and
   the next caller pays the machine start plus an upstream fetch (up to ~8 s on
   `compare-compute-pricing`). Set it to 1 if that latency matters.
 
-`docker run` locally needs `--init`: without it the server is PID 1, ignores
-SIGINT and is only killed at the stop timeout. Fly runs its own init, so this
-does not affect the deployed machine.
+The server handles SIGINT and SIGTERM itself (it stops accepting connections
+and exits, with a 3 s ceiling for a request in flight), so it should stop
+cleanly as PID 1 without `--init`. That is new in 0.5.0 and has not been
+exercised in a container yet; under Skybridge, `docker run` needed `--init` or
+the process was only killed at the stop timeout.
 
 #### Publishing to the MCP registry
 
@@ -284,10 +297,11 @@ The Alpic-era measurements in **Constraints** below were taken on that platform.
 ### Connecting to Claude Desktop
 
 Add it as a **custom connector** (Settings → Connectors → Add custom connector),
-pasting the URL above. Connectors are stored account-side, use the native HTTP
-transport, and are the only path on which widgets render.
+pasting the URL above. Connectors are stored account-side and use the native
+HTTP transport.
 
-Two paths that look equivalent and are not (both verified 2026-08-19):
+Two paths that look equivalent and are not (both verified 2026-08-19, against
+the Skybridge-era server):
 
 - `claude_desktop_config.json` does **not** accept `"type": "http"` entries —
   Desktop silently drops them from the file on its next config rewrite. This
@@ -295,16 +309,11 @@ Two paths that look equivalent and are not (both verified 2026-08-19):
 - An `npx mcp-remote` wrapper in that file does connect, but its OAuth discovery
   plus a GET SSE stream this server rejects push `initialize` past Desktop's
   ~6 s timeout, so every conversation shows "Unable to reach" even though calls
-  then succeed — and widgets do not render through the STDIO proxy.
+  then succeed.
 
-Widget rendering on claude.ai additionally depends on `_meta.ui.domain`: the
-host validates it against `sha256(<connector URL exactly as the user pasted
-it>)[:32] + ".claudemcpcontent.com"` and otherwise leaves the frame blank
-("ui.domain validation failed" in the Desktop logs) while tool calls keep
-working. This server pins the value to `PUBLIC_MCP_URL` (see "Three things
-about Fly" above), so the URL must be pasted exactly, with `/mcp` and no
-trailing slash. Skybridge 0.35.21 or later is the floor: older versions ignore
-the header the pin relies on.
+A connector added before 0.5.0 keeps working: the tool names, arguments and
+`structuredContent` fields are unchanged. It simply stops drawing a widget, and
+the assistant answers from the text block.
 
 ---
 
@@ -322,43 +331,74 @@ diverged before the switch.
 
 - `lib/llm-business-metrics.ts` — the cost formulas, efficiency scoring, use-case
   profiles and FinOps badge. The site does not expose these, so this app computes
-  them. Kept **character-identical** to the original's; the coherence test is that
-  both apps produce the same cost to the cent for the same model and use case.
+  them. The test is the result, not the text: both apps must produce the same
+  cost to the cent, the same score and the same badge for the same model and use
+  case, and `npm run check-parity` (below) measures exactly that.
 - `lib/openness.ts` — the licence → self-hostability buckets. The site sends the
   licence *string*; the bucketing is local, so a new licence string upstream
-  silently becomes `Unknown` here until it is added. This is exactly how `Llama 4`
-  broke.
+  silently becomes `Unknown` here until it is added. This is how `Llama 4` broke,
+  and then fourteen more strings (17 models) by 2026-11-11. Two things now catch
+  the next one: `fetchFromSite` logs any licence string the buckets do not know,
+  and a test holds the buckets to every licence in the snapshot, so a
+  `refresh-fallback` that brings a new string in fails until it is added.
 - `lib/llm-models.ts` tier 2 — the whole OpenRouter transform (ELO table,
   categories, exclusions, licence prefixes) is a port and only runs when the site
   is unreachable, so its drift is invisible until the day it matters.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference. Applied locally to the site's rows.
 
-**One divergence that is now dormant, and must stay.** `optimizationLevers()`
-here refuses to apply a lever that *raises* the cost, and `optimizedUseCaseCost()`
-returns the list cost exactly when no lever is pulled. The original applies batch
-pricing whenever both batch fields are present, which for Zhipu GLM 5.2 — batch
-$0.70/$2.20 against list $0.49/$1.54 — produced an "optimized" cost 34% dearer
-than list, reported as a 0% saving with both levers named as the reason.
+**The optimized cost charges the cache write.** A cache read is only possible
+after a cache write, which vendors that publish a write rate bill above ordinary
+input (typically 1.25x). The site added that term on 2026-09-21 (its API schema
+2.3, `cacheWritePricePer1M`); this server followed on 2026-11-11, synced to the
+site's commit `eb24b8f`, having spent the interval crediting the read without
+charging the write. `cachedInputRate()` is
+the site's formula term for term, including `CACHE_READS_PER_WRITE = 5` and the
+clamp at the base rate. The site publishes the formula as a spec (its
+cost-per-request methodology guide), so the constant moves there first.
 
-Upstream PR #60 (2026-08-19) closed the gap from the other end: it drops any
-`:batch` row whose rate sits above list, so GLM 5.2 now publishes no batch row at
-all and the bad input never reaches either formula. Measured 2026-08-19 over
-258 models x 8 profiles, against both the live API and the refreshed snapshot: the
-two formulas differ on **0 of 2,064 pairs**, so the two apps agree to the cent
-again.
+**One rule is stricter here than on the site, on purpose.** The site takes the
+batch branch whenever batch rates are published and the workload is async, then
+clamps the result at list. This server takes batch only when the batch branch is
+the cheaper of the two, takes caching only when it pays on the branch chosen, and
+returns the list cost as the very same float when no lever is pulled. The two
+agree on every pair unless a batch branch lands between the standard branch and
+list, which no catalogue row does. The rule exists because `optimizationLevers()`
+names the levers behind each saving: Zhipu GLM 5.2 once listed batch above list
+($0.70/$2.20 against $0.49/$1.54), and OpenAI's gpt-oss-120b lists a cache read
+($0.075) above its batch input rate ($0.0296), which under batch raised the cost
+16% while the text credited "caching + batch API". A lever that costs money must
+not be reported as applied. Do not relax it to match the site's text; it is
+pinned by tests on synthetic dear-batch, dear-cache and dear-cache-under-batch
+models, and by two whole-catalogue sweeps.
 
-The guard is therefore dormant, not redundant — it is the only thing standing
-between a future upstream data regression and an "optimized" price dearer than
-list. Do not delete it to close a divergence that no longer shows up in the
-numbers. It stays pinned by four tests in `llm-business-metrics.test.ts`: two on
-synthetic dear-batch/dear-cache models, which is what keeps them meaningful now
-that no real row triggers them, and two whole-catalogue sweeps.
+**One site rule is not applied here.** The site refuses the FinOps Friendly
+badge to a model with a vendor-announced deprecation, from a hand-curated table
+(`model-lifecycle.ts`, 48 entries) that its API does not publish. Copying the
+table would add a list that drifts in silence. The fix is for `/api/llm-models`
+to carry a deprecation flag; until then a deprecated model can hold the badge
+here and not there (none did on 2026-11-11).
 
-Two things keep the two honest:
+**What the site sends that this server only repeats.** `outlierListing` and
+`promotionalListing` (schema 2.6 and 2.7) are verdicts the site reaches from its
+nightly per-host price fan-out. `coerceSiteModel` carries them, the badge refuses
+an outlier listing, and every text block labels both. Tiers 2 and 3 cannot
+compute either; the snapshot keeps the flags it was taken with. `openRouterId`
+and `hostPricing` (who sells the model, at what range) are not carried yet.
 
-- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0).
-- The cost formulas in `llm-business-metrics.ts` are kept **character-identical** to the original's. The coherence test is that both apps produce the same cost to the cent for the same model and use case.
+Three things keep the two honest:
+
+- `npm run check-parity -- <path to the cloud-sparkle-compare checkout>` loads
+  both implementations, feeds them the live catalogue and counts where they
+  disagree: list and optimized cost over every model x use case, efficiency
+  score, badge, openness bucket, the outlier flag against the site's own rule,
+  and the formatters. It exits 1 on any difference and lists the site's row
+  fields this server does not carry. Outside CI because the site's repository
+  is private. **Run it before each release and after any change to the cost
+  code.** 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
+  scores, 3 badges, 17 openness buckets. After: none.
+- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated` only: the static compute rows have their own date, `computeDataLastUpdated`, because the script never touches them.
+- The tier-2 ELO table in `lib/llm-models.ts` is the site's, copied whole between the `ELO-SCORES-START/END` markers together with `ELO_AS_OF`. The site rewrites every value weekly from one read of Arena's leaderboard; a partial copy would mix two scales. The rest of the tier-2 transform (exclusions, licence prefixes, release dates) was last ported in August 2026 and has not been re-read since.
 
 Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.
 
@@ -438,7 +478,7 @@ Each profile defines typical input/output token counts per request.
   a denominator that includes rows no query can reach is not a denominator.
 - **The caches are warmed at boot, for one region only.** `warmCaches()` at the
   foot of `index.ts` fires `fetchLLMModels()` and `fetchComputeInstances(us-east)`
-  after `server.run()`, fire-and-forget. Measured against production on
+  once the server is listening, fire-and-forget. Measured against production on
   2026-08-18: a freshly deployed process answered `compare-compute-pricing` in
   **8.4 s** and then in ~250 ms — the first caller was funding the rebuild.
   Locally, first call after boot is **231 ms without the warm-up and 23 ms with
@@ -462,7 +502,7 @@ Each profile defines typical input/output token counts per request.
   before moving hosts again.
 
   Three rules it must keep:
-  - **Never block `server.run()`.** The upstream can take 11 s; awaiting it turns
+  - **Never block start-up.** The upstream can take 11 s; awaiting it turns
     a slow site into a failed boot.
   - **Never cache a failure.** The fetchers do not cache snapshot fallbacks, so a
     failed warm leaves the cache empty and the first real caller pays what it
@@ -508,10 +548,8 @@ Each profile defines typical input/output token counts per request.
   the stale-while-revalidate branch; the cold branch — the one callers wait on —
   had none. Keep the `finally` that clears the shared promise, or one failure
   pins every later caller to it.
-- **Do not rename or drop `structuredContent` fields.** The widgets and the `ui://widgets/ext-apps/*` resources are bound to the current shape. Add fields; do not reshape. (`app.json` used to be bound to it too; it was deleted once ChatGPT moved to submitting the MCP server directly.)
-- **Widgets are registered for the `mcp-app` host only.** Omitting `hosts` on `registerWidget` publishes each widget twice, under `ui://widgets/apps-sdk/` *and* `ui://widgets/ext-apps/`, with the same display name, so hosts list every widget twice in their resource pickers. `mcp-app` emits `text/html;profile=mcp-app` and `_meta.ui.resourceUri`, which is what both Claude and current ChatGPT want; `apps-sdk` is the legacy shape. See `docs/chatgpt-submission.md`.
-- Brand color: Chartreuse (#ACE849) for OptimNow identity
-- Widget UIs consume `useToolInfo()` hook from Skybridge (not React props)
+- **Do not rename or drop `structuredContent` fields.** Each tool publishes an `outputSchema`, and callers that read the fields are bound to the current shape. Add fields; do not reshape. A field a handler returns must also be declared in the schema: Zod emits `additionalProperties: false`, so a strict host rejects a response carrying an undeclared one.
+- **No `ui://` resources and no `_meta` on the tools.** The server declares the `tools` capability only. A host that finds a widget template on a tool tries to render it; `check-connector.mjs` fails if one reappears.
 
 ---
 

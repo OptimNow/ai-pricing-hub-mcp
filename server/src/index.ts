@@ -1,4 +1,7 @@
-import { McpServer } from "skybridge/server";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { fetchLLMModels, filterModels, matchModels, resolveModel } from "./lib/llm-models.js";
 import type { ResolutionStatus } from "./lib/llm-models.js";
@@ -20,9 +23,10 @@ import {
   optimizationLevers,
   savingsPct,
   leverSummary,
+  NO_ASSUMPTIONS_NOTE,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES } from "./lib/openness.js";
-import { pinPublicUrl } from "./lib/public-url.js";
+import { createHttpServer } from "./lib/http.js";
 import type {
   UseCaseProfile,
   VolumePreset,
@@ -42,8 +46,8 @@ import {
 import type { PricingRegion } from "./lib/compute-pricing.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
-// Mirror the structuredContent each tool returns, error paths included, so the
-// widgets and any downstream consumer get a contract instead of a guess.
+// Mirror the structuredContent each tool returns, error paths included, so a
+// host and any downstream consumer get a contract instead of a guess.
 
 const modelShape = {
   provider: z.string(),
@@ -54,13 +58,49 @@ const modelShape = {
   batchInputPricePer1M: z.number().optional(),
   batchOutputPricePer1M: z.number().optional(),
   cachedInputPricePer1M: z.number().optional(),
+  cacheWritePricePer1M: z.number().optional(),
   contextWindow: z.string(),
   category: z.string(),
   capabilities: z.array(z.string()),
   releaseDate: z.string().optional(),
   eloScore: z.number().optional(),
   license: z.string().optional(),
+  // What kind of price the row quotes, as the site flags it. Present and true,
+  // or absent: absent means not flagged or unknown, never "a typical price".
+  outlierListing: z.boolean().optional(),
+  promotionalListing: z.boolean().optional(),
 };
+
+/** Where the cache and batch assumptions behind an optimized figure came from.
+ *  `none-supplied` is a custom token shape with neither: its optimized cost
+ *  repeats list price because nothing was assumed, not because nothing is
+ *  achievable, and a reader has to be able to tell those apart. */
+const OPTIMIZATION_BASES = ["preset", "caller-supplied", "none-supplied"] as const;
+type OptimizationBasis = (typeof OPTIMIZATION_BASES)[number];
+
+/** Inline marker for a price the site flags, e.g. ` [promotional price]`. */
+function listingTags(m: { promotionalListing?: boolean; outlierListing?: boolean }): string {
+  return (m.promotionalListing ? " [promotional price]" : "") + (m.outlierListing ? " [outlier listing]" : "");
+}
+
+/** One line per flag that appears in `models`, saying what the marker means.
+ *  Empty when nothing is flagged, so an ordinary answer carries no boilerplate. */
+function listingLegend(models: { promotionalListing?: boolean; outlierListing?: boolean }[]): string {
+  const lines: string[] = [];
+  if (models.some(m => m.promotionalListing)) {
+    lines.push(
+      "[promotional price]: a temporary discounted rate, charged today; the standard rate is higher, " +
+      "so a budget built on it will rise when the promotion ends.",
+    );
+  }
+  if (models.some(m => m.outlierListing)) {
+    lines.push(
+      "[outlier listing]: one host's rate with input near free and output at or above the going rate; " +
+      "not typical of what the model costs elsewhere, and not eligible for the FinOps Friendly badge.",
+    );
+  }
+  return lines.length > 0 ? `\n\n${lines.join("\n")}` : "";
+}
 
 const enrichedModelSchema = z.object({
   ...modelShape,
@@ -73,7 +113,7 @@ const enrichedModelSchema = z.object({
   volatilityRisk: z.string(),
   isFinOpsFriendly: z.boolean(),
   /** Which optimization levers actually applied for the selected use case, so
-   *  the widget can name them instead of assuming caching. */
+   *  a reader can name them instead of assuming caching. */
   batchEligible: z.boolean(),
   cacheEligible: z.boolean(),
   batchApplied: z.boolean(),
@@ -173,6 +213,10 @@ const estimateCostOutputSchema = {
           cacheEligible: z.boolean(),
           batchApplied: z.boolean(),
           cacheApplied: z.boolean(),
+          // The cache assumption behind the optimized figure and where the
+          // assumptions came from. `batchEligible` above is its batch twin.
+          cacheHitRate: z.number(),
+          optimizationBasis: z.enum(OPTIMIZATION_BASES),
         }),
       ),
     }),
@@ -222,8 +266,8 @@ const resolutionSchema = z.object({
 });
 
 /** One (model, use case) cell: list and optimized cost, plus which of the two
- *  optimization levers actually applied. The levers ship so the widget can say
- *  *why* a saving is 0% instead of drawing an empty bar. */
+ *  optimization levers actually applied. The levers ship so a consumer can say
+ *  *why* a saving is 0% instead of reporting a bare zero. */
 const useCaseCostSchema = z.object({
   key: z.string(),
   label: z.string(),
@@ -283,6 +327,8 @@ const recommendationSchema = z.object({
   volatilityRisk: z.string(),
   costDeltaVsTopPct: z.number(),
   constraints: z.array(constraintCheckSchema),
+  outlierListing: z.boolean().optional(),
+  promotionalListing: z.boolean().optional(),
 });
 
 const recommendOutputSchema = {
@@ -350,19 +396,41 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const server = new McpServer(
-  {
-    name: "ai-pricing-hub",
-    version: "0.4.2",
+// ─── Tools ──────────────────────────────────────────────────────────
+// (serialisation-contract.test.ts reads the output schemas as everything above
+// this heading, so keep the heading where the schemas end.)
+
+/** The tools, as registrations to replay on a server. One MCP server is built
+ *  per request (see lib/http.ts for why), so a tool cannot be registered once
+ *  on a long-lived instance: it is declared once here and registered on each. */
+const tools: ((server: McpServer) => void)[] = [];
+
+/** Declare a tool. Same parameters as `McpServer.registerTool`, so the handler's
+ *  arguments are inferred from `inputSchema` exactly as they would be there. */
+function tool<
+  OutputArgs extends ZodRawShapeCompat | AnySchema,
+  InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined,
+>(
+  name: string,
+  config: {
+    title?: string;
+    description?: string;
+    inputSchema?: InputArgs;
+    outputSchema?: OutputArgs;
+    annotations?: ToolAnnotations;
+    _meta?: Record<string, unknown>;
   },
-  { capabilities: {} },
-)
+  cb: ToolCallback<InputArgs>,
+): void {
+  tools.push(server => {
+    server.registerTool(name, config, cb);
+  });
+}
 
 // ─── Tool 1: Compare LLM Models ─────────────────────────────────────
 
-.registerWidget(
+tool(
   "compare-llm-models",
-  { description: "Compare LLM Models", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -439,6 +507,7 @@ const server = new McpServer(
         `${i + 1}. ${m.provider} ${m.model} — ` +
         `${m.category}, ${m.openness}` +
         `, Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M` +
+        listingTags(m) +
         (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
         `, ${useCaseLabel} cost: ${formatMicroCost(m.useCaseCost)}/req` +
         ` (optimized: ${formatMicroCost(m.optimizedUseCaseCost)}/req)` +
@@ -487,9 +556,10 @@ const server = new McpServer(
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
               `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
-              `≤ $${finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, plus a top-30% efficiency score ` +
-              `and a stable release — ${finopsBadge.qualifying} of ${finopsBadge.ranked} ranked models qualify.\n\n` +
-              lines.join("\n"),
+              `≤ $${finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, plus a top-30% efficiency score, ` +
+              `a stable release and a price that is not an outlier listing — ` +
+              `${finopsBadge.qualifying} of ${finopsBadge.ranked} ranked models qualify.\n\n` +
+              lines.join("\n") + listingLegend(results),
           },
         ],
         isError: false,
@@ -504,13 +574,12 @@ const server = new McpServer(
       };
     }
   },
-)
+);
 
 // ─── Tool 2: Estimate LLM Cost ──────────────────────────────────────
 
-.registerWidget(
+tool(
   "estimate-llm-cost",
-  { description: "Estimate LLM Cost", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -524,20 +593,45 @@ const server = new McpServer(
       "compare-models-side-by-side instead. " +
       "Provide a model name to get detailed cost breakdowns, or compare costs across all use case presets. " +
       "Each figure comes twice: list price, and the optimized price achievable with prompt caching and the batch API. " +
+      "The presets carry their own cache-hit and batch assumptions; a custom token shape carries none " +
+      "unless cacheHitRate and/or batchEligible are passed with it, and each cost entry states which " +
+      "applied in `optimizationBasis`. " +
       "Cost figures are final as returned: rounded server-side and dated by `provenance`, with the " +
       "lever behind each saving, or the reason there is none, named in the text.",
     inputSchema: {
       modelName: z.string().optional().describe("Model name, e.g. 'GPT-4o'. A partial name matches up to 5 models and ALL of them are costed. If omitted, the first 8 catalogue entries are used — that is catalogue order, not a quality ranking."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: every preset."),
-      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request. Must be supplied TOGETHER with customOutputTokens — either alone is ignored and the preset is used. A custom shape assumes no cacheable prefix and no batch eligibility, so its optimized cost equals its list cost."),
+      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request. Must be supplied TOGETHER with customOutputTokens — either alone is ignored and the preset is used. A custom shape assumes no cacheable prefix and no batch eligibility unless cacheHitRate / batchEligible say otherwise, so without them its optimized cost equals its list cost."),
       customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request. Must be supplied TOGETHER with customInputTokens — either alone is ignored and the preset is used."),
+      cacheHitRate: z.number().min(0).max(1).optional().describe("Share of input tokens served from the prompt cache, 0 to 1: for example 0.6 for a stable system prompt and tool definitions re-sent on every call. Only valid with customInputTokens and customOutputTokens; the presets carry their own and cannot be overridden. Omitting it means no caching is assumed, not that none is achievable."),
+      batchEligible: z.boolean().optional().describe("Whether this workload is asynchronous and can go through the batch API. Only valid with customInputTokens and customOutputTokens; the presets carry their own. Omitting it means no batch discount is assumed, not that the workload is ineligible."),
       monthlyVolume: z.number().int().min(1).max(1_000_000_000).optional().describe("Exact monthly request count, any integer (default 100,000). This tool does not take the 10k/100k/1m presets the other cost tools use."),
     },
     outputSchema: outputSchema(estimateCostOutputSchema),
   },
-  async ({ modelName, useCasePreset, customInputTokens, customOutputTokens, monthlyVolume }) => {
+  async ({ modelName, useCasePreset, customInputTokens, customOutputTokens, cacheHitRate, batchEligible, monthlyVolume }) => {
     const volume = monthlyVolume || 100_000;
     const emptyOutput = { modelCosts: [], volume, source: "error", eloAsOf: "" };
+
+    const customTokens = customInputTokens !== undefined && customOutputTokens !== undefined;
+    const leversSupplied = cacheHitRate !== undefined || batchEligible !== undefined;
+
+    // The two levers describe a *custom* workload. Each preset already carries
+    // its own cache-hit rate and batch eligibility, and one override would
+    // rewrite all eight rows from a single number. Refusing is louder than
+    // ignoring, and a silently ignored input is exactly what these two
+    // arguments exist to remove.
+    if (leversSupplied && !customTokens) {
+      const message =
+        "cacheHitRate and batchEligible describe a custom workload, so they need both " +
+        "customInputTokens and customOutputTokens alongside them. The use-case presets carry " +
+        "their own cache-hit and batch assumptions and cannot be overridden.";
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
 
     try {
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
@@ -582,9 +676,16 @@ const server = new McpServer(
         perRequestOptimized: number;
         monthlyOptimized: number;
         savingsPct: number;
+        cacheHitRate: number;
+        optimizationBasis: OptimizationBasis;
       } & OptimizationLevers;
 
-      const entry = (m: LLMModel, useCase: string, profile: UseCaseProfile): CostEntry => {
+      const entry = (
+        m: LLMModel,
+        useCase: string,
+        profile: UseCaseProfile,
+        basis: OptimizationBasis,
+      ): CostEntry => {
         const cost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
         const optimized = optimizedUseCaseCost(m, profile);
         return {
@@ -597,33 +698,51 @@ const server = new McpServer(
           monthlyOptimized: optimized * volume,
           savingsPct: savingsPct(cost, optimized),
           ...optimizationLevers(m, profile),
+          cacheHitRate: profile.cacheHitRate,
+          optimizationBasis: basis,
         };
       };
 
       const modelCosts: { model: LLMModel; costs: CostEntry[] }[] = targetModels.map(m => {
         const costs: CostEntry[] = [];
 
-        if (customInputTokens !== undefined && customOutputTokens !== undefined) {
-          // No caching or batch assumption on a custom shape: we know nothing
-          // about how repetitive or async the caller's workload is.
+        if (customTokens) {
+          // A custom shape carries no discount assumptions of its own, so take
+          // the caller's when they gave any and assume nothing otherwise.
+          // Defaulting to some average cache-hit rate would invent a fact about
+          // their workload; optimizationBasis records which of the two it was.
           const profile: UseCaseProfile = {
             label: "Custom", shortLabel: "Custom",
-            inputTokens: customInputTokens, outputTokens: customOutputTokens,
-            cacheHitRate: 0, batchEligible: false,
+            inputTokens: customInputTokens!, outputTokens: customOutputTokens!,
+            cacheHitRate: cacheHitRate ?? 0,
+            batchEligible: batchEligible ?? false,
           };
-          costs.push(entry(m, "Custom", profile));
+          costs.push(entry(m, "Custom", profile, leversSupplied ? "caller-supplied" : "none-supplied"));
         } else if (useCasePreset) {
           const profile = USE_CASE_PROFILES[useCasePreset];
-          costs.push(entry(m, profile.label, profile));
+          costs.push(entry(m, profile.label, profile, "preset"));
         } else {
           for (const key of USE_CASE_KEYS) {
             const profile = USE_CASE_PROFILES[key];
-            costs.push(entry(m, profile.label, profile));
+            costs.push(entry(m, profile.label, profile, "preset"));
           }
         }
 
         return { model: m, costs };
       });
+
+      // Asked for but not applied. Naming only what was applied would let a
+      // caller who requested both levers read a one-lever discount as the full
+      // answer.
+      const notApplied = (c: CostEntry): string => {
+        const missing = [
+          c.cacheEligible && !c.cacheApplied ? "caching" : "",
+          c.batchEligible && !c.batchApplied ? "the batch API" : "",
+        ].filter(Boolean);
+        return missing.length > 0
+          ? `; ${missing.join(" and ")} not applied: no published rate that lowers the cost`
+          : "";
+      };
 
       // Build text summary
       const lines = modelCosts.map(({ model: m, costs }) => {
@@ -633,10 +752,12 @@ const server = new McpServer(
 ` +
           `    optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
           (c.savingsPct > 0
-            ? ` — save ${c.savingsPct}% with ${leverSummary(c)}`
+            ? ` — save ${c.savingsPct}% with ${leverSummary(c)}${notApplied(c)}`
+            : c.optimizationBasis === "none-supplied"
+            ? ` — ${NO_ASSUMPTIONS_NOTE}`
             : ` — no saving available (${leverSummary(c)})`)
         );
-        return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)\n${costLines.join("\n")}`;
+        return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)${listingTags(m)}\n${costLines.join("\n")}`;
       });
 
       return {
@@ -665,7 +786,8 @@ const server = new McpServer(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n\n` +
-              `Cost estimates for ${targetModels.length} model(s) at ${volume.toLocaleString()} requests/month:\n\n` + lines.join("\n\n"),
+              `Cost estimates for ${targetModels.length} model(s) at ${volume.toLocaleString()} requests/month:\n\n` +
+              lines.join("\n\n") + listingLegend(targetModels),
           },
         ],
         isError: false,
@@ -680,13 +802,12 @@ const server = new McpServer(
       };
     }
   },
-)
+);
 
 // ─── Tool 3: Compare Models Side by Side ────────────────────────────
 
-.registerWidget(
+tool(
   "compare-models-side-by-side",
-  { description: "Compare Models Side by Side", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -811,6 +932,7 @@ const server = new McpServer(
 
       const header = withCosts.map(m =>
         `${m.provider} ${m.model} — In: $${m.inputPricePer1M}/1M, Out: $${m.outputPricePer1M}/1M` +
+        listingTags(m) +
         (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
         `, context ${m.contextWindow}`
       );
@@ -855,7 +977,7 @@ const server = new McpServer(
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n` +
               `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
-              `${header.join("\n")}\n\n${rows.join("\n\n")}`,
+              `${header.join("\n")}${listingLegend(withCosts)}\n\n${rows.join("\n\n")}`,
           },
         ],
         isError: false,
@@ -870,13 +992,12 @@ const server = new McpServer(
       };
     }
   },
-)
+);
 
 // ─── Tool 4: Recommend an LLM Model ─────────────────────────────────
 
-.registerWidget(
+tool(
   "recommend-llm-model",
-  { description: "Recommend an LLM Model", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -1068,6 +1189,10 @@ const server = new McpServer(
             ? Math.round((e.m.monthlyBudget / top.m.monthlyBudget - 1) * 100)
             : 0,
         constraints: e.constraints,
+        // A pick resting on a promotional price is the case where the reader
+        // most needs the label: the budget it was chosen on will rise.
+        outlierListing: e.m.outlierListing,
+        promotionalListing: e.m.promotionalListing,
       });
 
       const results = shortlist.map(build);
@@ -1075,7 +1200,7 @@ const server = new McpServer(
       const volumeLabel = volumeEntry?.label ?? vol;
 
       const lines = results.map(r =>
-        `${r.rank}. ${r.provider} ${r.model} — ELO ${r.eloScore ?? "n/a"}, ` +
+        `${r.rank}. ${r.provider} ${r.model}${listingTags(r)} — ELO ${r.eloScore ?? "n/a"}, ` +
         `efficiency ${r.efficiencyScore ?? "n/a"} (rank ${r.efficiencyRank ?? "n/a"} of ${r.rankedOutOf}), ` +
         `${formatMicroCost(r.perRequest)}/req list → ${formatMonthlyBudget(r.monthlyBudget)}/mo, ` +
         `${formatMicroCost(r.perRequestOptimized)}/req optimized → ${formatMonthlyBudget(r.monthlyOptimizedBudget)}/mo (−${r.savingsPct}%), ` +
@@ -1125,7 +1250,7 @@ const server = new McpServer(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `${preamble}\n\n${lines.join("\n")}\n\n` +
+              `${preamble}\n\n${lines.join("\n")}${listingLegend(results)}\n\n` +
               `ROI calculator for this scenario: ${roiUrl}`,
           },
         ],
@@ -1141,13 +1266,12 @@ const server = new McpServer(
       };
     }
   },
-)
+);
 
 // ─── Tool 5: Compare Compute Pricing ────────────────────────────────
 
-.registerWidget(
+tool(
   "compare-compute-pricing",
-  { description: "Compare Cloud Compute Pricing", hosts: ["mcp-app"], annotations: { audience: ["assistant"] } },
   {
     // Anthropic connectors directory requires explicit tool annotations:
     // all tools here only read public pricing data.
@@ -1277,13 +1401,49 @@ const server = new McpServer(
   },
 );
 
-// Every request is hashed as if it arrived at PUBLIC_MCP_URL, so the widget
-// sandbox domain follows the one published URL rather than the Host header.
-// Skybridge mounts custom middleware ahead of the MCP transport; see
-// lib/public-url.ts for why the header, and public-url.test.ts for the pin.
-server.use("/mcp", pinPublicUrl);
+// ─── Server ─────────────────────────────────────────────────────────
 
-server.run();
+/**
+ * A server with every tool registered on it. Called once per request by
+ * lib/http.ts, which is the point: the MCP SDK refuses a second connection on
+ * a server that already has one, so a shared instance answers every request
+ * that overlaps another with HTTP 500.
+ */
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "ai-pricing-hub",
+    version: "0.5.0",
+  });
+  for (const register of tools) register(server);
+  return server;
+}
+
+const httpServer = createHttpServer(createServer);
+
+// Fly sets PORT (fly.toml), and a container must listen on all interfaces,
+// which is Node's default when no host is given.
+const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+
+httpServer.on("error", (error) => {
+  console.error("[server] failed to start:", errorMessage(error));
+  process.exit(1);
+});
+
+httpServer.listen(port, () => {
+  console.log(`[server] ai-pricing-hub MCP listening on port ${port}, endpoint /mcp`);
+});
+
+// Stop when asked. As PID 1 in a container Node ignores SIGINT and SIGTERM
+// unless something handles them, so without this a stopping machine was only
+// ever killed at the platform's timeout.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    httpServer.close(() => process.exit(0));
+    httpServer.closeIdleConnections();
+    // A request still in flight gets a moment to finish, not forever.
+    setTimeout(() => process.exit(0), 3_000).unref();
+  });
+}
 
 /**
  * Fill the caches the first caller would otherwise pay for.
@@ -1306,7 +1466,7 @@ server.run();
  * problem, but it costs almost nothing to prime and all four LLM tools block on
  * it.
  *
- * Deliberately fire-and-forget: `server.run()` must not wait on an upstream
+ * Deliberately fire-and-forget: start-up must not wait on an upstream
  * that can take 11 s, or a slow site turns into a failed boot. A failure here
  * is logged and dropped — the fetchers do not cache snapshot fallbacks, so a
  * failed warm leaves the cache empty and the first real caller simply pays what
@@ -1328,4 +1488,3 @@ function warmCaches(): void {
 
 warmCaches();
 
-export type AppType = typeof server;

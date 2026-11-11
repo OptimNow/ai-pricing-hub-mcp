@@ -39,12 +39,18 @@ const FIELD_ORDER = [
   "batchInputPricePer1M",
   "batchOutputPricePer1M",
   "cachedInputPricePer1M",
+  "cacheWritePricePer1M",
   "contextWindow",
   "category",
   "capabilities",
   "releaseDate",
   "eloScore",
   "license",
+  // The site's verdict on the price quoted, true or absent. Kept in the
+  // snapshot because this server cannot re-derive either: both come from the
+  // site's per-host fan-out. They describe the snapshot day, like the prices.
+  "outlierListing",
+  "promotionalListing",
 ];
 
 function toTsLiteral(model) {
@@ -176,7 +182,9 @@ const block = [
   ...models.map(toTsLiteral),
   "];",
   "",
-].join("\n");
+  // The file's own line ending: a Windows checkout is CRLF on disk, and a block
+  // joined with "\n" left it with mixed endings until the next commit.
+].join(source.includes("\r\n") ? "\r\n" : "\n");
 
 let updated = source.slice(0, startIdx) + block + source.slice(endIdx);
 updated = updated.replace(

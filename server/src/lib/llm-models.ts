@@ -11,7 +11,7 @@
 import { llmModels, dataLastUpdated, LLM_CAPABILITIES } from "../data/pricing-data.js";
 import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.js";
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
-import { opennessOf } from "./openness.js";
+import { isRecognisedLicence, opennessOf } from "./openness.js";
 import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
@@ -20,9 +20,9 @@ export type { LLMModel, LLMCapability, LLMCategory };
  * Which tier of the fallback chain served the response.
  *
  * `"openrouter"` and `"static-fallback"` keep the exact meaning they have
- * always had — direct OpenRouter, and the frozen snapshot — so the widgets'
- * `source === "static-fallback"` check and anything downstream reading this
- * field keep working. `"optimtoken"` is the new preferred tier.
+ * always had — direct OpenRouter, and the frozen snapshot — so anything
+ * downstream reading this field keeps working. `"optimtoken"` is the preferred
+ * tier.
  */
 export type ModelSource = "optimtoken" | "openrouter" | "static-fallback";
 
@@ -37,118 +37,198 @@ interface OpenRouterModel {
     input_modalities: string[];
     output_modalities: string[];
   };
-  pricing: { prompt: string; completion: string; input_cache_read?: string };
+  pricing: {
+    prompt: string;
+    completion: string;
+    input_cache_read?: string;
+    /** Price of WRITING a token into the prompt cache, at the default (roughly
+     *  5-minute) lifetime. The dearer `input_cache_write_1h` some vendors also
+     *  publish is deliberately not read: the optimized-cost formula models
+     *  exactly one cache lifetime. Same choice as the site. */
+    input_cache_write?: string;
+  };
   top_provider: { context_length: number; max_completion_tokens: number };
   supported_parameters: string[];
   hugging_face_id?: string;
 }
 
-// ── Static ELO scores (from Arena, ex-LMArena — updated periodically) ──
-// Post-January-2026 recalibrated scale for 2025+ models (public snapshots, Aug 2026).
-// Older models keep legacy-scale values; ordering across the boundary stays correct.
-// Bump ELO_AS_OF whenever the map is refreshed — it is surfaced in the widgets.
+// ── Static ELO scores (from Arena, ex-LMArena) ──
+// Read by tier 2 only (direct OpenRouter): on tier 1 the site sends each
+// model's score together with its own `meta.eloAsOf`. The map is the site's,
+// copied whole from cloud-sparkle-compare/api/llm-models.ts, where
+// scripts/rebase-elo-scores.mjs rewrites every value weekly from one read of
+// Arena's leaderboard dataset, so all of them sit on one scale. Copy the whole
+// map and ELO_AS_OF together, never a few rows: a partial refresh mixes two
+// scales. ELO_AS_OF is the board's own publish date and is reported in every
+// response as `eloAsOf`.
 
-export const ELO_AS_OF = "2026-08-13";
+export const ELO_AS_OF = "2026-11-08";
 
+// ELO-SCORES-START — copied from the site; hand edits here are lost on the next copy.
 const ELO_SCORES: Record<string, number> = {
-  // ── Tier 1: Top-tier frontier (new scale, 1430+) ──
-  "anthropic/claude-fable-5": 1495,
-  "openai/gpt-5.5-pro": 1485,
-  "anthropic/claude-opus-4.8": 1483,
+  "google/gemini-4-argon": 1530,
+  "anthropic/claude-fable-5.1": 1513,
+  "anthropic/claude-opus-5.5": 1513,
+  "meta/muse-wonder": 1504,
+  "anthropic/claude-opus-5": 1502,
+  "google/gemini-3.8-flash": 1500,
+  "anthropic/claude-opus-4.6": 1497,
+  "xiaomi/mimo-v2.6-pro": 1492,
+  "anthropic/claude-fable-5": 1491,
+  "meta/muse-spark-1.3": 1491,
+  "google/gemini-3.7-flash": 1489,
+  "qwen/qwen3.8-max-0902": 1485,
+  "meta/muse-spark-1.2": 1484,
+  "anthropic/claude-opus-4.7": 1483,
+  "google/gemini-3.5-flash": 1483,
   "google/gemini-3.1-pro-preview": 1480,
-  "anthropic/claude-opus-5": 1478,
-  "google/gemini-3.5-flash": 1472,
-  "openai/gpt-5.4": 1470,
-  "openai/gpt-5.5": 1468,
-  "qwen/qwen3.7-max": 1466,
-  "anthropic/claude-opus-4.7": 1465,
-  "google/gemini-3.6-flash": 1462,
-  "qwen/qwen3.7-plus": 1460,
-  "google/gemini-3.7-flash": 1458,
-  "anthropic/claude-sonnet-4.6": 1457,
-  "anthropic/claude-sonnet-5": 1455,
-  "x-ai/grok-4.20": 1455,
-  "moonshotai/kimi-k2.6": 1452,
-  "anthropic/claude-opus-4.6": 1470,
-  "anthropic/claude-opus-4.5": 1450,
-  "x-ai/grok-4.20-multi-agent": 1450,
-  "deepseek/deepseek-v4-pro": 1449,
-  "x-ai/grok-4.6": 1445,
-  "moonshotai/kimi-k3": 1445,
-  "x-ai/grok-4.5": 1440,
-  "anthropic/claude-sonnet-4.5": 1438,
-  "openai/gpt-5.2": 1440,
-  "deepseek/deepseek-v4-flash": 1431,
-  "z-ai/glm-5.2": 1430,
-  "openai/gpt-5.1": 1428,
-  "z-ai/glm-5.1": 1420,
-  "google/gemini-3-pro-preview": 1479,
-  "x-ai/grok-4": 1410,
-  "google/gemini-2.5-pro-preview": 1392,
-  "google/gemini-3-flash-preview": 1385,
-  "anthropic/claude-opus-4": 1381,
-  "deepseek/deepseek-v3.2": 1370,
-  "openai/gpt-5": 1370,
-  "anthropic/claude-haiku-4.5": 1392,
-  "minimax/minimax-m3": 1390,
-  "anthropic/claude-sonnet-4": 1363,
-  "anthropic/claude-3.7-sonnet": 1363,
-  "deepseek/deepseek-r1": 1358,
-  "openai/o3": 1350,
-  "openai/o1": 1350,
-  "x-ai/grok-3": 1346,
-  "moonshotai/kimi-k2.5": 1345,
-  "openai/o4-mini-high": 1345,
-  "openai/o4-mini": 1340,
-  "google/gemini-2.5-flash-preview": 1340,
-  "openai/o3-mini": 1337,
-  "openai/o3-mini-high": 1337,
-  "moonshotai/kimi-k2": 1330,
-  "meta-llama/llama-4-maverick": 1325,
-  "deepseek/deepseek-v3": 1318,
-  "x-ai/grok-3-mini": 1316,
-  "alibaba/qwq-32b": 1316,
-  "openai/gpt-5-mini": 1310,
-  "openai/gpt-4.1": 1305,
-  "openai/o1-mini": 1304,
-  "google/gemini-2.0-flash-001": 1298,
-  "anthropic/claude-3.5-sonnet": 1290,
-  "meta-llama/llama-4-scout": 1287,
-  "openai/gpt-4o": 1285,
-  "meta-llama/llama-3.1-405b-instruct": 1266,
-  "qwen/qwen3.5-397b-a17b": 1380,
-  "qwen/qwen3-max-thinking": 1370,
-  "qwen/qwen3.5-122b-a10b": 1340,
-  "qwen/qwen3.5-27b": 1310,
-  "qwen/qwen3.5-35b-a3b": 1300,
-  "qwen/qwen3.5-plus-02-15": 1295,
-  "qwen/qwen3.5-flash-02-23": 1285,
-  "qwen/qwen3-coder-next": 1290,
-  "alibaba/qwen-2.5-72b-instruct": 1261,
-  "x-ai/grok-2": 1260,
-  "google/gemini-1.5-pro": 1260,
-  "openai/gpt-4.1-mini": 1260,
-  "openai/gpt-4-turbo": 1257,
-  "mistralai/mistral-large": 1250,
-  "meta-llama/llama-3.3-70b-instruct": 1247,
-  "anthropic/claude-3.5-haiku": 1231,
-  "meta-llama/llama-3.1-70b-instruct": 1227,
-  "microsoft/phi-4": 1220,
-  "openai/gpt-4o-mini": 1219,
-  "amazon/nova-pro-v1": 1214,
-  "mistralai/mistral-small": 1204,
-  "google/gemma-2-27b-it": 1187,
-  "cohere/command-r-plus": 1187,
-  "anthropic/claude-3-haiku": 1178,
-  "mistralai/mistral-nemo": 1177,
-  "meta-llama/llama-3.1-8b-instruct": 1152,
-  "google/gemma-2-9b-it": 1146,
-  // Zhipu (GLM)
-  "z-ai/glm-5": 1412,
-  // MiniMax
-  "minimax/minimax-m2.5": 1215,
-  "minimax/minimax-m2.5-lightning": 1215,
+  "google/gemini-3.6-flash": 1479,
+  "meta/muse-spark-1.1": 1479,
+  "z-ai/glm-5.3": 1476,
+  "moonshotai/kimi-k3": 1475,
+  "qwen/qwen3.7-max": 1475,
+  "z-ai/glm-5.3-flash": 1471,
+  "z-ai/glm-5.2": 1469,
+  "anthropic/claude-sonnet-5.5": 1468,
+  "openai/gpt-5.5": 1466,
+  "xiaomi/mimo-v2.5-pro": 1464,
+  "deepseek/deepseek-v4.1-flash": 1463,
+  "z-ai/glm-5.1": 1463,
+  "anthropic/claude-sonnet-4.6": 1458,
+  "google/gemini-2.5-pro": 1458,
+  "openai/gpt-5.6-sol": 1457,
+  "moonshotai/kimi-k2.6": 1455,
+  "anthropic/claude-opus-4.8": 1454,
+  "qwen/qwen3.7-plus": 1454,
+  "openai/gpt-5.4": 1452,
+  "anthropic/claude-opus-4.5": 1451,
+  "deepseek/deepseek-v4-pro": 1451,
+  "x-ai/grok-4.20-multi-agent": 1451,
+  "xiaomi/mimo-v2.6-flash": 1451,
+  "openai/gpt-5.6-terra": 1449,
+  "x-ai/grok-4.5": 1448,
+  "openai/gpt-6.1-sol": 1446,
+  "z-ai/glm-5": 1446,
+  "deepseek/deepseek-v4-pro-0813": 1445,
+  "moonshotai/kimi-k2.5": 1445,
+  "nvidia/nemotron-3-ultra-550b-a55b": 1445,
+  "x-ai/grok-4.20": 1444,
+  "google/gemma-4-31b-it": 1443,
+  "stepfun/step-5-preview": 1443,
+  "thinkingmachines/inkling": 1443,
+  "anthropic/claude-sonnet-5": 1442,
+  "openai/gpt-6-astra": 1440,
+  "z-ai/glm-4.6": 1440,
+  "anthropic/claude-sonnet-4.5": 1439,
+  "openai/gpt-5.2-chat": 1439,
+  "tencent/hy3": 1439,
+  "qwen/qwen3.5-397b-a17b": 1438,
+  "z-ai/glm-5v-turbo": 1438,
+  "qwen/qwen3.6-plus": 1436,
+  "qwen/qwen3.8-27b": 1436,
+  "z-ai/glm-4.7": 1435,
+  "google/gemini-3.5-flash-lite": 1434,
+  "google/gemma-4-26b-a4b-it": 1434,
+  "deepseek/deepseek-v4-flash": 1432,
+  "openai/gpt-5.6-luna": 1431,
+  "x-ai/grok-4.6": 1430,
+  "z-ai/glm-4.5": 1430,
+  "mistralai/mistral-large-2512": 1429,
+  "deepseek/deepseek-r1-0528": 1428,
+  "minimax/minimax-m3": 1428,
+  "xiaomi/mimo-v2.5": 1428,
+  "deepseek/deepseek-v3.2": 1425,
+  "mistralai/mistral-medium-3.1": 1425,
+  "reflection/beam-1.0-501b-a23b": 1425,
+  "deepseek/deepseek-v3.2-exp": 1422,
+  "openai/gpt-5.1": 1422,
+  "mistralai/mistral-medium-3-5": 1421,
+  "deepseek/deepseek-chat-v3.1": 1420,
+  "qwen/qwen3-vl-235b-a22b-instruct": 1420,
+  "anthropic/claude-opus-4.1": 1419,
+  "qwen/qwen3-235b-a22b-2507": 1419,
+  "deepseek/deepseek-v3.1-terminus": 1417,
+  "google/gemini-2.5-flash": 1417,
+  "qwen/qwen3-next-80b-a3b-instruct": 1417,
+  "qwen/qwen3.5-122b-a10b": 1417,
+  "qwen/qwen3-235b-a22b-thinking-2507": 1415,
+  "thinkingmachines/inkling-small": 1414,
+  "openai/gpt-5.2": 1412,
+  "openai/gpt-5.4-mini": 1412,
+  "mistralai/mistral-large-4-0": 1410,
+  "openai/o3": 1410,
+  "qwen/qwen3.5-27b": 1409,
+  "nvidia/nemotron-3.5-super-vl": 1407,
+  "openai/gpt-5": 1406,
+  "minimax/minimax-m2.7": 1405,
+  "stepfun/step-3.5-flash": 1403,
+  "anthropic/claude-haiku-5.5": 1399,
+  "x-ai/grok-4.7": 1398,
+  "qwen/qwen3.5-flash-02-23": 1397,
+  "x-ai/grok-4.3": 1397,
+  "anthropic/claude-haiku-4.5": 1396,
+  "openai/gpt-6-sol": 1396,
+  "qwen/qwen3.5-35b-a3b": 1395,
+  "meta/muse-glimmer-30b": 1389,
+  "openai/gpt-6-luna": 1388,
+  "upstage/solar-pro4": 1388,
+  "qwen/qwen3-30b-a3b-instruct-2507": 1384,
+  "z-ai/glm-4.5-air": 1384,
+  "openai/gpt-4.1": 1383,
+  "moonshotai/kimi-k2-0905": 1380,
+  "nvidia/nemotron-3-super-120b-a12b": 1377,
+  "z-ai/glm-4.6v": 1376,
+  "deepseek/deepseek-chat-v3-0324": 1375,
+  "openai/gpt-5-mini": 1374,
+  "openai/gpt-5.4-nano": 1372,
+  "moonshotai/kimi-k2": 1371,
+  "mistralai/mistral-medium-3": 1370,
+  "openai/gpt-oss-120b": 1365,
+  "amazon/nova-2-lite-v1": 1362,
+  "minimax/minimax-m2.5": 1359,
+  "google/gemma-3-27b-it": 1358,
+  "qwen/qwen3-coder": 1357,
+  "z-ai/glm-4.7-flash": 1351,
+  "nvidia/nemotron-3-nano-30b-a3b": 1348,
+  "minimax/minimax-m1": 1343,
+  "openai/gpt-4.1-mini": 1341,
+  "qwen/qwen3-32b": 1340,
+  "mistralai/mistral-small-3.2-24b-instruct": 1338,
+  "google/gemma-3-12b-it": 1334,
+  "deepseek/deepseek-chat": 1333,
+  "z-ai/glm-4.5v": 1333,
+  "cohere/command-a": 1331,
+  "nvidia/nemotron-3.5-lightning": 1329,
+  "openai/gpt-5-nano": 1320,
+  "ibm-granite/granite-4.2-8b": 1318,
+  "qwen/qwen3-30b-a3b": 1317,
+  "google/gemma-3-4b-it": 1291,
+  "openai/gpt-oss-20b": 1288,
+  "meta-llama/llama-4-maverick": 1287,
+  "openai/gpt-4o-mini": 1286,
+  "openai/gpt-4.1-nano": 1285,
+  "openai/gpt-4o": 1283,
+  "meta-llama/llama-4-scout": 1279,
+  "mistralai/mistral-small-3.1-24b-instruct": 1277,
+  "meta-llama/llama-3.3-70b-instruct": 1274,
+  "qwen/qwen-2.5-72b-instruct": 1269,
+  "mistralai/mistral-large-2407": 1266,
+  "meta-llama/llama-3.1-70b-instruct": 1261,
+  "amazon/nova-pro-v1": 1259,
+  "mistralai/mistral-small-24b-instruct-2501": 1234,
+  "google/gemma-2-27b-it": 1231,
+  "qwen/qwen-2.5-coder-32b-instruct": 1230,
+  "amazon/nova-lite-v1": 1229,
+  "cohere/command-r-plus-08-2024": 1229,
+  "microsoft/phi-4": 1217,
+  "amazon/nova-micro-v1": 1208,
+  "cohere/command-r-08-2024": 1187,
+  "meta-llama/llama-3.1-8b-instruct": 1187,
+  "mistralai/mixtral-8x22b-instruct": 1162,
+  "meta-llama/llama-3.2-3b-instruct": 1110,
+  "meta-llama/llama-3.2-1b-instruct": 1055,
 };
+// ELO-SCORES-END
 
 // ── Provider name mapping ──
 
@@ -628,6 +708,12 @@ function transformModels(orModels: OpenRouterModel[]): LLMModel[] {
     const cacheRead = m.pricing.input_cache_read
       ? parseFloat(m.pricing.input_cache_read) * 1e6
       : undefined;
+    // Same defensive parse as the read rate, plus an explicit finiteness test
+    // below: `NaN > 0` is false, but `Infinity > 0` is true, and this number
+    // feeds optimizedUseCaseCost().
+    const cacheWrite = m.pricing.input_cache_write
+      ? parseFloat(m.pricing.input_cache_write) * 1e6
+      : undefined;
 
     return {
       provider,
@@ -641,6 +727,13 @@ function transformModels(orModels: OpenRouterModel[]): LLMModel[] {
       batchOutputPricePer1M: batch ? Math.round(batch.output * 10000) / 10000 : undefined,
       cachedInputPricePer1M:
         cacheRead && cacheRead > 0 ? Math.round(cacheRead * 10000) / 10000 : undefined,
+      cacheWritePricePer1M:
+        cacheWrite !== undefined && Number.isFinite(cacheWrite) && cacheWrite > 0
+          ? Math.round(cacheWrite * 10000) / 10000
+          : undefined,
+      // No outlierListing / promotionalListing on this tier: both are verdicts
+      // the site reaches from its nightly per-host fan-out, which this server
+      // does not hold. Absent means unknown, never "a typical price".
       contextWindow: formatContextWindow(m.context_length),
       category: inferCategory(m),
       capabilities: inferCapabilities(m),
@@ -779,6 +872,12 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
 
   const optionalNumber = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  // The two listing flags are `true` or absent upstream. Anything else is
+  // dropped rather than coerced: a flag that refuses a badge must not be set by
+  // a truthy string.
+  const flag = (v: unknown): true | undefined => (v === true ? true : undefined);
+
+  const cacheWrite = optionalNumber(m.cacheWritePricePer1M);
 
   return {
     provider: m.provider,
@@ -789,6 +888,10 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
     batchInputPricePer1M: optionalNumber(m.batchInputPricePer1M),
     batchOutputPricePer1M: optionalNumber(m.batchOutputPricePer1M),
     cachedInputPricePer1M: optionalNumber(m.cachedInputPricePer1M),
+    // Schema 2.3. Dropping it is not neutral: the optimized cost then credits
+    // every cache read without charging the write that made it possible, which
+    // understated the figure for 37 models until this field was carried.
+    cacheWritePricePer1M: cacheWrite !== undefined && cacheWrite > 0 ? cacheWrite : undefined,
     contextWindow: typeof m.contextWindow === "string" ? m.contextWindow : "",
     // The site owns the taxonomy: its `category` is the price tier
     // (Frontier | Mid-tier | Budget | Image) and its `license` drives our
@@ -807,7 +910,32 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
     releaseDate: typeof m.releaseDate === "string" ? m.releaseDate : undefined,
     eloScore: optionalNumber(m.eloScore),
     license: typeof m.license === "string" ? m.license : undefined,
+    // Schema 2.6 and 2.7: what kind of price this row quotes. The site decides
+    // both from its per-host fan-out; this server only repeats the verdict.
+    outlierListing: flag(m.outlierListing),
+    promotionalListing: flag(m.promotionalListing),
   };
+}
+
+/** Licence strings already reported, so a string the buckets do not know is
+ *  logged once per process rather than on every 15-minute refetch. */
+const reportedLicences = new Set<string>();
+
+/** Say so in the log when the site sends a licence `openness.ts` cannot bucket.
+ *  Nothing else notices: the model simply reads "Unknown". */
+function reportUnrecognisedLicences(models: LLMModel[]): void {
+  const unknown = new Set<string>();
+  for (const m of models) {
+    if (m.license && !isRecognisedLicence(m.license) && !reportedLicences.has(m.license)) {
+      unknown.add(m.license);
+    }
+  }
+  if (unknown.size === 0) return;
+  for (const licence of unknown) reportedLicences.add(licence);
+  console.warn(
+    `[llm-models] ${unknown.size} licence string(s) from the site are not in openness.ts and read ` +
+      `"Unknown": ${[...unknown].join(", ")}. Copy the site's lists (src/lib/openness.ts).`,
+  );
 }
 
 async function fetchFromSite(): Promise<LLMFetchResult> {
@@ -842,6 +970,8 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
       `Only ${models.length} models survived validation (minimum ${MIN_PLAUSIBLE_CATALOGUE}) out of ${(payload.models as unknown[]).length} site entries.`,
     );
   }
+
+  reportUnrecognisedLicences(models);
 
   // The site publishes the ELO vintage it actually used; prefer it over our
   // local constant, which only describes the tier-2 enrichment table.

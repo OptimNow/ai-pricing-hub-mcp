@@ -8,7 +8,7 @@
  * needs a running server and the OpenRouter API, so it is deliberately NOT part
  * of `npm test` or CI — run it by hand after touching anything cost-related.
  *
- *   npx skybridge start
+ *   npm run build && npm run start
  *   node scripts/check-serialisation-precision.mjs http://localhost:3000/mcp
  *
  * Exits non-zero if any field is over-precise.

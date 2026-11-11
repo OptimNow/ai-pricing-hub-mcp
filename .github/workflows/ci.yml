@@ -21,7 +21,7 @@ jobs:
 
       - run: npm ci
 
-      # Type-checks the server and widgets, then the test files separately —
+      # Type-checks the server, then the test files separately —
       # tests are excluded from the build config so they stay out of dist.
       - run: npm run typecheck
 

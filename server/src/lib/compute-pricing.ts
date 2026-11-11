@@ -20,7 +20,7 @@
  *    nobody can audit, so that distinction is carried through to the caller.
  */
 
-import { computeInstances, dataLastUpdated } from "../data/pricing-data.js";
+import { computeInstances, computeDataLastUpdated } from "../data/pricing-data.js";
 import type { ComputeInstance, CloudProvider, OperatingSystem } from "../data/pricing-data.js";
 import {
   fetchOptimtokenJson,
@@ -398,7 +398,7 @@ function fetchFromSnapshot(region: PricingRegion, fallbackReason?: string): Comp
     provenance: {
       tier: 2,
       source: "static-fallback",
-      label: `static snapshot committed ${dataLastUpdated} — no network`,
+      label: `static snapshot committed ${computeDataLastUpdated} — no network`,
       region,
       // The snapshot has no region dimension at all, so saying which region it
       // describes would be a guess. It is US East list pricing by construction.
@@ -408,10 +408,10 @@ function fetchFromSnapshot(region: PricingRegion, fallbackReason?: string): Comp
       fallbackReason,
       unappliedFilters: ["region"],
       catalogueIsSubset: true,
-      dataAsOf: dataLastUpdated,
+      dataAsOf: computeDataLastUpdated,
       notice:
         `STALE PRICING: optimtoken.optimnow.io was unreachable, so these ${computeInstances.length} ` +
-        `instances come from a snapshot committed ${dataLastUpdated}, against ~5,800 upstream. ` +
+        `instances come from a snapshot committed ${computeDataLastUpdated}, against ~5,800 upstream. ` +
         `The snapshot has no region dimension — the "${region}" filter was NOT applied and these ` +
         `are US East list prices. Because it is a ${computeInstances.length}-row subset, an empty ` +
         `result means "not in the snapshot", not "no such instance exists".` +

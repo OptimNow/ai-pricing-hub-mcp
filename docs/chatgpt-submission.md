@@ -3,6 +3,14 @@
 Status as of 2026-08-18: **not submitted.** The server is technically ready;
 three non-code prerequisites are outstanding.
 
+> **2026-11-11: the server is tools only from 0.5.0.** This page was written
+> when every tool rendered a widget, and ChatGPT's directory was being
+> approached as an *app*. The widgets and the Skybridge framework are gone, so
+> what would be submitted now is a plain MCP server with five read-only tools.
+> Whether the plugin portal accepts that, and under which heading, has not been
+> re-checked. The passages below that depended on the widgets are marked.
+> The Claude directory runbook, `claude-directory-submission.md`, is current.
+
 ChatGPT apps are now submitted and published as *plugins*. You submit the
 production MCP server itself, not a manifest. The old `app.json` and its
 migration guide described a flow that no longer exists and have been deleted.
@@ -11,10 +19,8 @@ migration guide described a flow that no longer exists and have been deleted.
 
 Verified against the live endpoint, so nothing here needs changing:
 
-- Widget resources use `mimeType: "text/html;profile=mcp-app"`, the MCP Apps
-  UI type ChatGPT expects.
-- Each tool carries `_meta.ui.resourceUri`. The `openai/outputTemplate` field
-  is only a legacy compatibility alias and is not required.
+- (No longer true from 0.5.0: there are no widget resources and no
+  `_meta.ui.resourceUri` on the tools.)
 - All five tools declare `readOnlyHint`, `destructiveHint` and
   `openWorldHint`. Missing annotations are a common rejection reason.
 - Transport is streamable HTTP at a stable public HTTPS URL.
@@ -26,10 +32,10 @@ Verified against the live endpoint, so nothing here needs changing:
 `/.well-known/openai-apps-challenge` on the MCP server's own domain. The server
 now answers on a domain we control, `optimtoken-mcp.optimnow.io` (a CNAME to
 `ai-pricing-hub-mcp.fly.dev` with a Fly certificate), so the first half of this
-blocker is gone. It still returns 404 at that path: Skybridge exposes no static
-route, so the token has to be served by a small Express handler registered with
-`server.use("/.well-known/openai-apps-challenge", ...)` in `server/src/index.ts`,
-the same mechanism `pinPublicUrl` uses. Add it when the portal issues the token.
+blocker is gone. It still returns 404 at that path: the server answers `/mcp`
+and `/healthz` only. The token would be one more route in
+`server/src/lib/http.ts`, beside the health check. Add it when the portal
+issues the token.
 
 **2. Terms of service page.** The portal wants website, support, privacy and
 terms URLs. We have the site, `optimtoken.optimnow.io/privacy`, and
@@ -78,6 +84,11 @@ LLM tools are unaffected: cold `/api/llm-models` is 209 ms.
 
 ## Keep in mind
 
-The widget resources must stay listed. They are what `_meta.ui.resourceUri`
-points at, so removing them to tidy Claude's attachment picker would also
-remove the custom UI that makes this worth submitting as an app.
+This section used to say the widget resources must stay listed, because the
+custom UI was what made the server worth submitting as an app. They were
+removed in 0.5.0, deliberately. A ChatGPT submission is now a tools-only
+connector or nothing; decide which before spending time on the blockers above.
+
+The latency section above also predates two changes: the site's cold
+`/api/pricing` rebuild fell from about 50 s to 6 to 11 s in August 2026, and
+this server's budget for it is 25 s.

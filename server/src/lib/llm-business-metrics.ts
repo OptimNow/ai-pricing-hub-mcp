@@ -107,80 +107,164 @@ export function useCaseCost(inputPrice: number, outputPrice: number, profile: Us
   return (profile.inputTokens / 1e6) * inputPrice + (profile.outputTokens / 1e6) * outputPrice;
 }
 
+/**
+ * How many times a token written into the prompt cache is read back before it
+ * has to be written again. **A modelling assumption, not a measurement**: no
+ * vendor publishes it, because it is a property of the customer's traffic.
+ *
+ * Why it exists: a cache read is only possible after a cache WRITE, and vendors
+ * that publish a write rate charge MORE for it than for ordinary input
+ * (typically 1.25x at the default ~5-minute lifetime). Crediting the read
+ * without charging the write understates the cost of every cached token.
+ *
+ * The same constant, for the same reasons, as the site's
+ * (cloud-sparkle-compare/src/lib/llm-business-metrics.ts, where the choice of 5
+ * is argued in full, and whose cost-per-request methodology guide prints it).
+ * It is the low, conservative end of a per-conversation prefix (an 11-turn
+ * session) and far below a shared prefix at volume, so the figure errs toward
+ * overstating cost. Change it there first, then here.
+ */
+export const CACHE_READS_PER_WRITE = 5;
+
 /** Which of the two optimization levers actually apply to this (model, workload)
  *  pair. Both are conditional: batch pricing needs an async workload AND a model
  *  that publishes batch rates, cache savings need a cacheable prefix AND a
  *  published cache-read rate. When neither applies the optimized cost is simply
- *  the list cost — the widgets say so rather than drawing a 0% saving. */
+ *  the list cost — the text says so rather than reporting a bare 0% saving. */
 export interface OptimizationLevers {
   /** Workload is async enough for the batch API */
   batchEligible: boolean;
   /** Workload has a reusable prefix (cacheHitRate > 0) */
   cacheEligible: boolean;
-  /** Batch eligible AND the model publishes batch rates */
+  /** Batch eligible, the model publishes batch rates, AND they lower the cost */
   batchApplied: boolean;
-  /** Cache eligible AND the model publishes a cache-read rate */
+  /** Cache eligible, the model publishes a cache-read rate, AND caching pays
+   *  once the cache write is charged */
   cacheApplied: boolean;
 }
 
-export function optimizationLevers(model: LLMModel, profile: UseCaseProfile): OptimizationLevers {
+/**
+ * The input rate once prompt caching is priced in, against one base rate (the
+ * list input rate, or the batch one).
+ *
+ * The site's formula, term for term (its optimizedUseCaseCost()):
+ *
+ *   effectiveIn = h * R + (1 - h) * B + writtenShare * max(0, W - B)
+ *   writtenShare = min(h / CACHE_READS_PER_WRITE, 1 - h)
+ *
+ * with h the cache hit rate, R the published read rate, W the published write
+ * rate and B the base rate. For every CACHE_READS_PER_WRITE tokens read from
+ * cache one token was written; that token is one of the (1 - h) misses, which
+ * the read-only formula bills at B and the vendor bills at W.
+ *
+ *  - No published read rate -> no caching in the estimate, hence no write.
+ *  - Published read but no finite write rate above B -> the write costs the
+ *    ordinary input rate. Vendors with automatic caching genuinely charge no
+ *    premium, so this is not merely a gap.
+ *  - Under batch the read AND the write are taken at their published standard
+ *    rates as-is: no vendor publishes a batch-cache rate, so the premium is
+ *    measured against the batch input rate and comes out larger.
+ *
+ * Clamped at B: caching that does not pay is caching you would not enable. That
+ * also neutralises a read rate published above the base rate, which happens for
+ * real under batch (a $0.075 cache read against a $0.0296 batch input rate).
+ */
+function cachedInputRate(model: LLMModel, profile: UseCaseProfile, baseIn: number): number {
+  const read = model.cachedInputPricePer1M;
+  const h = profile.cacheHitRate;
+  if (read === undefined || !(h > 0)) return baseIn;
+
+  let effectiveIn = read * h + baseIn * (1 - h);
+
+  const write = model.cacheWritePricePer1M;
+  if (write !== undefined && Number.isFinite(write) && write > baseIn) {
+    // Written tokens are cache misses, so their share cannot exceed (1 - h).
+    const writtenShare = Math.min(h / CACHE_READS_PER_WRITE, 1 - h);
+    if (writtenShare > 0) effectiveIn += writtenShare * (write - baseIn);
+  }
+
+  // Written as a comparison, not Math.min, so a NaN never replaces a number.
+  return baseIn < effectiveIn ? baseIn : effectiveIn;
+}
+
+/** The use-case cost on one side of the batch choice, with caching priced in
+ *  where it pays. */
+function branchCost(
+  model: LLMModel,
+  profile: UseCaseProfile,
+  useBatch: boolean,
+): { cost: number; cachePays: boolean } {
+  const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
+  const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
+  const effectiveIn = cachedInputRate(model, profile, baseIn);
+  return {
+    cost: (profile.inputTokens / 1e6) * effectiveIn + (profile.outputTokens / 1e6) * baseOut,
+    cachePays: effectiveIn < baseIn,
+  };
+}
+
+/**
+ * The optimized cost and the levers that produced it, decided together so the
+ * figure and its explanation cannot disagree.
+ *
+ * A published rate is not automatically a saving. Zhipu GLM 5.2 once listed
+ * batch at $0.70/$2.20 against a list price of $0.49/$1.54: applying it raised
+ * the cost by a third. "Optimized" means the best achievable price, so batch is
+ * taken only when its branch is cheaper than the standard one, caching only
+ * when it pays on the branch chosen, and a lever that is not pulled is not
+ * reported as applied. Every tool names the applied levers as the reason for a
+ * saving, and naming one that cost money is worse than naming none.
+ *
+ * This is one step stricter than the site, which takes the batch branch
+ * whenever batch rates are published and then clamps at list. The two agree on
+ * every pair unless a batch branch lands between the standard branch and list,
+ * which no catalogue row does (re-measured 2026-11-11: 0 of 2,512 pairs).
+ */
+function resolveOptimization(
+  model: LLMModel,
+  profile: UseCaseProfile,
+): { cost: number; batchApplied: boolean; cacheApplied: boolean } {
+  const list = useCaseCost(model.inputPricePer1M, model.outputPricePer1M, profile);
+  const standard = branchCost(model, profile, false);
+
   const batchPublished =
     profile.batchEligible &&
     model.batchInputPricePer1M !== undefined &&
     model.batchOutputPricePer1M !== undefined;
-  const cachePublished = profile.cacheHitRate > 0 && model.cachedInputPricePer1M !== undefined;
+  const batch = batchPublished ? branchCost(model, profile, true) : null;
 
-  // A published rate is not automatically a saving. Zhipu GLM 5.2 lists batch
-  // at $0.70/$2.20 against a list price of $0.49/$1.54 — applying it raises the
-  // cost by a third. "Optimized" means the best achievable price, so a lever
-  // that makes the workload dearer is simply not pulled, and must not be
-  // reported as applied: the widgets name the applied levers as the reason for
-  // a saving, and naming one that cost money is worse than naming none.
+  const useBatch = batch !== null && batch.cost < standard.cost;
+  const chosen = useBatch ? batch : standard;
+
+  // With no lever pulled the optimized cost IS the list cost, returned as the
+  // same float: a branch that blends the input price with itself can land a few
+  // ULPs off, invisible in the numbers but enough to draw a longer bar. This is
+  // also the "never above list" guarantee.
+  if (!(chosen.cost < list)) return { cost: list, batchApplied: false, cacheApplied: false };
+
+  return { cost: chosen.cost, batchApplied: useBatch, cacheApplied: chosen.cachePays };
+}
+
+export function optimizationLevers(model: LLMModel, profile: UseCaseProfile): OptimizationLevers {
+  const { batchApplied, cacheApplied } = resolveOptimization(model, profile);
   return {
     batchEligible: profile.batchEligible,
     cacheEligible: profile.cacheHitRate > 0,
-    batchApplied: batchPublished && costWith(model, profile, true, cachePublished) < costWith(model, profile, false, cachePublished),
-    cacheApplied: cachePublished && model.cachedInputPricePer1M! < model.inputPricePer1M,
+    batchApplied,
+    cacheApplied,
   };
-}
-
-/** The use-case cost under an explicit choice of levers. Split out so
- *  `optimizationLevers` can compare the two batch branches before deciding
- *  which one is actually the optimization. */
-function costWith(
-  model: LLMModel,
-  profile: UseCaseProfile,
-  useBatch: boolean,
-  useCache: boolean,
-): number {
-  const baseIn = useBatch ? model.batchInputPricePer1M! : model.inputPricePer1M;
-  const baseOut = useBatch ? model.batchOutputPricePer1M! : model.outputPricePer1M;
-
-  // Cache reads: published rate only, applied as-is even under batch.
-  // (Some providers also discount cache reads in batch, but we don't have a
-  // published batch-cache rate — using the standard cache rate is the
-  // conservative, defensible choice. No published rate -> no cache discount.)
-  const cacheRead = useCache ? model.cachedInputPricePer1M! : baseIn;
-
-  const effectiveIn = cacheRead * profile.cacheHitRate + baseIn * (1 - profile.cacheHitRate);
-  return (profile.inputTokens / 1e6) * effectiveIn + (profile.outputTokens / 1e6) * baseOut;
 }
 
 /** Unit cost assuming the FinOps optimizations this use case allows:
  *  - batch API pricing when the workload is async (batchEligible)
- *  - prompt-cache read pricing on the cacheHitRate share of input tokens
+ *  - prompt-cache pricing on the cacheHitRate share of input tokens: the READ
+ *    rate, plus the amortised premium of the WRITE that made the read possible
  *  Falls back to list prices when a model doesn't publish batch/cache rates,
- *  so the optimized cost is never lower than what is actually achievable. */
+ *  so the optimized cost is never lower than what is actually achievable, and
+ *  never above list. The site publishes this formula as a spec (its
+ *  cost-per-request methodology guide): change both together. */
 export function optimizedUseCaseCost(model: LLMModel, profile: UseCaseProfile): number {
-  const { batchApplied, cacheApplied } = optimizationLevers(model, profile);
-  // With no lever pulled the optimized cost IS the list cost. Returning it
-  // through costWith() would blend the input price with itself and land a few
-  // ULPs off, leaving "optimized" a hair above "list" for 35 (model, workload)
-  // pairs — invisible in the numbers but enough to draw a longer bar.
-  if (!batchApplied && !cacheApplied) {
-    return useCaseCost(model.inputPricePer1M, model.outputPricePer1M, profile);
-  }
-  return costWith(model, profile, batchApplied, cacheApplied);
+  return resolveOptimization(model, profile).cost;
 }
 
 /** Single price figure used to rank a model, mixing input and output at a fixed
@@ -207,9 +291,16 @@ export interface ScoreComponents {
 export function computeScoreComponents(models: LLMModel[]): ScoreComponents[] {
   const none: ScoreComponents = { score: null, eloPercentile: null, pricePercentile: null };
 
+  // A non-positive blended price is not a very cheap model, it is a model with
+  // no published price: an unpriced evaluation endpoint, or a free promo tier.
+  // It is excluded for the same reason Image models are: the number is not
+  // comparable with the rest of the population. Left in, a $0 row would take
+  // the cheapest slot, award itself pricePercentile 100 and push every other
+  // model's price rank down one. hasPublishableTokenPricing() keeps such rows
+  // out of the catalogue today, so this is the guard for the day that changes.
   const withElo = models
     .map((m, i) => ({ i, elo: m.eloScore, price: blendedPrice(m), category: m.category }))
-    .filter((e) => e.elo && e.category !== "Image");
+    .filter((e) => e.elo && e.category !== "Image" && e.price > 0);
 
   if (withElo.length === 0) return models.map(() => none);
   if (withElo.length === 1) {
@@ -220,15 +311,27 @@ export function computeScoreComponents(models: LLMModel[]): ScoreComponents[] {
 
   const denom = withElo.length - 1;
 
+  // Competition ranking: models at one value share the rank of the first of
+  // them, so the percentile is (denom − models strictly better) / denom. The
+  // sort position used to be the rank, so a tie was broken by the catalogue's
+  // array order: of two models at the same blended price, one could clear the
+  // cost gate and the other not. Same rule as the site (its review finding S4);
+  // for untied values the percentile is unchanged.
+  const percentiles = (sorted: typeof withElo, value: (e: (typeof withElo)[number]) => number) => {
+    const out = new Map<number, number>();
+    let better = 0;
+    sorted.forEach((e, position) => {
+      if (position > 0 && value(e) !== value(sorted[position - 1])) better = position;
+      out.set(e.i, ((denom - better) / denom) * 100);
+    });
+    return out;
+  };
+
   // Rank by ELO descending → percentile (highest ELO = 100)
-  const eloSorted = [...withElo].sort((a, b) => b.elo! - a.elo!);
-  const eloPercentile = new Map<number, number>();
-  eloSorted.forEach((e, rank) => eloPercentile.set(e.i, ((denom - rank) / denom) * 100));
+  const eloPercentile = percentiles([...withElo].sort((a, b) => b.elo! - a.elo!), (e) => e.elo!);
 
   // Rank by price ascending → percentile (cheapest = 100)
-  const priceSorted = [...withElo].sort((a, b) => a.price - b.price);
-  const pricePercentile = new Map<number, number>();
-  priceSorted.forEach((e, rank) => pricePercentile.set(e.i, ((denom - rank) / denom) * 100));
+  const pricePercentile = percentiles([...withElo].sort((a, b) => a.price - b.price), (e) => e.price);
 
   return models.map((_, i) => {
     const ep = eloPercentile.get(i);
@@ -285,12 +388,29 @@ export const FINOPS_MIN_PRICE_PERCENTILE = 30;
 
 /** Check if a model qualifies as FinOps Friendly. All 4 criteria required:
  *  1. Quality   — Arena ELO in the top 40% of ranked models
- *  2. Value     — Efficiency score in the top 30%
- *  3. Cost      — list price among the cheapest 70% of ranked models
+ *  2. Value     — Efficiency score in the top 30%. Scores are whole numbers,
+ *                 so every model tied on the cut-off score clears it
+ *  3. Cost      — list price among the cheapest 70% of ranked models, and
+ *                 that price not an outlier listing
  *  4. Stability — no preview/beta/experimental label, and not a frontier model
  *                 released in the last 3 months
  *  Criterion 4 defers to getVolatilityRisk() so the badge and the reported
- *  volatility can never disagree about the same model. */
+ *  volatility can never disagree about the same model.
+ *
+ *  Criterion 3's second half follows the site (2026-10-18). An outlier listing
+ *  is one reseller's rate with input near free and output at or above the going
+ *  rate; a badge promising a price a reader can budget against cannot rest on
+ *  one. The site decides it from its nightly per-host fan-out and publishes the
+ *  verdict as `outlierListing` on the row, which is what is read here. The
+ *  listing stays IN the ranking, exactly as on the site: its own score and
+ *  every other model's percentile are unchanged.
+ *
+ *  One site rule is NOT applied here: the site also refuses the badge to a
+ *  model with a vendor-announced deprecation, from a hand-curated table
+ *  (its model-lifecycle.ts) that its API does not publish. Copying the table
+ *  would add a list that drifts in silence; the fix is for the API to carry a
+ *  deprecation flag. Until then a deprecated model can hold the badge here and
+ *  not there. None did when this was written (2026-11-11). */
 export function checkFinOpsFriendly(
   model: LLMModel,
   components: ScoreComponents,
@@ -301,6 +421,7 @@ export function checkFinOpsFriendly(
   if (eloPercentile < FINOPS_MIN_ELO_PERCENTILE) return false;
   if (score < efficiencyThreshold) return false;
   if (pricePercentile < FINOPS_MIN_PRICE_PERCENTILE) return false;
+  if (model.outlierListing === true) return false;
 
   // "Unknown" (no release date published) still passes: a metadata gap is not
   // evidence of instability, and dropping those models would silently penalise
@@ -358,10 +479,7 @@ export function formatMicroCost(cost: number): string {
 }
 
 /** Name the levers behind a saving — or the reason there isn't one. A 0% figure
- *  on its own reads like a bug; "not batch-eligible" reads like an answer.
- *
- *  Mirrored in web/src/format.ts because the widgets are a separate bundle;
- *  llm-business-metrics.test.ts pins the two together over a full truth table. */
+ *  on its own reads like a bug; "not batch-eligible" reads like an answer. */
 export function leverSummary(l: OptimizationLevers): string {
   const applied = [l.cacheApplied ? "caching" : "", l.batchApplied ? "batch API" : ""].filter(Boolean);
   if (applied.length > 0) return applied.join(" + ");
@@ -372,19 +490,28 @@ export function leverSummary(l: OptimizationLevers): string {
   return `this model publishes no ${missing.join(" or ")} rate`;
 }
 
-/** Percentage saved going from `list` to `optimized`, 0 when there is no gain.
- *  Mirrors savingsPct in web/src/format.ts — change one, change the other. */
+/** Why a custom token shape shows no saving when the caller passed neither a
+ *  cache-hit rate nor batch eligibility. Said in these words because the other
+ *  reading, "this workload cannot be optimized", is false for any model that
+ *  publishes a cache or batch rate: nothing was assumed, so nothing was found. */
+export const NO_ASSUMPTIONS_NOTE =
+  "no caching or batch assumption was supplied for this custom workload, so optimized repeats " +
+  "list price; pass cacheHitRate and/or batchEligible to model the discounts it can reach";
+
+/** Percentage saved going from `list` to `optimized`, 0 when there is no gain. */
 export function savingsPct(list: number, optimized: number): number {
   if (!(list > 0) || optimized >= list) return 0;
   return Math.round((1 - optimized / list) * 100);
 }
 
-/** Format monthly budget: $1.2K, $450, $0.14 */
+/** Format monthly budget: $1.2K, $450, $0.14. The unit is chosen on the value
+ *  as it would round in the smaller unit, so 999.9999 is "$1.0K", not "$1000",
+ *  and 999,999 is "$1.0M", not "$1000.0K". Same function as the site's. */
 export function formatMonthlyBudget(cost: number): string {
-  if (cost >= 1_000_000) return `$${(cost / 1_000_000).toFixed(1)}M`;
-  if (cost >= 1_000) return `$${(cost / 1_000).toFixed(1)}K`;
+  if (cost >= 1_000_000 || Number((cost / 1_000).toFixed(1)) >= 1_000) return `$${(cost / 1_000_000).toFixed(1)}M`;
+  if (cost >= 1_000 || Math.round(cost) >= 1_000) return `$${(cost / 1_000).toFixed(1)}K`;
   if (cost >= 1) return `$${cost.toFixed(0)}`;
-  if (cost >= 0.01) return `$${cost.toFixed(2)}`;
+  if (cost >= 0.01 || Number(cost.toFixed(4)) >= 0.01) return `$${cost.toFixed(2)}`;
   return `$${cost.toFixed(4)}`;
 }
 
