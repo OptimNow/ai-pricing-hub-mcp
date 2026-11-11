@@ -200,6 +200,41 @@ report("whose price the quoted one is", provenanceDiff.length, pairs.length, pro
 report("noteworthy spread", spreadDiff.length, pairs.length, spreadDiff);
 report("standard rate behind a promotion", standardDiff.length, promotionCount || 1, standardDiff);
 
+// 6. Instance categorisation: lib/compute-categories.ts is the site's file,
+//    copied whole. On 2026-11-11, before it was copied again, 826 of 3,555
+//    Linux rows in us-east carried another processor here than on the site
+//    (121 of the 211 GPU rows) and 138 another category. Compared over the
+//    live compute catalogue, every operating system.
+const PRICING_URL = process.env.PRICING_API_URL || "https://optimtoken.optimnow.io/api/pricing?region=us-east";
+const mcpCompute = await load(join(repoRoot, "server/src/lib/compute-categories.ts"));
+const siteCompute = await load(join(sitePath, "src/lib/compute-categories.ts"));
+const pricingResponse = await fetch(PRICING_URL, { headers: { Accept: "application/json" } });
+if (!pricingResponse.ok) {
+  console.error(`${PRICING_URL} returned HTTP ${pricingResponse.status}. The compute check did not run.`);
+  process.exit(2);
+}
+const { instances } = await pricingResponse.json();
+if (!Array.isArray(instances) || instances.length === 0) {
+  console.error(`${PRICING_URL} returned no instances. The compute check did not run.`);
+  process.exit(2);
+}
+const computeDiff = [];
+for (const list of ["ALL_CATEGORIES", "ALL_PROCESSORS", "ALL_USE_CASES"]) {
+  if (JSON.stringify(mcpCompute[list]) !== JSON.stringify(siteCompute[list])) computeDiff.push(`${list} is not the site's list`);
+}
+const enrichedHere = mcpCompute.enrichInstances(instances);
+const enrichedThere = siteCompute.enrichInstances(instances);
+enrichedHere.forEach((a, i) => {
+  const b = enrichedThere[i];
+  if (a.category !== b.category || a.processor !== b.processor || a.useCases.join() !== b.useCases.join()) {
+    computeDiff.push(
+      `${a.provider} ${a.instanceType}: ${a.category} / ${a.processor} / ${a.useCases.join("+")} here, ` +
+        `${b.category} / ${b.processor} / ${b.useCases.join("+")} on the site`,
+    );
+  }
+});
+report("instance category, processor and use cases", computeDiff.length, instances.length, computeDiff);
+
 // Not a pass or fail: fields on the site's rows that this server does not carry.
 // New ones show up here before anyone has decided whether they matter.
 // hostPricing and openRouterId are carried beside the model rows, not on them
