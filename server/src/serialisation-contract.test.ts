@@ -27,8 +27,12 @@ import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./index.ts", import.meta.url)), "utf8");
 
-/** The zod output schemas sit above the server declaration. */
-const schemaRegion = source.slice(0, source.indexOf("const server = new McpServer"));
+/** The zod output schemas sit above the tool declarations, which open with a
+ *  "Tools" heading. Stopping there keeps the tools' INPUT schemas out of the
+ *  scan: `maxInputPrice: z.number()` is an argument, not a figure we serialise. */
+const TOOLS_HEADING = "// ─── Tools ─";
+assert.ok(source.includes(TOOLS_HEADING), "index.ts lost the heading that ends the output schemas");
+const schemaRegion = source.slice(0, source.indexOf(TOOLS_HEADING));
 
 /** Anything whose name reads like money. Deliberately broad: the cost of a
  *  false positive is one line in the list below, the cost of a false negative
@@ -50,6 +54,7 @@ const PASS_THROUGH = new Set([
   "batchInputPricePer1M",
   "batchOutputPricePer1M",
   "cachedInputPricePer1M",
+  "cacheWritePricePer1M",
   // A whole-number percentage from Math.round(), not a currency amount. It
   // matches the money-name pattern because it is *about* cost, but it carries
   // no cents to be noisy in.

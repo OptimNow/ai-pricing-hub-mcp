@@ -5,6 +5,4 @@
 !package-lock.json
 !tsconfig.json
 !server/
-!web/
 server/**/*.test.ts
-web/dist

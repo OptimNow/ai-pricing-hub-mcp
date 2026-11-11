@@ -14,8 +14,7 @@ import { z } from "zod";
  * every registered Zod schema through `toJsonSchemaCompat()`, and its
  * `mapMiniTarget()` helper falls back to `'draft-7'` whenever the caller passes
  * no `target` — which `mcp.js` never does, on either the input or the output
- * path. That is still true as of SDK 1.30.0, so upgrading does not fix it, and
- * Skybridge only forwards to `super.registerTool()`, so it cannot fix it either.
+ * path. That was still true at SDK 1.32.1, so upgrading does not fix it.
  *
  * Two non-fixes, ruled out by inspection rather than assumption:
  *

@@ -6,9 +6,8 @@
 // the same URL. The calculator validates each parameter independently and ignores
 // what it doesn't recognise, so an outdated link degrades to its defaults.
 //
-// MCP hosts sandbox widget iframes differently and a target="_blank" anchor may be
-// inert. The URL therefore also ships in structuredContent, so the model can offer
-// it as chat text when the widget link does nothing.
+// The URL ships in structuredContent and in the text block, so the model can
+// offer it as a link in its answer.
 
 import { USE_CASE_PROFILES, VOLUME_PRESETS, type UseCaseKey, type VolumePreset } from "./llm-business-metrics.js";
 

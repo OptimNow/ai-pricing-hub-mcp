@@ -6,7 +6,6 @@
 
 [![CI](https://github.com/OptimNow/ai-pricing-hub-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/OptimNow/ai-pricing-hub-mcp/actions/workflows/ci.yml)
 [![MCP Server](https://img.shields.io/badge/MCP-Server-7C3AED)](https://modelcontextprotocol.io/)
-[![ChatGPT Apps](https://img.shields.io/badge/ChatGPT-Apps%20SDK-10A37F?logo=openai&logoColor=white)](https://platform.openai.com/docs/apps)
 [![Node](https://img.shields.io/badge/Node-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Prices](https://img.shields.io/badge/prices-OptimToken-ACE849?labelColor=2C2C2C)](https://optimtoken.optimnow.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -22,14 +21,14 @@ The server is hosted, so there is nothing to install.
 https://optimtoken-mcp.optimnow.io/mcp
 ```
 
-Paste it exactly as written, with `/mcp` and no trailing slash. The widgets
-render only for that form: the host checks a hash of the URL you entered.
+The path is `/mcp`. The server is tools only: answers come back as text in the
+conversation, with the same figures as structured data.
 
 | Client | How to add it |
 |---|---|
 | <img src="https://img.shields.io/badge/-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Claude Code" height="22"/> | `claude mcp add --transport http optimtoken https://optimtoken-mcp.optimnow.io/mcp` |
 | <img src="https://img.shields.io/badge/-Claude.ai%20%2F%20Desktop-D97757?logo=anthropic&logoColor=white" alt="Claude.ai / Desktop" height="22"/> | **Settings → Connectors → Add custom connector**, paste the URL above |
-| <img src="https://img.shields.io/badge/-ChatGPT-10A37F?logo=openai&logoColor=white" alt="ChatGPT" height="22"/> | **Settings → Connectors → Add**, paste the URL. Comparisons render as interactive widgets |
+| <img src="https://img.shields.io/badge/-ChatGPT-10A37F?logo=openai&logoColor=white" alt="ChatGPT" height="22"/> | **Settings → Connectors → Add**, paste the URL |
 | <img src="https://img.shields.io/badge/-Cursor-000000?logo=cursor&logoColor=white" alt="Cursor" height="22"/> <img src="https://img.shields.io/badge/-Windsurf-3DDC91?logoColor=white" alt="Windsurf" height="22"/> <img src="https://img.shields.io/badge/-VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" height="22"/> | Add an HTTP MCP server entry pointing at the URL |
 
 Then just ask:
@@ -108,9 +107,9 @@ Requires **Node.js 24+**.
 
 ```bash
 npm install
-npm run dev              # Skybridge dev server + MCP inspector at localhost:3000
-npm test                 # schema conformance, serialisation precision, data sources
-npm run build            # widgets + server
+npm run dev              # the server with reload, at http://localhost:3000/mcp
+npm test                 # cost logic, schema conformance, data sources, the HTTP layer
+npm run build            # tsc, to dist/server/src/index.js
 ```
 
 The static fallback catalogue is refreshed by hand, not on a schedule:
@@ -124,14 +123,14 @@ unrefreshed fallback ages silently.
 
 ```text
 ai-pricing-hub-mcp/
-├─ server/src/index.ts              # tool + widget registrations
+├─ server/src/index.ts              # the five tools
+├─ server/src/lib/http.ts           # Streamable HTTP at /mcp, one MCP server per request
 ├─ server/src/lib/optimtoken-api.ts # the one base URL constant, fetch and timeout discipline
 ├─ server/src/lib/                  # ranking, efficiency scoring, provenance, normalisation
-├─ server/src/data/                 # static fallback pricing + region maps
-└─ web/src/widgets/                 # React widgets rendered in the client
+└─ server/src/data/                 # static fallback pricing + region maps
 ```
 
-Built with [Skybridge](https://docs.skybridge.tech/), deployed on [Fly.io](https://fly.io/).
+Built on the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), with no framework and no UI layer. Deployed on [Fly.io](https://fly.io/).
 
 ---
 

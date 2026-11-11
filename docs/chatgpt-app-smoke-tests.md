@@ -14,6 +14,9 @@ No test account is needed: the server is public and unauthenticated.
 > answers HTTP 402. Run the cases against that URL before pasting them into
 > the portal (`scripts/check-connector.mjs` confirms it answers first).
 >
+> **From 0.5.0 the server has no widgets.** A case passes on the assistant's
+> text answer and the `structuredContent` fields named below; nothing renders.
+>
 > **Re-run these after the next deploy.** They were validated against a build
 > that served the 137-row static compute fallback. On `master`,
 > `compare-compute-pricing` fetches roughly 6,000 instances from
@@ -24,7 +27,7 @@ No test account is needed: the server is public and unauthenticated.
 
 | # | Tool | Prompt to enter | Expected behaviour |
 |---|---|---|---|
-| P1 | `compare-llm-models` | "Compare LLM models by price and quality." | Table of models with `inputPricePer1M`, `outputPricePer1M`, `eloScore` and `efficiencyScore`. Widget renders. |
+| P1 | `compare-llm-models` | "Compare LLM models by price and quality." | Table of models with `inputPricePer1M`, `outputPricePer1M`, `eloScore` and `efficiencyScore`. |
 | P2 | `compare-llm-models` | "Show only models under $0.10 per 1M input tokens and $0.30 output, with an ELO of at least 1300." | Narrow but non-empty result set. Succeeds rather than erroring on a restrictive filter. |
 | P3 | `estimate-llm-cost` | "Estimate my monthly LLM cost for a support-ticket workload." | Returns `modelCosts` and `volume` using the default use-case profile. |
 | P4 | `estimate-llm-cost` | "Estimate the monthly cost of GPT-4o-mini at 100 input tokens and 50 output tokens, one million requests a month." | A concrete monthly figure for the named model. |

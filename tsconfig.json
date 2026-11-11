@@ -1,11 +1,32 @@
 {
-  "extends": "skybridge/tsconfig",
-
   "compilerOptions": {
-    "outDir": "dist"
+    // Module resolution
+    "module": "NodeNext",
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+
+    // Output: `npm run build` emits dist/server/src/index.js, the path the
+    // Dockerfile starts. rootDir is pinned to the repository root so that path
+    // does not move when the set of source folders does.
+    "rootDir": ".",
+    "outDir": "dist",
+    "sourceMap": true,
+
+    // Language and environment
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+
+    // Strictness
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
   },
 
-  "include": ["server/src", "web/src"],
+  "include": ["server/src"],
 
   // Tests are type-checked by tsconfig.test.json rather than compiled into the
   // deployed artifact. `npm run typecheck` runs both configs.
