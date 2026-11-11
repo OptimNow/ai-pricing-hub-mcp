@@ -65,7 +65,7 @@ This server replaces recall with a lookup:
 
 | Tool | What it answers |
 |---|---|
-| **`compare-llm-models`** | "What is out there?" Browse and filter the catalogue on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. |
+| **`compare-llm-models`** | "What is out there?" Browse and filter the catalogue on price, quality (Chatbot Arena ELO), efficiency and capabilities, with a self-hostability read from the licence. Ordered by ELO, or by efficiency, cost for a workload, or price with `sortBy`. |
 | **`recommend-llm-model`** | "Just tell me which one." A ranked top 3 for one workload under your constraints (budget, minimum ELO, required capability, self-hostability), each with a per-constraint satisfied or violated breakdown as the evidence. Over-constrained queries return the nearest misses, labelled as such. |
 | **`compare-models-side-by-side`** | "How do these specific ones compare?" 2 to 4 named models across all 8 use case profiles at a chosen monthly volume, list and optimized cost for each. |
 | **`estimate-llm-cost`** | "What will this cost us per month?" Per-request and monthly cost for your own volume, token shape, cache hit rate and batch eligibility. |

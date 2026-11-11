@@ -202,9 +202,10 @@ dependencies plus `dist/`) and starts `node dist/server/src/index.js`,
 zero, and `.dockerignore` keeps the context to what the build copies. The
 Skybridge-era image was verified on 2026-10-07 by building it and calling it
 (compute tier 1, cold `europe` call 7.8 s, ~140 MB resident after a compute
-call). **The 0.5.0 image has not been built yet:** the server was verified by
-running the compiled output on a workstation (2026-11-11), not in Docker. Build
-and call the image, or watch the first CI deploy, before relying on it.
+call). The tools-only image was first built by the CI deploy of 2026-11-11 (0.5.0)
+and checked in production the same day with `scripts/check-connector.mjs`:
+every check passed, eight concurrent calls answered. Its cold start and memory
+have not been measured the way the Skybridge-era image's were.
 
 **The app runs one machine, and `fly.toml` does not enforce that.** On an app's
 first deploy Fly creates two machines for redundancy, whatever `fly.toml` says;
@@ -433,8 +434,8 @@ pins that a name alone never fires.
 ## Data Flow
 
 ```
-optimtoken /api/llm-models → fetchLLMModels() → enrichModels() → filterModels() → structuredContent
-        ↓ (tier 2, uncorrected)                                          + provenance
+optimtoken /api/llm-models → fetchLLMModels() → enrichModels() → filterModels() → sortEnrichedModels() → structuredContent
+        ↓ (tier 2, uncorrected)                                                                 + provenance
 openrouter.ai/api/v1/models
         ↓ (tier 3)
 pricing-data.ts (static snapshot)
@@ -448,6 +449,34 @@ Note the ordering on the LLM path: `enrichModels()` runs over the **full**
 catalogue before `filterModels()`, because the efficiency score and the FinOps
 badge are percentile ranks. Filtering first would make the badge mean something
 different depending on which filters the caller happened to pass.
+
+### Table order in `compare-llm-models` (0.6.0)
+
+The catalogue arrives in Arena ELO order (`sortModels` in `llm-models.ts`: ELO
+descending, then unranked models newest first). Until 0.6.0 that was the only
+order the tool could return, and nothing in the response said so: "the ten
+cheapest models for a coding task" meant fetching 50 rows and sorting them by
+hand. `sortBy` now takes `elo` (default, unchanged), `efficiency`, `cost`,
+`optimizedCost`, `inputPrice` or `outputPrice`. The rules, all in
+`sortEnrichedModels()`:
+
+- **Best first, no direction argument.** Quality and value descend, costs and
+  prices ascend. "The dearest first" is not a question this tool is asked.
+- **Sorted after filtering, before `limit`,** on the unrounded figures, so
+  `limit` keeps the first rows of the order asked for.
+- **A missing figure sorts last**, and a price of zero is missing, not
+  cheapest: the same reading `computeScoreComponents` takes of an unpriced
+  model. A model with no ELO has no efficiency score either.
+- **Ties keep the ELO order**, because the sort is stable and the input arrives
+  in it.
+- **The response states its order**: `sortedBy` in `structuredContent`, and
+  "sorted by ..." in the text. Each row also prints its ELO and efficiency
+  score, `n/a` included, since a table sorted by price otherwise shows an
+  unranked model as if it were a ranked one.
+
+`cost` and `optimizedCost` depend on `useCasePreset`, so the same catalogue
+orders differently for a support ticket and for a meeting summary. That is the
+point of them over `inputPrice` and `outputPrice`.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

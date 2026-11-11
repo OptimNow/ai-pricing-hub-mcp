@@ -5,11 +5,15 @@ import type { LLMModel } from "../data/pricing-data.js";
 
 import {
   CACHE_READS_PER_WRITE,
+  DEFAULT_LLM_SORT,
+  LLM_SORT_KEYS,
   MONTHLY_DECIMALS,
   PER_REQUEST_DECIMALS,
   USE_CASE_PROFILES,
   computeScoreComponents,
+  describeSort,
   enrichModels,
+  sortEnrichedModels,
   formatMonthlyBudget,
   optimizationLevers,
   optimizedUseCaseCost,
@@ -343,6 +347,146 @@ test("an outlier listing is refused the badge and stays in the ranking", () => {
     clean.slice(0, 9).map(m => m.efficiencyScore),
     "and so is every other model's: the listing is labelled, not removed",
   );
+});
+
+// ── Ordering ─────────────────────────────────────────────────────────
+//
+// compare-llm-models returned the catalogue in arrival order (Arena ELO
+// descending) and nothing else until 0.6.0, so "the ten cheapest for a coding
+// task" could only be answered by fetching 50 rows and sorting them by hand.
+
+const names = (models: { model: string }[]): string[] => models.map(m => m.model);
+const enrich = (models: LLMModel[], useCase: Parameters<typeof enrichModels>[2] = "supportTicket") =>
+  enrichModels(models, "100k", useCase);
+
+test("the default order is Arena ELO, and returns the catalogue as it arrived", () => {
+  // The order fetchLLMModels hands over: ranked models by ELO, unranked after.
+  const arrived = enrich([
+    ranked("Top", 1500, 3, 15),
+    ranked("Middle", 1400, 1, 5),
+    ranked("Low", 1300, 0.5, 2),
+    model({ model: "Unranked new", releaseDate: "2026-10" }),
+    model({ model: "Unranked old", releaseDate: "2024-01" }),
+  ]);
+
+  assert.equal(DEFAULT_LLM_SORT, "elo");
+  const sorted = sortEnrichedModels(arrived);
+  assert.deepEqual(names(sorted), names(arrived), "nothing moved");
+  assert.notEqual(sorted, arrived, "and the caller's array is not the one returned");
+
+  // Handed the same rows out of order, it still puts them in ELO order.
+  const shuffled = [arrived[3], arrived[2], arrived[0], arrived[4], arrived[1]];
+  assert.deepEqual(names(sortEnrichedModels(shuffled, "elo")), ["Top", "Middle", "Low", "Unranked new", "Unranked old"]);
+  assert.deepEqual(names(shuffled), ["Unranked new", "Low", "Top", "Unranked old", "Middle"], "input left as it was");
+});
+
+test("the cost orders follow the workload, the price orders follow one side", () => {
+  // Cheap to read and dear to write, against the reverse.
+  const reader = ranked("Reader", 1400, 1, 20);
+  const writer = ranked("Writer", 1400, 4, 5);
+
+  // supportTicket is 1.5k in / 500 out: output weighs enough for Writer to win.
+  assert.deepEqual(names(sortEnrichedModels(enrich([reader, writer], "supportTicket"), "cost")), ["Writer", "Reader"]);
+  // meetingSummary is 10k in / 1.2k out: the input price decides, and Reader wins.
+  assert.deepEqual(names(sortEnrichedModels(enrich([reader, writer], "meetingSummary"), "cost")), ["Reader", "Writer"]);
+
+  const table = enrich([writer, reader]);
+  assert.deepEqual(names(sortEnrichedModels(table, "inputPrice")), ["Reader", "Writer"]);
+  assert.deepEqual(names(sortEnrichedModels(table, "outputPrice")), ["Writer", "Reader"]);
+});
+
+test("optimized cost is its own order, not list cost again", () => {
+  // Dearer at list, cheaper once its cache-read rate is counted.
+  const cached = ranked("Cached", 1400, 3, 15, { cachedInputPricePer1M: 0.3 });
+  const plain = ranked("Plain", 1400, 2.8, 15);
+  const table = enrich([cached, plain]);
+
+  assert.ok(table[0].useCaseCost > table[1].useCaseCost, "sanity: Cached is dearer at list");
+  assert.ok(table[0].optimizedUseCaseCost < table[1].optimizedUseCaseCost, "sanity: and cheaper optimized");
+  assert.deepEqual(names(sortEnrichedModels(table, "cost")), ["Plain", "Cached"]);
+  assert.deepEqual(names(sortEnrichedModels(table, "optimizedCost")), ["Cached", "Plain"]);
+});
+
+test("efficiency puts the best value first and unscored models last", () => {
+  const table = enrich([
+    ranked("Dear and best", 1500, 30, 150),
+    ranked("Strong and cheap", 1480, 0.2, 0.8),
+    ranked("Weak and dear", 1300, 20, 100),
+    model({ model: "Unranked" }),
+  ]);
+  const sorted = sortEnrichedModels(table, "efficiency");
+
+  assert.equal(sorted[0].model, "Strong and cheap");
+  assert.equal(sorted.at(-1)!.model, "Unranked", "no ELO means no score, so no place in the ranking");
+  const scores = sorted.slice(0, -1).map(m => m.efficiencyScore!);
+  assert.deepEqual(scores, [...scores].sort((a, b) => b - a), "scores descend");
+});
+
+test("a missing figure sorts last, and a zero price is missing, not cheapest", () => {
+  const table = enrich([
+    ranked("Free input", 1450, 0, 4),
+    ranked("Cheap", 1400, 0.1, 0.4),
+    ranked("Dear", 1500, 3, 15),
+  ]);
+
+  // The rule computeScoreComponents applies: an unpriced side is not a bargain.
+  assert.deepEqual(names(sortEnrichedModels(table, "inputPrice")), ["Cheap", "Dear", "Free input"]);
+  // Its output side is priced, and is ranked like any other.
+  assert.deepEqual(names(sortEnrichedModels(table, "outputPrice")), ["Cheap", "Free input", "Dear"]);
+});
+
+test("ties keep the order they came in", () => {
+  const first = ranked("First", 1500, 2, 10);
+  const second = ranked("Second", 1450, 2, 10);
+  const cheaper = ranked("Cheaper", 1300, 1, 5);
+
+  // Same prices, so the same cost: the better-ranked one stays ahead.
+  assert.deepEqual(names(sortEnrichedModels(enrich([first, second, cheaper]), "cost")), ["Cheaper", "First", "Second"]);
+  assert.deepEqual(names(sortEnrichedModels(enrich([second, first, cheaper]), "outputPrice")), ["Cheaper", "Second", "First"]);
+});
+
+test("every order holds across the whole snapshot and loses no model", () => {
+  const table = enrich(llmModels);
+  const figure: Record<(typeof LLM_SORT_KEYS)[number], (m: (typeof table)[number]) => number | null> = {
+    elo: m => m.eloScore || null,
+    efficiency: m => m.efficiencyScore,
+    cost: m => (m.useCaseCost > 0 ? m.useCaseCost : null),
+    optimizedCost: m => (m.optimizedUseCaseCost > 0 ? m.optimizedUseCaseCost : null),
+    inputPrice: m => (m.inputPricePer1M > 0 ? m.inputPricePer1M : null),
+    outputPrice: m => (m.outputPricePer1M > 0 ? m.outputPricePer1M : null),
+  };
+
+  for (const key of LLM_SORT_KEYS) {
+    const sorted = sortEnrichedModels(table, key);
+    assert.equal(sorted.length, table.length, `${key}: same number of rows`);
+    assert.equal(new Set(sorted).size, table.length, `${key}: each row once`);
+
+    const values = sorted.map(figure[key]);
+    const firstMissing = values.indexOf(null);
+    const present = (firstMissing === -1 ? values : values.slice(0, firstMissing)) as number[];
+    assert.ok(present.length > 0, `${key}: sanity, the snapshot has rows carrying this figure`);
+    assert.ok(
+      values.slice(present.length).every(v => v === null),
+      `${key}: every row missing the figure is after every row that has it`,
+    );
+    const descending = key === "elo" || key === "efficiency";
+    for (let i = 1; i < present.length; i++) {
+      assert.ok(
+        descending ? present[i - 1] >= present[i] : present[i - 1] <= present[i],
+        `${key}: row ${i} is out of order (${present[i - 1]} then ${present[i]})`,
+      );
+    }
+  }
+});
+
+test("each order can be named in a sentence, and the cost ones name the workload", () => {
+  for (const key of LLM_SORT_KEYS) {
+    const text = describeSort(key, "Coding task");
+    assert.ok(text.length > 0, `${key} has no description`);
+    assert.match(text, /first/, `${key}: the direction is stated`);
+  }
+  assert.match(describeSort("cost", "Coding task"), /^Coding task cost per request at list price/);
+  assert.match(describeSort("optimizedCost", "Coding task"), /^Coding task optimized cost/);
 });
 
 // ── Budget formatting ────────────────────────────────────────────────

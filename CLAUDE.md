@@ -24,8 +24,8 @@ A remote MCP (Model Context Protocol) server that gives an AI assistant five rea
 ## MCP Tools
 
 ### Tool 1: `compare-llm-models`
-- **Input:** Optional filters (provider, category = price tier, openness, capability, price range, min ELO, use-case preset, volume)
-- **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs, and the concrete thresholds behind the FinOps Friendly badge
+- **Input:** Optional filters (provider, category = price tier, openness, capability, price range, min ELO, use-case preset, volume) plus `sortBy`: `elo` (default), `efficiency`, `cost`, `optimizedCost`, `inputPrice`, `outputPrice`. Each reads best first; a missing figure or a zero price sorts last.
+- **Output:** Sorted/filtered model comparison with pricing, ELO scores, efficiency, monthly costs, the order it is in (`sortedBy`), and the concrete thresholds behind the FinOps Friendly badge
 - **Data Source:** optimtoken API → direct OpenRouter → static fallback
 
 ### Tool 2: `estimate-llm-cost`

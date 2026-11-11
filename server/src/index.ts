@@ -12,6 +12,10 @@ import {
   USE_CASE_PROFILES,
   VOLUME_PRESETS,
   enrichModels,
+  sortEnrichedModels,
+  describeSort,
+  LLM_SORT_KEYS,
+  DEFAULT_LLM_SORT,
   summarizeFinOpsBadge,
   useCaseCost,
   optimizedUseCaseCost,
@@ -179,6 +183,8 @@ const compareModelsOutputSchema = {
   source: z.string(),
   matchingCount: z.number(),
   catalogSize: z.number(),
+  // The order `models` is in, and so what "the first N" of a longer match means.
+  sortedBy: z.enum(LLM_SORT_KEYS),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
   // What the badge's percentile gates land on for this catalogue, so "top 40%"
@@ -439,7 +445,10 @@ tool(
     description:
       "Browse and filter the whole LLM catalogue and get back a ranked table: price, quality (ELO), " +
       "efficiency and capabilities. Use this when the user wants to SEE THE FIELD — 'show me models " +
-      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300'. " +
+      "under $1/1M', 'which providers have vision models', 'list open-weight models above ELO 1300', " +
+      "'the ten cheapest models for a coding task'. " +
+      "The table is ordered by Arena ELO unless `sortBy` asks for efficiency, cost or price, and `limit` " +
+      "keeps the first rows of that order. " +
       "For a single PICK under a budget use recommend-llm-model; to weigh 2-4 NAMED models against " +
       "each other use compare-models-side-by-side. " +
       "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
@@ -458,11 +467,13 @@ tool(
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
-      limit: z.number().min(1).max(50).optional().describe("Max models to return (default: 15)"),
+      sortBy: z.enum(LLM_SORT_KEYS).optional().describe("Order of the table, best first. elo: Arena ELO, highest first (default). efficiency: value score out of 100, highest first. cost: list-price cost per request for the use case, cheapest first. optimizedCost: the same after caching and batch. inputPrice / outputPrice: price per 1M tokens, cheapest first. A model missing the sorted figure comes last, and ties keep the ELO order. Cheapest first says nothing about quality: read the ELO beside each row."),
+      limit: z.number().min(1).max(50).optional().describe("Max models to return, counted after sorting (default: 15)"),
     },
     outputSchema: outputSchema(compareModelsOutputSchema),
   },
-  async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, limit }) => {
+  async ({ provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo, useCasePreset, volumePreset, sortBy, limit }) => {
+    const sortedBy = sortBy ?? DEFAULT_LLM_SORT;
     const emptyOutput = {
       models: [],
       useCaseLabel: "",
@@ -470,6 +481,7 @@ tool(
       source: "error",
       matchingCount: 0,
       catalogSize: 0,
+      sortedBy,
       eloAsOf: "",
     };
 
@@ -496,8 +508,10 @@ tool(
         provider, category, openness, capability, maxInputPrice, maxOutputPrice, minElo,
       });
 
+      // Sorted after filtering and before the cut, on the unrounded figures:
+      // `limit` keeps the first rows of the order the caller asked for.
       const maxCount = limit || 15;
-      const results = filtered.slice(0, maxCount);
+      const results = sortEnrichedModels(filtered, sortedBy).slice(0, maxCount);
 
       const volumeLabel = VOLUME_PRESETS.find(p => p.key === vol)?.label || vol;
       const useCaseLabel = USE_CASE_PROFILES[ucKey].label;
@@ -508,7 +522,10 @@ tool(
         `${m.category}, ${m.openness}` +
         `, Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M` +
         listingTags(m) +
-        (m.eloScore ? `, ELO: ${m.eloScore}` : "") +
+        // Both are printed even when missing: in a table sorted by price, a row
+        // with no ELO has to say so, or it reads as a ranked model.
+        `, ELO: ${m.eloScore || "n/a"}` +
+        `, Efficiency: ${m.efficiencyScore === null ? "n/a" : `${m.efficiencyScore}/100`}` +
         `, ${useCaseLabel} cost: ${formatMicroCost(m.useCaseCost)}/req` +
         ` (optimized: ${formatMicroCost(m.optimizedUseCaseCost)}/req)` +
         `, Monthly (${volumeLabel}): ${formatMonthlyBudget(m.monthlyBudget)}` +
@@ -533,6 +550,7 @@ tool(
           source,
           matchingCount: filtered.length,
           catalogSize: allModels.length,
+          sortedBy,
           eloAsOf,
           dataAsOf,
           provenance,
@@ -552,7 +570,8 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `${filtered.length} of ${allModels.length} models match (showing top ${results.length}). ` +
+              `${filtered.length} of ${allModels.length} models match; showing the first ${results.length}, ` +
+              `sorted by ${describeSort(sortedBy, useCaseLabel)}. ` +
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
               `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
@@ -1412,7 +1431,7 @@ tool(
 function createServer(): McpServer {
   const server = new McpServer({
     name: "ai-pricing-hub",
-    version: "0.5.0",
+    version: "0.6.0",
   });
   for (const register of tools) register(server);
   return server;

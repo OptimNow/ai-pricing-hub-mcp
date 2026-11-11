@@ -2,9 +2,10 @@
 
 Status as of 2026-11-11: **not submitted, and not ready to be.** Version 0.5.0
 makes the server tools only (no MCP App, no widgets) and fixes a defect that
-would have failed review, but **0.5.0 is not deployed yet**: production still
-runs 0.4.2. The portal reads the live server, so deploy first, then work
-through "Before you submit" below.
+would have failed review. It was deployed on 2026-11-11 and
+`scripts/check-connector.mjs` passed against production the same day. The
+portal reads the live server, so run that script again after any later deploy,
+then work through "Before you submit" below.
 
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
@@ -47,9 +48,9 @@ returns them as `structuredContent` too.
 
 In this order. The first three are blocking.
 
-1. **Deploy 0.5.0 and run `node scripts/check-connector.mjs`.** It must pass
-   against the published URL. Against 0.4.2 it fails on two counts, both of
-   which a reviewer would meet:
+1. **Done on 2026-11-11: 0.5.0 is deployed and `node scripts/check-connector.mjs`
+   passes against the published URL.** Run it again after every deploy. Against
+   0.4.2 it failed on two counts, both of which a reviewer would have met:
    - **Concurrent calls fail.** Under 0.4.2, a tool call that overlaps another
      is answered HTTP 500 "Internal server error": eight concurrent calls
      behind one slow upstream fetch gave seven 500s in production on
@@ -58,7 +59,7 @@ In this order. The first three are blocking.
      as Internal Server Error ... fail review"; the listing's health badge
      turns Degraded above a 5% error rate. Fixed in 0.5.0 (one MCP server per
      request).
-   - The five widget resources are still listed.
+   - The five widget resources were still listed.
 2. **Make the documentation and privacy pages readable without a browser.**
    `https://optimtoken.optimnow.io/mcp` and `/privacy` answered HTTP 429 with a
    "Vercel Security Checkpoint" page to every non-browser client tried on
