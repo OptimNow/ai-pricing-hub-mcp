@@ -13,7 +13,7 @@ Do not add `Co-Authored-By`, `Claude-Session` or "Generated with Claude Code" li
 
 ## What This Project Does
 
-A remote MCP (Model Context Protocol) server that gives an AI assistant six read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, and cloud compute pricing. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
+A remote MCP (Model Context Protocol) server that gives an AI assistant seven read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, cloud compute pricing, and the break-even between paying an API and renting capacity. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
 
 **It is not an MCP App.** Until 0.5.0 each tool also rendered a React widget through the Skybridge framework. Both were removed on 2026-11-11, on the owner's decision: the server is tools only. Do not add a UI layer back, a `ui://` resource, or a framework around the SDK, unless that decision is reopened.
 
@@ -50,6 +50,11 @@ A remote MCP (Model Context Protocol) server that gives an AI assistant six read
 - **Output:** Per model: the quoted price and whose rate it is (`priceSource`: vendor / reference / adjusted / unknown), host count, the cheapest, dearest and maker's own listing, the spread, promotional listings, the builds declared (quantization), each offer costed for the workload and compared with the quoted cost. Plus a `resolution` entry per name.
 - **Data Source:** `hostPricing` on the rows of `/api/llm-models` (tier 1 only, dated by `provenance.hostPricingAsOf`). Only the cheapest, dearest, maker's and promotional listings exist there: the hosts in between are not published.
 
+### Tool 7: `estimate-self-hosting-breakeven`
+- **Input:** `model` (one name) + a fleet: `instanceType` from the compute catalogue (with `provider`, `region`) OR `hourlyRate` of the caller's own; optional `instanceCount`, `outputTokensPerSecond` (measured, per instance), `monthlyOperationsCost`; a workload (`useCasePreset`, default supportTicket, or custom tokens with `cacheHitRate` / `batchEligible`) and `monthlyVolume`.
+- **Output:** The fleet's monthly cost at every rate the instance lists (on demand, spot, commitments), and for each the volume at which it costs the same as the API at list price, at the optimized price and at the cheapest host known: requests/month, tokens/day, and the output tokens per second that volume asks of the fleet. With a throughput: the fleet's capacity, each break-even as a share of it and whether it is out of reach. Plus the difference at the caller's volume, and whether the model's weights are published at all.
+- **Data Source:** both catalogues (`provenance` for the API prices, `computeProvenance` for the instance rates). The arithmetic is local and has no counterpart on the site.
+
 ---
 
 ## Key Design Decisions
@@ -77,7 +82,8 @@ reads as an answer.
 8. **The FinOps Friendly badge gates on percentiles, not fixed numbers:** top 40% on ELO, top 30% on efficiency, cheapest 70% on list price, a stable release, and a price the site does not flag as an outlier listing. Ties share a rank. The tool also returns what those percentiles land on today (`finopsBadge.minElo`, `finopsBadge.maxBlendedPrice`) so the badge is auditable.
 9. **A price the site flags is labelled, never hidden.** `promotionalListing` (a temporary discounted rate) and `outlierListing` (one host's rate, input near free) arrive on the site's rows and are repeated in `structuredContent` and in every text block, with one line saying what the label means. A budget built on a promotional price rises when the promotion ends.
 9b. **Host prices travel beside the model rows, never on them.** `fetchLLMModels()` returns `hostPricing` as a map keyed by `hostPricingKey()`. Every tool spreads a model row into `structuredContent`, and the output schemas refuse undeclared properties, so a field added to `LLMModel` reaches all of them at once and a strict host rejects them. A model with no entry is unknown, never "sold by one host". The maker's row is not quoted for the ids in `MAKER_ROW_NOT_STANDARD_RATE`, but only while that row differs from the quoted price (`makerOffer`).
-10. **The cost, score, badge and host-price logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogue and must report no difference before a release. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
+10. **The cost, score, badge, host-price and instance-categorisation logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogues and must report no difference before a release. `lib/compute-categories.ts` is the site's file copied whole: change the rules there, then copy again. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
+11. **The break-even assumes nothing it cannot read.** `lib/self-hosting.ts` is the one calculation that is not a port. It never supplies a throughput, an operations cost or a GPU memory: this server holds no measurement of any of them, and a default would be an invented fact in an answer the caller is told to quote. Without a throughput it states the one each break-even requires, and says a comparison at the caller's volume holds only if the fleet can serve it. Do not add default tokens-per-second tables or a default staffing cost.
 
 ---
 

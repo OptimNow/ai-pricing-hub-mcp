@@ -54,16 +54,38 @@ import type {
   OptimizationLevers,
 } from "./lib/llm-business-metrics.js";
 import { roiCalculatorUrl } from "./lib/roi-link.js";
-import { enrichInstances } from "./lib/compute-categories.js";
+import { ALL_PROCESSORS, enrichInstances } from "./lib/compute-categories.js";
 import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
 import { describeRates, rateSavings, ratesLegend } from "./lib/compute-rates.js";
+import {
+  API_BASES,
+  API_BASIS_LABELS,
+  FLEET_RATES,
+  HOURS_PER_MONTH,
+  callerRateOption,
+  describeDelta,
+  describeOptionName,
+  describePoint,
+  evaluateOption,
+  fleetCapacity,
+  formatCount,
+  formatThroughput,
+  instancesNeeded,
+  rateOptions,
+  roundHourlyRate,
+  roundThroughput,
+  selfHostingFootnote,
+  throughputForVolume,
+  toPct,
+} from "./lib/self-hosting.js";
+import type { ApiBaseline, OptionResult, RateOption } from "./lib/self-hosting.js";
 import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
   fetchComputeInstances,
 } from "./lib/compute-pricing.js";
-import type { PricingRegion } from "./lib/compute-pricing.js";
+import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
 // Mirror the structuredContent each tool returns, error paths included, so a
@@ -399,6 +421,138 @@ const modelHostsOutputSchema = {
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
   provenance: llmProvenanceSchema.optional(),
+  error: z.string().optional(),
+};
+
+/** One way of paying the API for the workload: what the fleet is held against. */
+const apiBaselineSchema = z.object({
+  // "list" is the quoted price, "optimized" that price with the caching and
+  // batch levers the workload allows, "cheapestHost" the cheapest host known.
+  basis: z.enum(API_BASES),
+  label: z.string(),
+  // The rate behind the figure. Absent on "optimized", which has no single rate.
+  inputPricePer1M: z.number().optional(),
+  outputPricePer1M: z.number().optional(),
+  // "cheapestHost" only: who it is, the build it declares, and the share a
+  // promotional listing takes off its standard rate.
+  host: z.string().optional(),
+  quantization: z.string().optional(),
+  discount: z.number().optional(),
+  perRequest: z.number(),
+  monthly: z.number(),
+  // "optimized" only: the saving against list and the levers behind it.
+  savingsPct: z.number().optional(),
+  batchEligible: z.boolean().optional(),
+  cacheEligible: z.boolean().optional(),
+  batchApplied: z.boolean().optional(),
+  cacheApplied: z.boolean().optional(),
+});
+
+/** Where one way of paying for the fleet meets one way of paying the API. */
+const breakEvenSchema = z.object({
+  basis: z.enum(API_BASES),
+  // Monthly requests at which the two cost the same: below it the API is
+  // cheaper, above it the fleet is. Null when the API costs nothing per request.
+  requestsPerMonth: z.number().nullable(),
+  // The same volume as input + output tokens a day.
+  tokensPerDay: z.number().nullable(),
+  // Output tokens the fleet must generate each second, averaged over every
+  // hour of the month, to serve that volume.
+  requiredOutputTokensPerSecond: z.number().nullable(),
+  // That volume as a percentage of what the fleet can serve flat out. Null
+  // when no throughput was supplied. Above 100 it is out of reach.
+  utilizationPct: z.number().nullable(),
+  reachable: z.boolean().nullable(),
+  // At the caller's volume: fleet cost minus API cost, per month. Positive
+  // means the fleet is the dearer of the two.
+  fleetMinusApiMonthly: z.number(),
+});
+
+const fleetOptionSchema = z.object({
+  rate: z.enum(FLEET_RATES),
+  label: z.string(),
+  hourlyRate: z.number(),
+  // Upstream marks this rate a curated estimate, not one read this cycle.
+  static: z.boolean(),
+  // Spot capacity: the provider can reclaim it at short notice.
+  interruptible: z.boolean(),
+  // Every instance billed 730 hours, plus the operations cost supplied.
+  monthlyCost: z.number(),
+  // One request with the fleet flat out around the clock: the lowest the
+  // fleet can go. Null when no throughput was supplied.
+  fullLoadCostPerRequest: z.number().nullable(),
+  breakEven: z.array(breakEvenSchema),
+});
+
+const selfHostingOutputSchema = {
+  // Null only when no model was resolved.
+  model: z
+    .object({
+      provider: z.string(),
+      model: z.string(),
+      parameters: z.string().optional(),
+      eloScore: z.number().optional(),
+      license: z.string().optional(),
+      openness: z.string(),
+      // True when the licence publishes the weights, false when it is
+      // proprietary, null when the licence was never established.
+      selfHostable: z.boolean().nullable(),
+      inputPricePer1M: z.number(),
+      outputPricePer1M: z.number(),
+      outlierListing: z.boolean().optional(),
+      promotionalListing: z.boolean().optional(),
+    })
+    .nullable(),
+  workload: z.object({
+    useCase: z.string(),
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+    cacheHitRate: z.number(),
+    batchEligible: z.boolean(),
+    optimizationBasis: z.enum(OPTIMIZATION_BASES),
+    // Requests a month the comparison is made at.
+    volume: z.number(),
+  }),
+  api: z.array(apiBaselineSchema),
+  // Null when the fleet could not be priced.
+  fleet: z
+    .object({
+      // The catalogue instance, or nulls when the caller supplied the rate.
+      provider: z.string().nullable(),
+      instanceType: z.string().nullable(),
+      region: z.string().nullable(),
+      vCPUs: z.number().nullable(),
+      memory: z.number().nullable(),
+      processor: z.string().nullable(),
+      category: z.string().nullable(),
+      instanceCount: z.number(),
+      hoursPerMonth: z.number(),
+      monthlyOperationsCost: z.number(),
+      // False means the fleet figures are hardware rent only.
+      operationsCostSupplied: z.boolean(),
+      // Per instance, as the caller measured it. Null: none was supplied, and
+      // none was assumed.
+      outputTokensPerSecond: z.number().nullable(),
+      // What the caller's volume asks of the whole fleet, averaged over every
+      // hour of the month. A comparison at that volume holds only if the
+      // fleet can generate it.
+      volumeRequiredOutputTokensPerSecond: z.number(),
+      // What the fleet serves flat out, the share of it the caller's volume
+      // uses, and the instances that volume takes. Null without a throughput.
+      capacityRequestsPerMonth: z.number().nullable(),
+      volumeUtilizationPct: z.number().nullable(),
+      canServeVolume: z.boolean().nullable(),
+      instancesNeededForVolume: z.number().nullable(),
+    })
+    .nullable(),
+  options: z.array(fleetOptionSchema),
+  resolution: z.array(resolutionSchema),
+  source: z.string(),
+  eloAsOf: z.string(),
+  dataAsOf: z.string().optional(),
+  provenance: llmProvenanceSchema.optional(),
+  // Present when the fleet was priced from the compute catalogue.
+  computeProvenance: computeProvenanceSchema.optional(),
   error: z.string().optional(),
 };
 
@@ -1430,7 +1584,7 @@ tool(
       maxVCPUs: z.number().optional().describe("Maximum number of vCPUs"),
       minMemory: z.number().optional().describe("Minimum memory in GiB"),
       maxMemory: z.number().optional().describe("Maximum memory in GiB"),
-      processor: z.string().optional().describe("Processor. Matched by exact equality (case-insensitive), so a partial value like 'H100' returns nothing. Known values: Intel, AMD, Graviton, Ampere, NVIDIA A100, NVIDIA H100, NVIDIA L4, NVIDIA T4, NVIDIA V100, NVIDIA Other."),
+      processor: z.string().optional().describe(`Processor. Matched by exact equality (case-insensitive), so a partial value like 'H100' returns nothing. Known values: ${ALL_PROCESSORS.join(", ")}. 'NVIDIA Other' is every NVIDIA GPU without a label of its own (L40S, H200, B200, RTX and older parts).`),
       useCase: z.string().optional().describe("Use case. Must be one of these exactly (case-insensitive): Web App, Database, HPC, ML & AI, Dev/Test, Big Data. Any other string returns zero matches rather than an error."),
       sortBy: z.enum(["price", "vcpus", "memory", "pricePerVCPU"]).optional().describe("Sort by: price, vcpus, memory, pricePerVCPU. Default: price"),
       limit: z.number().min(1).max(50).optional().describe("Max instances to return (default: 20)"),
@@ -1805,6 +1959,437 @@ tool(
   },
 );
 
+// ─── Tool 7: Estimate Self-Hosting Break-Even ───────────────────────
+
+/** Null-tolerant variant, for a figure that exists only with a throughput. */
+const roundPerRequestCostOrNull = (cost: number | null): number | null =>
+  cost === null ? null : roundPerRequestCost(cost);
+
+tool(
+  "estimate-self-hosting-breakeven",
+  {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    title: "Estimate Self-Hosting Break-Even",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      "API or own capacity: the monthly volume at which renting GPU instances costs the same as paying a " +
+      "model's API per token. An API bill grows with every request, a rented instance costs the same " +
+      "whether it is busy or idle, so below the break-even the API is cheaper and above it the fleet is. " +
+      "Give a model, a workload and either an instance from the compute catalogue (instanceType) or an " +
+      "hourly rate of your own (hourlyRate). The answer costs the fleet at every rate the catalogue lists " +
+      "(on demand, spot, 1- and 3-year commitments) against the API at list price, at the optimized price " +
+      "with caching and batch, and at the cheapest host known, and compares them at your volume. Use it " +
+      "for 'at what volume does self-hosting Llama 3.3 70B on a g6e.4xlarge pay off' or 'is our 2M " +
+      "requests a month enough to rent our own GPUs'. " +
+      "It assumes neither a throughput nor an operations cost. Without outputTokensPerSecond each " +
+      "break-even states the output tokens per second the fleet would have to sustain around the clock; " +
+      "with it, the share of the fleet's capacity that volume uses, and whether it is out of reach. " +
+      "Without monthlyOperationsCost the fleet figures are hardware rent only: engineer time, storage, " +
+      "egress and failover are left out, and the text says so. It does not check that the instance can " +
+      "hold the model, and it reports whether the model's weights are published at all. Figures are " +
+      "final as returned and dated by `provenance` (API prices) and `computeProvenance` (instance rates).",
+    inputSchema: {
+      model: z.string().min(1).describe("Model whose API price is the baseline, e.g. 'Llama 3.3 70B'. One name; the best match is used and other matches are reported."),
+      instanceType: z.string().min(1).optional().describe("Instance the model would run on, exactly as the compute catalogue names it, e.g. 'g6e.4xlarge' or 'a2-highgpu-1g'. Find one with compare-compute-pricing (category 'GPU / Accelerated'). Give this OR hourlyRate, not both."),
+      provider: z.string().optional().describe("Cloud provider of instanceType, needed only when two providers use the same instance name: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba."),
+      region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region of instanceType: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
+      hourlyRate: z.number().positive().max(100_000).optional().describe("USD per hour for ONE instance, for hardware the catalogue does not list: a GPU cloud, a quoted rate, owned hardware amortised per hour. Give this OR instanceType, not both."),
+      instanceCount: z.number().int().min(1).max(10_000).optional().describe("Instances in the fleet, each billed every hour of the month. Default: 1"),
+      outputTokensPerSecond: z.number().positive().max(10_000_000).optional().describe("MEASURED output tokens per second ONE instance generates at full load on this workload, all concurrent requests together. Omit it when it has not been measured: the tool then states the throughput each break-even requires instead of assuming one."),
+      monthlyOperationsCost: z.number().min(0).max(1_000_000_000).optional().describe("USD per month for everything the hourly rate leaves out: the engineers who run the stack, storage, egress, failover capacity. Omitted means not included, not zero, and the answer says so."),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request and the caching and batch assumptions: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket. Ignored when custom token counts are given."),
+      customInputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom input tokens per request. Must be supplied TOGETHER with customOutputTokens. A custom shape assumes no caching and no batch unless cacheHitRate / batchEligible say otherwise."),
+      customOutputTokens: z.number().int().min(1).max(10_000_000).optional().describe("Custom output tokens per request. Must be supplied TOGETHER with customInputTokens."),
+      cacheHitRate: z.number().min(0).max(1).optional().describe("Share of input tokens served from the prompt cache, 0 to 1. Only valid with customInputTokens and customOutputTokens; the presets carry their own."),
+      batchEligible: z.boolean().optional().describe("Whether the workload is asynchronous and can go through the batch API. Only valid with customInputTokens and customOutputTokens; the presets carry their own."),
+      monthlyVolume: z.number().int().min(1).max(1_000_000_000_000).optional().describe("Requests per month the two are compared at, any integer. Default: 100,000"),
+    },
+    outputSchema: outputSchema(selfHostingOutputSchema),
+  },
+  async ({
+    model: modelName, instanceType, provider, region, hourlyRate, instanceCount, outputTokensPerSecond,
+    monthlyOperationsCost, useCasePreset, customInputTokens, customOutputTokens, cacheHitRate, batchEligible, monthlyVolume,
+  }) => {
+    const volume = monthlyVolume ?? 100_000;
+    const count = instanceCount ?? 1;
+    const operations = monthlyOperationsCost ?? 0;
+
+    const customTokens = customInputTokens !== undefined && customOutputTokens !== undefined;
+    const halfCustom = (customInputTokens !== undefined) !== (customOutputTokens !== undefined);
+    const leversSupplied = cacheHitRate !== undefined || batchEligible !== undefined;
+
+    // A custom shape carries the caller's caching and batch assumptions or
+    // none at all; a preset carries its own. Same rule as estimate-llm-cost.
+    const profile: UseCaseProfile = customTokens
+      ? {
+          label: "Custom", shortLabel: "Custom",
+          inputTokens: customInputTokens, outputTokens: customOutputTokens,
+          cacheHitRate: cacheHitRate ?? 0,
+          batchEligible: batchEligible ?? false,
+        }
+      : USE_CASE_PROFILES[useCasePreset || "supportTicket"];
+    const basis: OptimizationBasis = !customTokens ? "preset" : leversSupplied ? "caller-supplied" : "none-supplied";
+    const workload = { inputTokens: profile.inputTokens, outputTokens: profile.outputTokens };
+
+    const emptyOutput = {
+      model: null,
+      workload: {
+        useCase: profile.label,
+        inputTokens: profile.inputTokens,
+        outputTokens: profile.outputTokens,
+        cacheHitRate: profile.cacheHitRate,
+        batchEligible: profile.batchEligible,
+        optimizationBasis: basis,
+        volume,
+      },
+      api: [] as unknown[],
+      fleet: null,
+      options: [] as unknown[],
+      resolution: [] as ResolutionEntry[],
+      source: "error",
+      eloAsOf: "",
+    };
+
+    // Refused rather than guessed at: each of these would otherwise change the
+    // answer without the caller knowing which reading was taken.
+    const refusal = halfCustom
+      ? "customInputTokens and customOutputTokens describe one workload and must be given together."
+      : leversSupplied && !customTokens
+        ? "cacheHitRate and batchEligible describe a custom workload, so they need both customInputTokens and " +
+          "customOutputTokens alongside them. The use-case presets carry their own cache-hit and batch assumptions."
+        : instanceType !== undefined && hourlyRate !== undefined
+          ? "Give instanceType (a catalogue instance, costed at every rate it lists) or hourlyRate (a rate of " +
+            "your own), not both: they are two different fleets."
+          : instanceType === undefined && hourlyRate === undefined
+            ? "Nothing to rent: give instanceType (a catalogue instance, e.g. 'g6e.4xlarge'; find one with " +
+              "compare-compute-pricing, category 'GPU / Accelerated') or hourlyRate (USD per hour for one instance)."
+            : null;
+    if (refusal) {
+      const message = refusal;
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
+
+    try {
+      const { models: allModels, hostPricing, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
+
+      if (allModels.length === 0) {
+        return {
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
+          isError: true,
+        };
+      }
+
+      const { selected, resolution } = resolveNames(allModels, [modelName]);
+      const describe = (r: ResolutionEntry): string => describeResolution(r, "estimate");
+
+      if (selected.length === 0) {
+        const message = `No model matched. ${resolution.map(describe).join(" ")}`;
+        return {
+          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+      const m = selected[0];
+
+      // ── The fleet: a catalogue instance at every rate it lists, or the
+      //    caller's own hourly rate.
+      let instance: EnrichedComputeInstance | null = null;
+      let computeProvenance: ComputeProvenance | undefined;
+      let rates: RateOption[] = [];
+      let fleetError: string | null = null;
+
+      if (instanceType !== undefined) {
+        const compute = await fetchComputeInstances((region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION);
+        computeProvenance = compute.provenance;
+        const catalogue = servableCatalogue(compute.instances);
+        const wanted = instanceType.trim().toLowerCase();
+        const named = catalogue.filter(inst => inst.instanceType.toLowerCase() === wanted);
+        const matches = provider ? named.filter(inst => inst.provider.toLowerCase() === provider.toLowerCase()) : named;
+        const providers = [...new Set(matches.map(inst => inst.provider))];
+
+        if (matches.length === 0) {
+          const near = catalogue
+            .filter(inst => inst.instanceType.toLowerCase().includes(wanted) || wanted.includes(inst.instanceType.toLowerCase()))
+            .slice(0, 5)
+            .map(inst => `${inst.provider} ${inst.instanceType}`);
+          fleetError =
+            `No instance named "${instanceType}"` + (provider ? ` at ${provider}` : "") +
+            ` in the ${computeProvenance.region} catalogue (${catalogue.length} Linux instances).` +
+            (named.length > 0 ? ` It exists at ${[...new Set(named.map(inst => inst.provider))].join(", ")}.` : "") +
+            (near.length > 0 ? ` Close names: ${near.join(", ")}.` : "") +
+            ` Instance names are matched exactly; list candidates with compare-compute-pricing ` +
+            `(category "GPU / Accelerated"), or pass hourlyRate for hardware the catalogue does not carry.` +
+            (computeProvenance.catalogueIsSubset
+              ? ` This is the static snapshot, a subset of the live catalogue, so "no match" does not mean no such instance exists.`
+              : "");
+        } else if (providers.length > 1) {
+          fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: say which with provider.`;
+        } else {
+          instance = matches[0];
+          rates = rateOptions(instance, computeProvenance.priceTypes);
+          if (rates.length === 0) {
+            fleetError = `${instance.provider} ${instance.instanceType} lists no price in the ${computeProvenance.region} catalogue.`;
+          }
+        }
+      } else {
+        rates = [callerRateOption(hourlyRate!)];
+      }
+
+      if (fleetError) {
+        const message = fleetError;
+        return {
+          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, computeProvenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      // ── The API: list, optimized, and the cheapest host when one is known
+      //    to undercut the quoted price. Raw floats; rounded on the way out.
+      const listCost = useCaseCost(m.inputPricePer1M, m.outputPricePer1M, profile);
+      const optimizedCost = optimizedUseCaseCost(m, profile);
+      const levers = optimizationLevers(m, profile);
+      const saving = savingsPct(listCost, optimizedCost);
+
+      const hostEntry = hostPricing.get(hostPricingKey(m));
+      const cheapest = hostEntry?.summary.cheapest;
+      const cheapestCost = cheapest ? useCaseCost(cheapest.input, cheapest.output, profile) : null;
+      const cheaperHost =
+        cheapest && cheapestCost !== null && cheapestCost < listCost &&
+        !matchesOffer({ input: m.inputPricePer1M, output: m.outputPricePer1M }, cheapest)
+          ? { offer: cheapest, cost: cheapestCost }
+          : null;
+
+      const baselines: ApiBaseline[] = [
+        { basis: "list", costPerRequest: listCost },
+        { basis: "optimized", costPerRequest: optimizedCost },
+        ...(cheaperHost ? [{ basis: "cheapestHost" as const, costPerRequest: cheaperHost.cost }] : []),
+      ];
+
+      const capacity = outputTokensPerSecond !== undefined ? fleetCapacity(outputTokensPerSecond, count, workload) : null;
+      const canServe = capacity === null ? null : volume <= capacity;
+      const needed = outputTokensPerSecond !== undefined ? instancesNeeded(volume, outputTokensPerSecond, workload) : null;
+      const volumeThroughput = throughputForVolume(volume, workload);
+
+      const results: OptionResult[] = rates.map(option =>
+        evaluateOption(option, { instanceCount: count, monthlyOperationsCost: operations, workload, volume, capacity, baselines }),
+      );
+
+      // ── Text ──
+      const openness = opennessOf(m.license);
+      const selfHostable = openness === "Open source" || openness === "Open weights" ? true : openness === "Proprietary" ? false : null;
+      const weightsLine =
+        selfHostable === true
+          ? `Weights: ${openness}${m.license ? ` (${m.license})` : ""}. The model can be run on rented hardware; check the licence terms for your use.`
+          : selfHostable === false
+            ? `Weights: Proprietary. This model's weights are not published, so it cannot be self-hosted: the fleet ` +
+              `figures only apply if the workload can move to an open model that this hardware runs.`
+            : `Weights: licence not established. Whether this model can be self-hosted is unknown; confirm it before ` +
+              `reading the fleet figures as an option.`;
+
+      const money = (cost: number): string => `${formatMicroCost(cost)}/req → ${formatMonthlyBudget(cost * volume)}/mo`;
+      const apiLines = [
+        `  API list price ($${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${listingTags(m)}): ${money(listCost)}`,
+        saving > 0
+          ? `  API optimized: ${money(optimizedCost)} — save ${saving}% with ${leverSummary(levers)}`
+          : basis === "none-supplied"
+            ? `  API optimized: same as list — ${NO_ASSUMPTIONS_NOTE}`
+            : `  API optimized: same as list — no saving available (${leverSummary(levers)})`,
+        cheaperHost
+          ? `  Cheapest host — ${describeOffer(cheaperHost.offer)}: ${money(cheaperHost.cost)}` +
+            (provenance.hostPricingAsOf ? ` (read ${provenance.hostPricingAsOf})` : "")
+          : hostEntry
+            ? `  Cheapest host: none below the quoted price among the listings known.`
+            : `  Cheapest host: no per-host pricing for this model.`,
+      ];
+
+      const fleetName = instance
+        ? `${count} × ${instance.provider} ${instance.instanceType} (${instance.vCPUs} vCPUs, ${instance.memory} GiB, ` +
+          `${instance.processor}), ${computeProvenance?.region ?? DEFAULT_PRICING_REGION}`
+        : `${count} × an instance at the hourly rate supplied`;
+      const fleetLines = [
+        `Renting capacity: ${fleetName}, billed ${HOURS_PER_MONTH} hours a month whatever the load.`,
+        instance && instance.category !== "GPU / Accelerated"
+          ? `Note: ${instance.instanceType} is in the ${instance.category} category, not GPU / Accelerated.`
+          : "",
+        monthlyOperationsCost !== undefined
+          ? `Operations cost: ${formatMonthlyBudget(operations)}/mo supplied, included in every fleet figure below.`
+          : `Operations cost: none supplied, so the fleet figures are hardware rent only.`,
+        capacity === null
+          ? `Throughput: none supplied, and none assumed. ${volume.toLocaleString()} req/mo asks the fleet for ` +
+            `${formatThroughput(volumeThroughput)} output tok/s on average around the clock` +
+            (count > 1 ? ` (${formatThroughput(volumeThroughput / count)} per instance)` : "") +
+            `; the comparisons at that volume hold only if it can generate them.`
+          : `Throughput supplied: ${outputTokensPerSecond} output tok/s per instance, so the fleet serves at most ` +
+            `${formatCount(capacity)} req/mo flat out. ` +
+            (canServe
+              ? `${volume.toLocaleString()} req/mo is ${toPct(volume / capacity)}% of that.`
+              : `${volume.toLocaleString()} req/mo is beyond it and takes ${needed} instances: re-run with ` +
+                `instanceCount ${needed}. The comparison at your volume is left out below, because this fleet cannot serve it.`),
+      ].filter(Boolean);
+
+      // An optimized price equal to list would print every break-even twice.
+      const shown = (r: OptionResult) => r.points.filter(p => p.basis !== "optimized" || saving > 0);
+      const atVolume = `At ${volume.toLocaleString()} req/mo` + (capacity === null ? `, if the fleet can serve it` : "");
+      const optionBlocks = results.map(r => {
+        const lines = [
+          `  ${describeOptionName(r.option)} — $${r.option.hourlyRate.toFixed(4)}/hr` + (count > 1 ? ` per instance` : "") +
+            ` → ${formatMonthlyBudget(r.monthlyCost)}/mo` + (monthlyOperationsCost !== undefined ? ` with operations` : ""),
+          ...shown(r).map(p => `    Costs the same as ${describePoint(p)}`),
+        ];
+        if (r.fullLoadCostPerRequest !== null) {
+          lines.push(`    Flat out around the clock, one request costs ${formatMicroCost(r.fullLoadCostPerRequest)} on this fleet.`);
+        }
+        if (canServe !== false) {
+          lines.push(`    ${atVolume}: ${shown(r).map(describeDelta).join(", ")}.`);
+        }
+        return lines.join("\n");
+      });
+
+      // The compute notice lists every provider's static columns. It leads
+      // only when it bears on this answer: a fallback tier, or a static column
+      // at this instance's provider (each such rate is also tagged below).
+      const computeNotice =
+        computeProvenance && instance &&
+        (computeProvenance.tier !== 1 ||
+          computeProvenance.staticPriceColumns.some(column => column.startsWith(`${instance.provider}.`)))
+          ? computeProvenance.notice
+          : undefined;
+      const notices = [provenance.notice, computeNotice].filter(Boolean).map(n => `⚠️ ${n}`).join("\n\n");
+      const dated = (label: string, timestamp?: string): string => label + (timestamp ? ` (as of ${timestamp})` : "");
+
+      return {
+        structuredContent: {
+          ...emptyOutput,
+          model: {
+            provider: m.provider,
+            model: m.model,
+            parameters: m.parameters,
+            eloScore: m.eloScore,
+            license: m.license,
+            openness,
+            selfHostable,
+            inputPricePer1M: m.inputPricePer1M,
+            outputPricePer1M: m.outputPricePer1M,
+            outlierListing: m.outlierListing,
+            promotionalListing: m.promotionalListing,
+          },
+          api: [
+            {
+              basis: "list" as const,
+              label: API_BASIS_LABELS.list,
+              inputPricePer1M: m.inputPricePer1M,
+              outputPricePer1M: m.outputPricePer1M,
+              perRequest: roundPerRequestCost(listCost),
+              monthly: roundMonthlyCost(listCost * volume),
+            },
+            {
+              basis: "optimized" as const,
+              label: API_BASIS_LABELS.optimized,
+              perRequest: roundPerRequestCost(optimizedCost),
+              monthly: roundMonthlyCost(optimizedCost * volume),
+              savingsPct: saving,
+              ...levers,
+            },
+            ...(cheaperHost
+              ? [{
+                  basis: "cheapestHost" as const,
+                  label: API_BASIS_LABELS.cheapestHost,
+                  inputPricePer1M: cheaperHost.offer.input,
+                  outputPricePer1M: cheaperHost.offer.output,
+                  host: cheaperHost.offer.host,
+                  quantization: cheaperHost.offer.quantization,
+                  discount: cheaperHost.offer.discount,
+                  perRequest: roundPerRequestCost(cheaperHost.cost),
+                  monthly: roundMonthlyCost(cheaperHost.cost * volume),
+                }]
+              : []),
+          ],
+          fleet: {
+            provider: instance?.provider ?? null,
+            instanceType: instance?.instanceType ?? null,
+            region: instance ? computeProvenance?.region ?? null : null,
+            vCPUs: instance?.vCPUs ?? null,
+            memory: instance?.memory ?? null,
+            processor: instance?.processor ?? null,
+            category: instance?.category ?? null,
+            instanceCount: count,
+            hoursPerMonth: HOURS_PER_MONTH,
+            monthlyOperationsCost: roundMonthlyCost(operations),
+            operationsCostSupplied: monthlyOperationsCost !== undefined,
+            outputTokensPerSecond: outputTokensPerSecond ?? null,
+            volumeRequiredOutputTokensPerSecond: roundThroughput(volumeThroughput),
+            capacityRequestsPerMonth: capacity === null ? null : Math.floor(capacity),
+            volumeUtilizationPct: capacity === null ? null : toPct(volume / capacity),
+            canServeVolume: canServe,
+            instancesNeededForVolume: needed,
+          },
+          options: results.map(r => ({
+            rate: r.option.rate,
+            label: r.option.label,
+            hourlyRate: roundHourlyRate(r.option.hourlyRate),
+            static: r.option.static,
+            interruptible: r.option.interruptible,
+            monthlyCost: roundMonthlyCost(r.monthlyCost),
+            fullLoadCostPerRequest: roundPerRequestCostOrNull(r.fullLoadCostPerRequest),
+            breakEven: r.points.map(p => ({
+              basis: p.basis,
+              requestsPerMonth: p.point ? Math.round(p.point.requestsPerMonth) : null,
+              tokensPerDay: p.point ? Math.round(p.point.tokensPerDay) : null,
+              requiredOutputTokensPerSecond: p.point ? roundThroughput(p.point.outputTokensPerSecond) : null,
+              utilizationPct: p.utilization === null ? null : toPct(p.utilization),
+              reachable: p.reachable,
+              fleetMinusApiMonthly: roundMonthlyCost(p.fleetMinusApiMonthly),
+            })),
+          })),
+          resolution,
+          source,
+          eloAsOf,
+          dataAsOf,
+          provenance,
+          computeProvenance,
+        },
+        content: [
+          {
+            type: "text",
+            // The notices lead: a caller told to report figures exactly as
+            // returned must see "unverified" before it sees them.
+            text: (notices ? `${notices}\n\n` : "") +
+              `Data source: ${dated(provenance.label, provenance.upstreamTimestamp)}.` +
+              (computeProvenance ? ` Instance rates: ${dated(computeProvenance.label, computeProvenance.upstreamTimestamp)}.` : "") + `\n` +
+              `Name resolution: ${resolution.map(describe).join(" ")}\n\n` +
+              `API or own capacity — ${m.provider} ${m.model} for ${profile.label} (${profile.inputTokens} in + ` +
+              `${profile.outputTokens} out tokens) at ${volume.toLocaleString()} requests/month.\n` +
+              `${weightsLine}\n\n` +
+              `Paying per token:\n${apiLines.join("\n")}\n\n` +
+              `${fleetLines.join("\n")}\n\n` +
+              `${optionBlocks.join("\n")}` +
+              ratesLegend(instance ? [instance] : [], computeProvenance?.priceTypes, computeProvenance?.awsSavingsPlansAsOf) +
+              `${listingLegend([m])}\n\n` +
+              selfHostingFootnote(monthlyOperationsCost !== undefined, capacity !== null),
+          },
+        ],
+        isError: false,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error("[estimate-self-hosting-breakeven] failed:", error);
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: `Error estimating the self-hosting break-even: ${message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // ─── Server ─────────────────────────────────────────────────────────
 
 /**
@@ -1816,7 +2401,7 @@ tool(
 function createServer(): McpServer {
   const server = new McpServer({
     name: "ai-pricing-hub",
-    version: "0.6.0",
+    version: "0.7.0",
   });
   for (const register of tools) register(server);
   return server;
