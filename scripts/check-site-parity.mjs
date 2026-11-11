@@ -56,6 +56,8 @@ const mcpOpenness = await load(join(repoRoot, "server/src/lib/openness.ts"));
 const site = await load(join(sitePath, "src/lib/llm-business-metrics.ts"));
 const siteOpenness = await load(join(sitePath, "src/lib/openness.ts"));
 const siteHosts = await load(join(sitePath, "src/lib/host-prices.ts"));
+const siteHostView = await load(join(sitePath, "src/lib/host-pricing-view.ts"));
+const mcpHosts = await load(join(repoRoot, "server/src/lib/host-prices.ts"));
 
 const response = await fetch(API_URL, { headers: { Accept: "application/json" } });
 if (!response.ok) {
@@ -151,10 +153,60 @@ for (const v of samples) {
 }
 report("cost formatters", formatDiff.length, samples.length * 2, formatDiff);
 
+// 5. Per-host prices: lib/host-prices.ts is a port of the site's reader.
+const constantDiff = [];
+for (const name of ["SAME_RATE_TOLERANCE", "NOTEWORTHY_SPREAD", "HOST_DEFINITION"]) {
+  if (mcpHosts[name] !== siteHosts[name]) constantDiff.push(`${name}: ${mcpHosts[name]} here, ${siteHosts[name]} on the site`);
+}
+const makerHere = [...mcpHosts.MAKER_ROW_NOT_STANDARD_RATE].sort().join(", ");
+const makerThere = [...siteHostView.MAKER_ROW_NOT_STANDARD_RATE].sort().join(", ");
+if (makerHere !== makerThere) constantDiff.push(`MAKER_ROW_NOT_STANDARD_RATE: [${makerHere}] here, [${makerThere}] on the site`);
+for (const kind of ["vendor", "reference", "adjusted", "unknown"]) {
+  const sample = rows.find((r) => r.hostPricing?.vendor)?.hostPricing;
+  if (mcpHosts.provenanceExplanation(kind, sample) !== siteHosts.provenanceExplanation(kind, sample)) {
+    constantDiff.push(`provenanceExplanation("${kind}")`);
+  }
+}
+report("host-price constants and sentences", constantDiff.length, 8, constantDiff);
+
+const summaryDiff = [];
+const provenanceDiff = [];
+const spreadDiff = [];
+const standardDiff = [];
+let promotionCount = 0;
+for (const [row] of pairs) {
+  const name = `${row.provider} ${row.model}`;
+  // What coerceHostPricing lets through must be what the site sent: a field it
+  // drops, or one the site has added since, is a difference to decide on.
+  const summary = mcpHosts.coerceHostPricing(row.hostPricing);
+  if (JSON.stringify(summary) !== JSON.stringify(row.hostPricing)) summaryDiff.push(name);
+
+  const displayed = { input: row.inputPricePer1M, output: row.outputPricePer1M };
+  const kindHere = mcpHosts.priceProvenance(displayed, summary);
+  const kindThere = siteHosts.priceProvenance(displayed, row.hostPricing);
+  if (kindHere !== kindThere) provenanceDiff.push(`${name}: ${kindHere} here, ${kindThere} on the site`);
+
+  if (mcpHosts.hasNoteworthySpread(summary) !== siteHosts.hasNoteworthySpread(row.hostPricing)) spreadDiff.push(name);
+
+  for (const offer of row.hostPricing?.promotions ?? []) {
+    promotionCount += 1;
+    if (JSON.stringify(mcpHosts.standardRateOf(offer)) !== JSON.stringify(siteHosts.standardRateOf(offer))) {
+      standardDiff.push(`${name} at ${offer.host}`);
+    }
+  }
+}
+report("host summaries carried as the site sent them", summaryDiff.length, pairs.length, summaryDiff);
+report("whose price the quoted one is", provenanceDiff.length, pairs.length, provenanceDiff);
+report("noteworthy spread", spreadDiff.length, pairs.length, spreadDiff);
+report("standard rate behind a promotion", standardDiff.length, promotionCount || 1, standardDiff);
+
 // Not a pass or fail: fields on the site's rows that this server does not carry.
 // New ones show up here before anyone has decided whether they matter.
+// hostPricing and openRouterId are carried beside the model rows, not on them
+// (LLMFetchResult.hostPricing), so they are counted here by hand.
 const siteFields = new Set(rows.flatMap((r) => Object.keys(r)));
 const carried = new Set(pairs.flatMap(([, m]) => Object.keys(m).filter((k) => m[k] !== undefined)));
+carried.add("hostPricing").add("openRouterId");
 const notCarried = [...siteFields].filter((f) => !carried.has(f));
 console.log(`\nSite row fields not carried here: ${notCarried.join(", ") || "none"}.`);
 

@@ -9,7 +9,7 @@ keeps what an agent needs in every session and lists the sections below.
 Runtime:      Node, the official MCP SDK, node:http. No framework.
 Language:     TypeScript
 Build:        tsc (dist/server/src/index.js)
-UI:           none. Five tools; each answers with text and structuredContent
+UI:           none. Six tools; each answers with text and structuredContent
 Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
 Transport:    Streamable HTTP at /mcp, stateless (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
@@ -82,13 +82,15 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # The 5 tools, createServer(), listen, cache warm-up
+│       ├── index.ts                  # The 6 tools, createServer(), listen, cache warm-up
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
 │       │   ├── public-url.ts         # PUBLIC_MCP_URL, the one published URL
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
+│       │   ├── compute-rates.ts      # A compute row's rates as text, and what each saves on on-demand
+│       │   ├── host-prices.ts        # Per-host prices: port of the site's reader, coercion, wording
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
 │       │   ├── llm-business-metrics.ts # Efficiency scoring, use-case profiles, FinOps badge
@@ -96,7 +98,7 @@ ai-pricing-hub-mcp/
 │       │   ├── openness.ts           # Licence → self-hostability bucket
 │       │   ├── pricing-normalize.ts  # Publishable-pricing guard (rejects -1 router rows)
 │       │   ├── compute-categories.ts # Compute instance categorization + enrichment
-│       │   └── *.test.ts             # capabilities, data-sources, http, llm-business-metrics, output-schema, public-url
+│       │   └── *.test.ts             # capabilities, compute-rates, data-sources, host-prices, http, llm-business-metrics, output-schema, public-url
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── docs/
@@ -347,6 +349,14 @@ diverged before the switch.
   is unreachable, so its drift is invisible until the day it matters.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference. Applied locally to the site's rows.
+- `lib/host-prices.ts`, first half — whose price the quoted one is
+  (`priceProvenance`, the 2% `sameRate` tolerance), when a spread is worth
+  saying, the standard rate behind a promotion, and
+  `MAKER_ROW_NOT_STANDARD_RATE`, which the site keeps in
+  `src/lib/host-pricing-view.ts`. `check-parity` compares all of them over the
+  live catalogue, and also that `coerceHostPricing` lets a summary through
+  exactly as the site sent it: a field the site adds to `hostPricing` fails
+  that check until someone decides what to do with it.
 
 **The optimized cost charges the cache write.** A cache read is only possible
 after a cache write, which vendors that publish a write rate bill above ordinary
@@ -520,6 +530,58 @@ Reserved 1-yr: $0.0524/hr (-37%), 3-yr: $0.0358/hr (-57%)
 
 Not done: the table cannot be sorted by a commitment rate, so "the cheapest
 3-year commitment" is read off the cheapest on-demand rows.
+
+### Per-host prices: `compare-model-hosts` (0.6.0)
+
+Every other tool quotes one price per model. It is one host's rate. On
+2026-11-11, 145 of 311 models were sold by at least two hosts, 50 by at least
+five, and on 34 the dearest cost twice the cheapest or more. The site reads
+each model's hosts nightly from OpenRouter and publishes a compact summary on
+every row of `/api/llm-models`: `hostPricing` (host count, cheapest, dearest,
+the maker's own, spread, promotional listings), dated by
+`meta.hostPricingAsOf`. This tool is a reader of that summary.
+
+- **One more tool, not more fields on the others.** At `limit: 50`,
+  `compare-llm-models` is already about 43,000 characters; a host summary per
+  row would add roughly half again. And "where do we buy it" is a question
+  about named models, like `compare-models-side-by-side`, with which it shares
+  name resolution (`resolveNames`, `describeResolution`).
+- **The summary travels beside the rows** (decision 9b in `CLAUDE.md`). A
+  model with no entry prints "no per-host pricing", and the text says that is
+  unknown, not one host. Tiers 2 and 3 have none at all and say so.
+- **Each offer is costed for a workload** (`useCasePreset`, `volumePreset`) and
+  compared with the cost at the quoted price: "−25% vs quoted". List price
+  only: the site publishes no cache or batch rate per host.
+- **The quoted price is classified**, with the site's own function and
+  sentences: the maker's own rate, another host's, or a figure no host
+  currently publishes.
+- **The caveats are in the text**, because they decide whether the cheap host
+  is a bargain: a promotional listing prints its discount and the standard
+  rate behind it; listings that declare different builds (fp8, bf16, int4)
+  are called not like-for-like, and the ELO was not measured on a quantized
+  build; negotiated rates and provisioned capacity are not shown.
+- **Hosts at one rate are said to be at one rate.** When the cheapest and the
+  dearest match to within 2%, every host between them does too, and naming a
+  "cheapest" and a "dearest" would invent a difference. Claude Opus 5.5 read
+  that way on 2026-11-11: five hosts, Amazon Bedrock and Anthropic among them,
+  one rate.
+- **The maker's row is not always the maker's price.** For the ids in
+  `MAKER_ROW_NOT_STANDARD_RATE` the row upstream lists under the maker's name
+  has been a discount tier (OpenAI's flex rate, from 30 August to 14 October
+  2026). The API does not flag it; the site keeps the list in its reader, and
+  this server keeps the same one, held equal by `check-parity`. `vendor` is
+  then null, `vendorRowNotStandardRate` true, and the text says why.
+  **The exception bites only while that row differs from the quoted price**
+  (`makerOffer`). The site pins the quoted price of these models to what it
+  read on the maker's own page, so a maker row at that rate is the standard
+  rate. This is not a refinement for its own sake: the list is kept upstream
+  until a re-check due on 2026-11-21, the row has read $4/$20 since 15
+  October, and applied blindly the list made this tool state, on 2026-11-11,
+  that OpenAI's row "is not its standard rate" on a day when it was.
+
+What the site does not publish, and so this tool cannot say: the hosts between
+the cheapest and the dearest, and therefore whether a given platform (Bedrock,
+Azure, Vertex) sells a model unless it happens to be one of the named offers.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

@@ -13,7 +13,7 @@ Do not add `Co-Authored-By`, `Claude-Session` or "Generated with Claude Code" li
 
 ## What This Project Does
 
-A remote MCP (Model Context Protocol) server that gives an AI assistant five read-only tools: LLM model comparison, cost estimation, model recommendation, and cloud compute pricing. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
+A remote MCP (Model Context Protocol) server that gives an AI assistant six read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, and cloud compute pricing. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
 
 **It is not an MCP App.** Until 0.5.0 each tool also rendered a React widget through the Skybridge framework. Both were removed on 2026-11-11, on the owner's decision: the server is tools only. Do not add a UI layer back, a `ui://` resource, or a framework around the SDK, unless that decision is reopened.
 
@@ -45,6 +45,11 @@ A remote MCP (Model Context Protocol) server that gives an AI assistant five rea
 - **Output:** Filtered cloud compute instance comparison across 7 providers. Each row carries on-demand, spot and the 1- and 3-year commitment rates (savings plan / CUD, reserved) with the saving of each against on-demand (`*SavingsPct`), in the text as well as in `structuredContent`; a row with no commitment rate says so. Plus `provenance.priceTypes` — which price columns are live, which are static constants, and which are unavailable
 - **Data Source:** `GET /api/pricing` (~6,000 instances) with the 137-row static array as fallback only
 
+### Tool 6: `compare-model-hosts`
+- **Input:** `models` (1-4 free-text names) + optional `useCasePreset` (default supportTicket) and `volumePreset`
+- **Output:** Per model: the quoted price and whose rate it is (`priceSource`: vendor / reference / adjusted / unknown), host count, the cheapest, dearest and maker's own listing, the spread, promotional listings, the builds declared (quantization), each offer costed for the workload and compared with the quoted cost. Plus a `resolution` entry per name.
+- **Data Source:** `hostPricing` on the rows of `/api/llm-models` (tier 1 only, dated by `provenance.hostPricingAsOf`). Only the cheapest, dearest, maker's and promotional listings exist there: the hosts in between are not published.
+
 ---
 
 ## Key Design Decisions
@@ -71,7 +76,8 @@ reads as an answer.
 7. **Price tier and openness are separate axes.** `category` is Frontier / Mid-tier / Budget / Image and answers "what does it cost". `openness` (derived from the licence in `openness.ts`) answers "whose hardware can run it". They used to be folded together as an "Open Weights" category, which forced every open model to give up one label to earn the other — do not reintroduce it.
 8. **The FinOps Friendly badge gates on percentiles, not fixed numbers:** top 40% on ELO, top 30% on efficiency, cheapest 70% on list price, a stable release, and a price the site does not flag as an outlier listing. Ties share a rank. The tool also returns what those percentiles land on today (`finopsBadge.minElo`, `finopsBadge.maxBlendedPrice`) so the badge is auditable.
 9. **A price the site flags is labelled, never hidden.** `promotionalListing` (a temporary discounted rate) and `outlierListing` (one host's rate, input near free) arrive on the site's rows and are repeated in `structuredContent` and in every text block, with one line saying what the label means. A budget built on a promotional price rises when the promotion ends.
-10. **The cost, score and badge logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogue and must report no difference before a release. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
+9b. **Host prices travel beside the model rows, never on them.** `fetchLLMModels()` returns `hostPricing` as a map keyed by `hostPricingKey()`. Every tool spreads a model row into `structuredContent`, and the output schemas refuse undeclared properties, so a field added to `LLMModel` reaches all of them at once and a strict host rejects them. A model with no entry is unknown, never "sold by one host". The maker's row is not quoted for the ids in `MAKER_ROW_NOT_STANDARD_RATE`, but only while that row differs from the quoted price (`makerOffer`).
+10. **The cost, score, badge and host-price logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogue and must report no difference before a release. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here and the one site rule not applied.
 
 ---
 

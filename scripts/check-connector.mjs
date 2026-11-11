@@ -9,7 +9,7 @@
  * or the *.fly.dev host. The script checks, in order:
  *
  *   1. initialize   -> HTTP 200 and serverInfo
- *   2. tools/list   -> the five tools, each with a title, readOnlyHint, a
+ *   2. tools/list   -> the six tools, each with a title, readOnlyHint, a
  *                      2020-12 outputSchema, and no widget template
  *   3. resources    -> none: the server publishes no `ui://` resources since
  *                      0.5.0, and a client must not be offered any
@@ -35,6 +35,7 @@ const EXPECTED_TOOLS = [
   "compare-models-side-by-side",
   "recommend-llm-model",
   "compare-compute-pricing",
+  "compare-model-hosts",
 ];
 const JSON_SCHEMA_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
@@ -91,7 +92,7 @@ const tools = await rpc("tools/list");
 const listed = tools.payload?.result?.tools ?? [];
 const toolNames = listed.map(t => t.name);
 console.log(`\ntools/list -> HTTP ${tools.status}: ${JSON.stringify(toolNames)}`);
-check(EXPECTED_TOOLS.every(n => toolNames.includes(n)) && toolNames.length === EXPECTED_TOOLS.length, "the five tools are listed");
+check(EXPECTED_TOOLS.every(n => toolNames.includes(n)) && toolNames.length === EXPECTED_TOOLS.length, `the ${EXPECTED_TOOLS.length} tools are listed`);
 for (const tool of listed) {
   const problems = [
     tool.title ? "" : "no title",

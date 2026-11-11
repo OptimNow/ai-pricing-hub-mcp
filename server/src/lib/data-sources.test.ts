@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { coerceSiteModel, fetchLLMModels, resetLLMModelCache } from "./llm-models.js";
+import { coerceSiteModel, fetchLLMModels, hostPricingKey, resetLLMModelCache } from "./llm-models.js";
 import { llmModels, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
@@ -433,6 +433,85 @@ test("each snapshot states its own date", () => {
   // snapshot re-dated compute rows it had not touched.
   assert.match(dataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
   assert.match(computeDataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+// ── Per-host prices ─────────────────────────────────────────────────
+
+const HOSTS_OF_ALPHA_0 = {
+  hosts: 3,
+  cheapest: { host: "DeepInfra", input: 0.8, output: 1.6, quantization: "fp8" },
+  dearest: { host: "Azure", input: 1.5, output: 3 },
+  vendor: { host: "TestVendor", input: 1, output: 2 },
+  spread: 1.875,
+};
+
+/** Alpha 0 with a full host summary, Alpha 1 with a broken one, the rest with none. */
+function siteModelsWithHosts() {
+  const models: Record<string, unknown>[] = siteModels();
+  models[0] = { ...models[0], openRouterId: "testvendor/alpha-0", hostPricing: HOSTS_OF_ALPHA_0 };
+  models[1] = { ...models[1], openRouterId: "testvendor/alpha-1", hostPricing: { hosts: 2 } };
+  const base = siteModelsResponse();
+  return { ...base, models, meta: { ...base.meta, hostPricingAsOf: "2026-11-11" } };
+}
+
+test("per-host prices travel beside the models, dated, and never on them", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: siteModelsWithHosts() } : { throws: true }));
+
+  const result = await fetchLLMModels();
+
+  assert.equal(result.provenance.hostPricingAsOf, "2026-11-11", "a nightly read has its own date");
+  assert.deepEqual(result.hostPricing.get(hostPricingKey({ provider: "TestVendor", model: "Alpha 0" })), {
+    summary: HOSTS_OF_ALPHA_0,
+    openRouterId: "testvendor/alpha-0",
+  });
+  assert.equal(
+    result.hostPricing.has(hostPricingKey({ provider: "TestVendor", model: "Alpha 1" })),
+    false,
+    "a summary with no cheapest and dearest offer is unknown, not half-served",
+  );
+  assert.equal(result.hostPricing.size, 1, "a row with no host data has no entry: unknown, never one host");
+
+  // Every tool spreads a model row into structuredContent, and their schemas
+  // refuse undeclared properties: a host field on the row would make a strict
+  // client reject four tools at once.
+  for (const model of result.models) {
+    assert.ok(!("hostPricing" in model) && !("openRouterId" in model), `${model.model} carries a host field`);
+  }
+});
+
+test("the fallback tiers have no per-host prices and claim none", async (t) => {
+  t.after(restoreFetch);
+
+  reset();
+  stubFetch(url => {
+    if (isSite(url)) return { status: 503 };
+    if (isOpenRouter(url)) return { body: openRouterPayload() };
+    return { throws: true };
+  });
+  const tier2 = await fetchLLMModels();
+  assert.equal(tier2.provenance.tier, 2);
+  assert.equal(tier2.hostPricing.size, 0);
+  assert.equal(tier2.provenance.hostPricingAsOf, undefined);
+
+  reset();
+  stubFetch(() => ({ throws: true }));
+  const tier3 = await fetchLLMModels();
+  assert.equal(tier3.provenance.tier, 3);
+  assert.equal(tier3.hostPricing.size, 0);
+  assert.equal(tier3.provenance.hostPricingAsOf, undefined);
+});
+
+test("a site that sends no host data is still tier 1, with nothing to say about hosts", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: siteModelsResponse() } : { throws: true }));
+
+  const result = await fetchLLMModels();
+  assert.equal(result.provenance.tier, 1);
+  assert.equal(result.hostPricing.size, 0);
+  assert.equal(result.provenance.hostPricingAsOf, undefined);
 });
 
 // ── Compute ─────────────────────────────────────────────────────────
