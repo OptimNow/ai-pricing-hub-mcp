@@ -1,19 +1,18 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.OptimNow/ai-pricing-hub",
-  "description": "Compare LLM API and cloud compute pricing, estimate workload costs, pick a model within budget.",
-  "status": "active",
+  "description": "For FinOps: what an AI workload costs, where to buy it, when to self-host, what moved. All sourced.",
   "repository": {
     "url": "https://github.com/OptimNow/ai-pricing-hub-mcp",
     "source": "github"
   },
-  "version": "0.9.0",
+  "version": "0.10.0",
   "remotes": [
     {
       "type": "streamable-http",
       "url": "https://optimtoken-mcp.optimnow.io/mcp"
     }
   ],
-  "title": "OptimToken",
+  "title": "OptimToken: AI and Compute Economics",
   "websiteUrl": "https://optimtoken.optimnow.io/mcp"
 }

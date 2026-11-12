@@ -108,7 +108,8 @@ ai-pricing-hub-mcp/
 │       │   ├── compute-categories.ts # Instance category, processor, use cases: the site's file, copied whole
 │       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
 │       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
-│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, price-changes, public-url, self-hosting
+│       │   ├── server-instructions.ts # What the server tells the calling model when it connects
+│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, price-changes, public-url, self-hosting, server-instructions
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── docs/
@@ -280,6 +281,22 @@ needs a version bump before the registry will show it. 0.4.0 went up on
 2026-10-05 with the Alpic URL, which is why the Fly URL shipped as 0.4.1, and
 the custom domain ships as 0.4.2.
 
+On 2026-11-12 the entry still read 0.4.2 while production served 0.9.0: five
+releases had gone by without the manual step. The manifest was revised in
+0.10.0, before the next publish:
+
+- **Title and description say what the server is for.** `OptimToken: AI and
+  Compute Economics`, and "For FinOps: what an AI workload costs, where to buy
+  it, when to self-host, what moved. All sourced." About sixty registry
+  servers looked up LLM prices on 2026-11-11 (a count from one-line
+  descriptions), so "pricing" alone sets nothing apart. The brand stays in
+  front: it is the site's name and the connector's domain.
+- **The current manifest schema**, 2025-12-11. `status` is no longer a field of
+  `server.json`: the registry manages it.
+
+`mcp-publisher validate` checks the file against the registry without
+publishing, deprecation warnings included.
+
 The version lives in four places — `package.json`, `package-lock.json`,
 `server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
 fails if they disagree. Release order:
@@ -289,7 +306,8 @@ fails if they disagree. Release order:
    commit declares, so green means the new version is live. Publishing first
    would list a version the endpoint does not serve yet.
 2. `git pull` (`server.json` is read from disk), then from the repo root:
-   `mcp-publisher login github`, then `mcp-publisher publish`.
+   `mcp-publisher validate`, `mcp-publisher login github`, then
+   `mcp-publisher publish`.
 3. Confirm the entry and its `remotes` URL:
    `https://registry.modelcontextprotocol.io/v0/servers/io.github.OptimNow%2Fai-pricing-hub/versions/latest`
    Not the `?search=` listing: right after the 0.4.1 publish on 2026-10-07 it
@@ -807,6 +825,43 @@ began. The eighth tool reads both (`lib/price-changes.ts`).
   `hostPricing`), so it refuses on a fallback tier.
 - **Two provenances.** `provenance` is the archive's (window, first and newest
   day); `catalogueProvenance` is the catalogue's.
+
+### What the server says at connection: `instructions` (0.10.0)
+
+Until 0.10.0 the server announced a name and a version, nothing else. The rules
+that make an answer safe to quote lived in each tool's text, one answer at a
+time, and a host that loads tools on demand shows the model little more than
+the tool names until one is called. Since 0.10.0 the initialize result carries
+`instructions` (`lib/server-instructions.ts`, about 1,600 characters):
+
+- **What the server is for**, as the questions it answers: what a workload
+  costs on a model, which model fits a budget, who sells a model, what an
+  instance costs, when renting capacity beats paying an API, which prices
+  moved. It is the registry description said at length.
+- **How to repeat a figure**: with the date and the source the answer gives,
+  and with the label that qualifies it; an optimized cost only where the answer
+  says the discount applies; absent is not known; a price move with no label is
+  not a repricing; no throughput supplied on the user's behalf for the
+  break-even; arithmetic done on top of an answer named as such.
+
+Three choices:
+
+- **It restates, it does not add.** Every sentence is a rule a tool already
+  applies in its own text. Instructions are advice that a host may cut or not
+  show at all, so an answer has to stay correct without them: decision 1b
+  holds as before.
+- **It names no tool.** A tool's description says what that tool does, and a
+  list of names would be stale with the ninth tool. A new *label* does make
+  the text stale; `server-instructions.test.ts` holds the labels it quotes to
+  the ones the texts print.
+- **It has a budget of 2,000 characters.** The text sits in the context of
+  every conversation the connector is enabled in, and Claude Code cuts server
+  instructions at 4,096 characters without saying so (its MCP documentation,
+  read 2026-11-12).
+
+`index.ts` listens on import, so no unit test connects to it. The test reads
+the source for `instructions: SERVER_INSTRUCTIONS`, and
+`scripts/check-connector.mjs` asks a running server.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
