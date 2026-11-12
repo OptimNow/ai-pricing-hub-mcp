@@ -371,13 +371,15 @@ the process was only killed at the stop timeout.
 
 #### Publishing to the MCP registry
 
-`server.json` is what <https://registry.modelcontextprotocol.io> lists. A merge
-does not publish it: the `Publish to the MCP registry` workflow
-(`.github/workflows/publish-registry.yml`) does, when somebody starts it, or a
-manual `mcp-publisher` run (the CLI is downloaded locally and git-ignored). **A
-published version can never be edited**, so any change to `server.json` (a new
-connector URL, a description) needs a version bump before the registry will
-show it. 0.4.0 went up on
+`server.json` is what <https://registry.modelcontextprotocol.io> lists. Since
+2026-11-12 it is published by CI: once the `deploy` job of `ci.yml` has put
+`master` live, its `publish-registry` job calls
+`.github/workflows/publish-registry.yml`, which publishes the version in
+`server.json` if the registry does not hold it yet. **A published version can
+never be edited**, so merging a pull request that bumps the version publishes
+that version's title, description and URL for good: read `server.json` in that
+pull request. Any later change to it (a new connector URL, a description)
+needs another version bump before the registry will show it. 0.4.0 went up on
 2026-10-05 with the Alpic URL, which is why the Fly URL shipped as 0.4.1, and
 the custom domain ships as 0.4.2.
 
@@ -401,22 +403,38 @@ The version lives in four places — `package.json`, `package-lock.json`,
 `server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
 fails if they disagree. Release order:
 
-1. Merge the bump and wait for the `deploy` job in `ci.yml` to go green. It
-   deploys `master` and fails unless the live server announces the version this
-   commit declares, so green means the new version is live. Publishing first
-   would list a version the endpoint does not serve yet.
-2. Start the `Publish to the MCP registry` workflow on `master` (Actions, the
-   workflow's name, Run workflow). It proves to the registry that the run
-   belongs to this repository with GitHub's OIDC token for that run
-   (`mcp-publisher login github-oidc`): no secret is stored and nobody logs in.
-   It refuses a version the live server does not announce, which is step 1
-   turned into a check; it stops with a notice when the registry already lists
-   the version; it verifies the Sigstore signature of the pinned CLI, validates
-   the manifest, publishes, and does step 3 itself. It has no other trigger,
-   because a publish cannot be undone, and `publish-workflow.test.ts` holds
-   that.
+1. Merge the bump. The `deploy` job in `ci.yml` deploys `master` and fails
+   unless the live server announces the version this commit declares, so green
+   means the new version is live. Publishing first would list a version the
+   endpoint does not serve yet.
+2. Nothing to do: the `publish-registry` job follows `deploy` in the same run.
+   It asks the registry whether it holds the version (the address of that one
+   version: 200 or 404). Held: a notice, and it stops; that is every push that
+   does not bump the version. Not held: it checks that the published URL
+   announces the version, verifies the Sigstore signature of the pinned CLI,
+   validates the manifest, proves to the registry that the run belongs to this
+   repository with GitHub's OIDC token for that run
+   (`mcp-publisher login github-oidc`: no secret is stored and nobody logs in),
+   publishes, and reads the entry back, which is step 3.
 
-   By hand, when the workflow cannot be used: `git pull` (`server.json` is read
+   A registry that does not answer is a warning and a green run, and nothing
+   is published: an outage there is not a failure here, and a red CI for it
+   teaches everyone to ignore the job. Nothing is lost, because every later
+   deploy asks again, documentation-only pushes included. To publish without
+   waiting for one: Actions, `Publish to the MCP registry`, Run workflow, on
+   `master`. Started by hand, the same registry outage fails the run.
+
+   The first run by hand published 0.11.0 on 2026-11-12, when the workflow had
+   no other trigger. It was chained to the deploy the same day, on the owner's
+   decision, as the Cloud FinOps connector's release chain already was
+   (`OptimNow/cloud-finops-skills`). The publish path of the chained job (the
+   OIDC login from a called workflow) first runs for real at the next version
+   bump: if it fails there, the run is red and the run by hand is the way out.
+   `publish-workflow.test.ts` holds what may start the workflow, that the
+   registry credential (`id-token: write`) belongs to that job alone, and the
+   order of the checks.
+
+   Without GitHub Actions at all: `git pull` (`server.json` is read
    from disk), then from the repo root `mcp-publisher validate`,
    `mcp-publisher login github`, then `mcp-publisher publish`. That login
    opens a browser, and it has to be made as the `OptimNow` account itself: on

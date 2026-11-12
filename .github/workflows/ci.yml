@@ -127,3 +127,25 @@ jobs:
           done
           echo "::error::Live server reports '${actual:-no answer}', expected '$expected'"
           exit 1
+
+  # Publishes server.json to the MCP registry once `deploy` has put this commit
+  # live and checked the version it announces. The job is publish-registry.yml,
+  # which can also be started by hand; its head says what it refuses and why.
+  # On most pushes it publishes nothing, because the registry already holds the
+  # version. The push that changes the version in server.json publishes it,
+  # and a published version can never be edited.
+  #
+  # Skipped whenever `deploy` is skipped or fails: a pull request, a fork, a
+  # rollout that failed, a live server that announces another version.
+  #
+  # `id-token: write` is granted to this job alone. It is the credential the
+  # registry accepts as this repository's, and `check` runs `npm ci` and the
+  # tests of any pull request: it must never hold it.
+  publish-registry:
+    needs: deploy
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-registry.yml
+    with:
+      after_deploy: true
