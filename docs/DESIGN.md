@@ -460,12 +460,23 @@ versions later. Since that day the `github-release` job of `ci.yml` follows
 `server.json`, it creates the tag and the release, with GitHub's generated
 notes (the pull requests merged since the previous release).
 
-- The tag goes on the commit that set the version in `server.json`, read from
-  the history, not on the commit of the run: a later push under the same
-  version must not move where the tag points.
+- The tag goes on the commit of the run. For a version bump that is the
+  commit that set the version. The first form of the job looked that commit
+  up in the history and tagged it whatever the run's commit was. On its first
+  run, 2026-11-12, catching up on 0.11.0 at `01b4965`, GitHub refused with
+  HTTP 403 "Resource not accessible by integration", although the job holds
+  `contents: write` and had just read the releases with the same token. The
+  likely reason, which the message does not state: the run's token cannot
+  hold the `workflows` permission, and GitHub asks for it to create a ref on
+  a commit whose workflow files are not the branch's (`.github/workflows` at
+  `01b4965` differed from `master` by 332 lines). Tagging that commit would
+  take a stored token with the `workflow` scope, which this repository does
+  not keep. So when the job catches up, the tag is on the commit that was
+  live when it ran.
 - Versions 0.4.0 to 0.10.0 have no tag and no release. The first release the
   job creates, `v0.11.0`, therefore lists every pull request merged since
-  `v0.3.0`.
+  `v0.3.0`, and its tag is a few documentation and workflow commits after the
+  one that set the version.
 - A release and its tag can be edited or deleted afterwards, which a registry
   entry cannot.
 - A GitHub API that does not answer is treated as the registry is: a warning,
