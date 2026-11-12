@@ -9,6 +9,8 @@
 
 Do not add `Co-Authored-By`, `Claude-Session` or "Generated with Claude Code" lines to commit messages or pull request descriptions.
 
+One line is accepted, on the owner's decision of 2026-11-12: the `Co-authored-by: Claude` trailer that GitHub itself adds when it squashes a pull request whose commits Claude authored. Do not ask for it to be removed at the merge, and do not add one by hand.
+
 ## What This Project Does
 
 A remote MCP (Model Context Protocol) server that gives an AI assistant eight read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, cloud compute pricing, the break-even between paying an API and renting capacity, and which prices just moved. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
