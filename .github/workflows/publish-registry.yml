@@ -1,0 +1,179 @@
+# Publishes server.json to the official MCP registry
+# (https://registry.modelcontextprotocol.io), on demand.
+#
+# WHY. Publishing was a manual run of the registry's CLI on a maintainer's
+# machine, after the deploy: download mcp-publisher, log in with GitHub in a
+# browser, publish. It is the step that gets forgotten. On 2026-11-12 the
+# registry still listed 0.4.2 while production served 0.9.0: five releases had
+# gone by without it. It also cannot be done by anyone, or anything, that
+# does not hold a maintainer's GitHub session, and the registry's
+# authentication page (read 2026-11-12) says that browser login cannot
+# currently be granted an organisation's namespace at all (its issue #1468):
+# it names this route, and a personal access token of an organisation Owner,
+# as the two that can.
+#
+# This workflow needs no session. The registry accepts GitHub's OIDC token for
+# a workflow run as proof that the run belongs to this repository, and lets it
+# publish under io.github.OptimNow/. NO SECRET IS STORED: `id-token: write`
+# below is the whole credential, and it exists only for the life of a run.
+#
+# STARTED BY HAND, ON PURPOSE (Actions -> Publish to the MCP registry -> Run
+# workflow, on master). A published version can never be edited, so a
+# publish stays a decision somebody takes, not a side effect of a merge.
+#
+# IT REFUSES TO PUBLISH A VERSION THE LIVE SERVER DOES NOT ANNOUNCE. The
+# release order in docs/DESIGN.md is: merge the bump, wait for the deploy,
+# then publish. Publishing first lists a version the endpoint does not serve
+# yet. Here that order is a check, not a habit.
+#
+# The CLI is pinned to a release and its Sigstore signature is verified before
+# it runs, as the registry's own guide does it
+# (docs/modelcontextprotocol-io/github-actions.mdx in
+# modelcontextprotocol/registry, read 2026-11-12). To upgrade, change
+# MCP_PUBLISHER_VERSION deliberately; never download `releases/latest`.
+
+name: Publish to the MCP registry
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # the run's OIDC token, which the registry reads
+
+# One publish at a time: the second of two runs would find the version listed.
+concurrency:
+  group: publish-registry
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # master only: it is what is deployed, and server.json is read from disk.
+    if: github.repository == 'OptimNow/ai-pricing-hub-mcp' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+      REGISTRY: https://registry.modelcontextprotocol.io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read the manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          name=$(jq -er .name server.json)
+          version=$(jq -er .version server.json)
+          url=$(jq -er '.remotes[0].url' server.json)
+          {
+            echo "name=$name"
+            echo "version=$version"
+            echo "url=$url"
+            echo "latest=$REGISTRY/v0/servers/$(jq -rn --arg n "$name" '$n | @uri')/versions/latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "server.json: $name $version, served at $url"
+
+      # The deploy job of ci.yml fails unless the live server announces the
+      # version its commit declares, so on a green master this passes. It fails
+      # when the publish is started before the deploy has finished, or after a
+      # deploy that did not go through.
+      - name: Refuse a version the live server does not announce
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          URL: ${{ steps.manifest.outputs.url }}
+        run: |
+          set -euo pipefail
+          answer=$(curl --fail --silent --show-error --max-time 60 -X POST "$URL" \
+            -H "content-type: application/json" \
+            -H "accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"publish-registry","version":"0"}}}')
+          live=$(printf '%s' "$answer" | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+          echo "The live server announces: ${live:-nothing readable}"
+          if [ "$live" != "$VERSION" ]; then
+            echo "::error title=Not deployed yet::server.json declares $VERSION and $URL announces '${live:-nothing readable}'. Publishing now would list a version the endpoint does not serve. Wait for the deploy job of CI on master, then run this again."
+            exit 1
+          fi
+
+      # The registry refuses a version it already lists. Finding out here turns
+      # a second run into a green no-op with a notice, instead of a red run
+      # that looks like a broken publish.
+      - name: Stop if the registry already lists this version
+        id: listed
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          LATEST: ${{ steps.manifest.outputs.latest }}
+        run: |
+          set -euo pipefail
+          latest=$(curl --silent --show-error --max-time 30 "$LATEST" | jq -r '.server.version // empty' || true)
+          echo "The registry lists: ${latest:-nothing readable}"
+          if [ "$latest" = "$VERSION" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Already published::The registry already lists $VERSION. Nothing was published."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install cosign
+        if: steps.listed.outputs.already != 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # As the registry's guide writes it, the release pinned above.
+      - name: Download and verify mcp-publisher
+        if: steps.listed.outputs.already != 'true'
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      # Against the registry, without publishing: a manifest it would refuse
+      # (a description over 100 characters kept 0.3.0 out) stops here.
+      - name: Validate the manifest
+        if: steps.listed.outputs.already != 'true'
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to the registry with this run's OIDC token
+        if: steps.listed.outputs.already != 'true'
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        if: steps.listed.outputs.already != 'true'
+        run: ./mcp-publisher publish
+
+      # The versions/latest endpoint, not the ?search= listing: right after the
+      # 0.4.1 publish the listing still showed 0.4.0 while this one was right.
+      - name: Confirm what the registry lists
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          URL: ${{ steps.manifest.outputs.url }}
+          LATEST: ${{ steps.manifest.outputs.latest }}
+        run: |
+          set -euo pipefail
+          entry=$(curl --fail --silent --show-error --max-time 30 "$LATEST")
+          listed=$(printf '%s' "$entry" | jq -r '.server.version // empty')
+          remote=$(printf '%s' "$entry" | jq -r '.server.remotes[0].url // empty')
+          {
+            echo "### MCP registry"
+            echo
+            echo "- Lists version: \`${listed:-nothing readable}\` (server.json: \`$VERSION\`)"
+            echo "- Remote: \`${remote:-nothing readable}\` (server.json: \`$URL\`)"
+            echo "- $LATEST"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$listed" != "$VERSION" ] || [ "$remote" != "$URL" ]; then
+            echo "::error title=The registry does not list what was published::It lists '${listed:-nothing}' at '${remote:-nothing}', server.json declares $VERSION at $URL."
+            exit 1
+          fi
+          echo "The registry lists $listed at $remote."
