@@ -1,12 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { coerceSiteModel, fetchLLMModels, hostPricingKey, resetLLMModelCache } from "./llm-models.js";
+import {
+  CACHE_TTL_MS,
+  UNVERIFIED_CACHE_TTL_MS,
+  coerceSiteModel,
+  fetchLLMModels,
+  hostPricingKey,
+  resetLLMModelCache,
+} from "./llm-models.js";
 import { llmModels, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
   resetComputePricingCache,
   primeComputePricingCache,
   setComputeTimeoutForTest,
+  isDegradedCatalogue,
+  incompleteCatalogueCaveat,
+  DEGRADED_CACHE_TTL_MS,
   UPSTREAM_TIMEOUT_MS,
   MEASURED_COLD_REBUILD_MS,
   MIN_COLD_PATH_HEADROOM,
@@ -305,6 +315,61 @@ test("the tiers are tried strictly in order", async (t) => {
 });
 
 // ── LLM: refusing bad payloads ──────────────────────────────────────
+
+// ── LLM: how long each tier is remembered ──────────────────────────
+//
+// Reproduced on 2026-11-12 with the site answering HTTP 502 once and 200 a
+// second later: this server kept serving direct OpenRouter for 15 minutes and
+// asked the site once in that time. The snapshot was never memoised, for
+// exactly this reason; the tier above it was.
+
+test("one failed read of the site does not hold the uncorrected tier for the site's TTL", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let siteUp = false;
+  stubFetch(url => {
+    if (isSite(url)) return siteUp ? { body: siteModelsResponse() } : { status: 502 };
+    if (isOpenRouter(url)) return { body: openRouterPayload() };
+    return { throws: true };
+  });
+  const siteRequests = () => requested.filter(isSite).length;
+
+  assert.equal((await fetchLLMModels()).provenance.tier, 2);
+  assert.equal(siteRequests(), 1);
+
+  // The site answers again at once. Inside the short memo it is not asked:
+  // while it is down, each attempt can cost its whole timeout.
+  siteUp = true;
+  t.mock.timers.tick(UNVERIFIED_CACHE_TTL_MS - 1_000);
+  assert.equal((await fetchLLMModels()).provenance.tier, 2);
+  assert.equal(siteRequests(), 1, "inside the short memo the site is not asked again");
+
+  // Past it, the site is asked first, and its corrected prices are back.
+  t.mock.timers.tick(2_000);
+  const recovered = await fetchLLMModels();
+  assert.equal(recovered.provenance.tier, 1, "a minute later the site must be serving again");
+  assert.equal(recovered.provenance.pricesVerified, true);
+  assert.equal(recovered.provenance.notice, undefined);
+  assert.ok(UNVERIFIED_CACHE_TTL_MS < CACHE_TTL_MS, "the uncorrected tier must be remembered for less than the site");
+});
+
+test("the site's own catalogue is still reused for the full TTL", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  stubFetch(url => (isSite(url) ? { body: siteModelsResponse() } : { throws: true }));
+
+  await fetchLLMModels();
+  t.mock.timers.tick(CACHE_TTL_MS - 1_000);
+  assert.equal((await fetchLLMModels()).provenance.tier, 1);
+  assert.equal(requested.length, 1, "a tier-1 catalogue is not refetched inside its TTL");
+
+  t.mock.timers.tick(2_000);
+  await fetchLLMModels();
+  assert.equal(requested.length, 2);
+});
 
 test("a malformed site payload falls through instead of being served", async (t) => {
   t.after(restoreFetch);
@@ -849,6 +914,190 @@ test("tier 1 claims no unapplied filters", async (t) => {
 
   assert.equal(provenance.unappliedFilters, undefined);
   assert.equal(provenance.catalogueIsSubset, undefined);
+  // Every provider the site reads live answered. An error about a part of one
+  // (the fixture's "AWS SavingsPlan: ...") names no provider and is not a gap.
+  assert.deepEqual(provenance.liveProviders, { live: 6, expected: 6 });
+  assert.equal(provenance.degradedProviders, undefined);
+  assert.equal(isDegradedCatalogue(provenance), false);
+  assert.equal(incompleteCatalogueCaveat(provenance), null);
+  assert.doesNotMatch(provenance.notice ?? "", /INCOMPLETE CATALOGUE/);
+});
+
+// ── A provider the site could not read live ─────────────────────────
+//
+// The site does not fail when a provider API does. It serves that provider's
+// built-in static rows under HTTP 200 and says so in meta. Reproduced on
+// 2026-11-12 with the site's own handler and every provider API unreachable:
+// 137 static rows, `liveProviders: { live: 0, expected: 6 }`. This server read
+// none of it, memoised the answer for the hour and answered "0 of 137 compute
+// instances match" for Azure at 64 vCPUs or more, where the live catalogue
+// matched 476 of 3,555.
+
+/** The site's answer on a read where Azure's API throttled it: 18 static Azure
+ *  rows in place of the live catalogue, and the three fields that say so. */
+function degradedPricingResponse() {
+  const base = sitePricingResponse();
+  const azure = Array.from({ length: 18 }, (_, i) => ({
+    ...base.instances[0],
+    provider: "Azure",
+    instanceType: `D${2 + i}s_v5`,
+  }));
+  return {
+    instances: [...base.instances, ...azure],
+    meta: {
+      ...base.meta,
+      sources: { AWS: "live", Azure: "static", Alibaba: "static" },
+      liveProviders: { live: 5, expected: 6 },
+      errors: ["Azure: throttled", "AWS Spot: timeout"],
+    },
+  };
+}
+
+/** Let a background refresh, which nothing awaits, run to its end. */
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
+
+test("a provider the site could not read live is named, counted and called a subset", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: degradedPricingResponse() } : { throws: true }));
+
+  const { provenance } = await fetchComputeInstances("us-east");
+
+  assert.equal(provenance.tier, 1, "the site did answer: this is not the snapshot tier");
+  assert.deepEqual(provenance.liveProviders, { live: 5, expected: 6 });
+  // Azure only. Alibaba is static on every read and carries no error; "AWS
+  // Spot" is a part of a provider that was read live.
+  assert.deepEqual(provenance.degradedProviders, [{ provider: "Azure", rows: 18 }]);
+  assert.equal(provenance.catalogueIsSubset, true, "18 rows in place of a provider's catalogue is a subset");
+  assert.equal(isDegradedCatalogue(provenance), true);
+
+  // The notice leads the text of every answer built on this catalogue.
+  assert.match(provenance.notice ?? "", /^INCOMPLETE CATALOGUE/);
+  assert.match(provenance.notice ?? "", /could not read Azure live/);
+  assert.match(provenance.notice ?? "", /18 Azure rows/);
+  assert.match(provenance.notice ?? "", /5 of the 6 providers it reads live answered/);
+  assert.match(provenance.notice ?? "", /does not mean no such instance exists/);
+  // The static columns are still named, after it.
+  assert.match(provenance.notice ?? "", /AWS\.savingsPlan1yr/);
+
+  // Beside "no match": said for Azure and for no provider filter, not for a
+  // provider whose rows are all there.
+  assert.match(incompleteCatalogueCaveat(provenance) ?? "", /^Azure could not be read live/);
+  assert.match(incompleteCatalogueCaveat(provenance, "azure") ?? "", /^Azure could not be read live/);
+  assert.equal(incompleteCatalogueCaveat(provenance, "AWS"), null);
+
+  // With two providers missing, a question about one names that one only.
+  const both = { ...provenance, degradedProviders: [{ provider: "AWS", rows: 51 }, { provider: "Azure", rows: 18 }] };
+  assert.match(incompleteCatalogueCaveat(both) ?? "", /^AWS and Azure could not be read live and are served/);
+  assert.match(incompleteCatalogueCaveat(both, "Azure") ?? "", /^Azure could not be read live and is served/);
+  assert.equal(incompleteCatalogueCaveat(both, "GCP"), null);
+});
+
+test("the site's count alone is enough when its errors name no provider", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  const base = sitePricingResponse();
+  const body = { ...base, meta: { ...base.meta, liveProviders: { live: 4, expected: 6 }, errors: undefined } };
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+
+  const { provenance } = await fetchComputeInstances("us-east");
+
+  // No name is invented: the answer says how many, and where to read which.
+  assert.equal(provenance.degradedProviders, undefined);
+  assert.equal(isDegradedCatalogue(provenance), true);
+  assert.equal(provenance.catalogueIsSubset, true);
+  assert.match(provenance.notice ?? "", /^INCOMPLETE CATALOGUE: optimtoken\.optimnow\.io could not read 2 providers live/);
+  assert.match(incompleteCatalogueCaveat(provenance, "AWS") ?? "", /^Some providers could not be read live/);
+});
+
+test("a liveProviders that is not two sensible counts is dropped, not trusted", async (t) => {
+  t.after(restoreFetch);
+  const base = sitePricingResponse();
+  for (const liveProviders of ["5/6", { live: 7, expected: 6 }, { live: -1, expected: 6 }, { live: 5 }, null]) {
+    reset();
+    stubFetch(url => (isSite(url) ? { body: { ...base, meta: { ...base.meta, liveProviders } } } : { throws: true }));
+    const { provenance } = await fetchComputeInstances("us-east");
+    assert.equal(provenance.liveProviders, undefined, JSON.stringify(liveProviders));
+    assert.equal(isDegradedCatalogue(provenance), false);
+  }
+});
+
+test("an incomplete catalogue is asked again within minutes, a complete one within the hour", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let body: unknown = degradedPricingResponse();
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+
+  assert.equal(isDegradedCatalogue((await fetchComputeInstances("us-east")).provenance), true);
+  assert.equal(requested.length, 1);
+
+  // Inside the short TTL the memo answers and nothing is asked.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS - 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 1);
+
+  // Past it the site is asked again, behind the caller, who is not made to
+  // wait for a rebuild. The site has every provider back.
+  body = sitePricingResponse();
+  t.mock.timers.tick(2_000);
+  const stale = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(stale.provenance), true, "this caller still gets the memo, labelled");
+  assert.ok((stale.provenance.servedFromCacheAgeMs ?? 0) >= DEGRADED_CACHE_TTL_MS);
+  assert.equal(requested.length, 2, "an incomplete memo must be refreshed after minutes, not after the hour");
+  await settle();
+
+  const fresh = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(fresh.provenance), false, "the complete catalogue replaced the incomplete one");
+  assert.equal(fresh.provenance.servedFromCacheAgeMs, undefined);
+
+  // The complete catalogue keeps the hour: minutes later nothing is asked.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 2);
+});
+
+test("an incomplete answer does not replace a complete memo, and is not asked for on every call", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let body: unknown = sitePricingResponse();
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+  await fetchComputeInstances("us-east");
+
+  // An hour on, the site can no longer read Azure. The refresh brings back 18
+  // static Azure rows; the memo holds the live ones, an hour old.
+  body = degradedPricingResponse();
+  t.mock.timers.tick(61 * 60 * 1000);
+  const first = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(first.provenance), false);
+  assert.equal(requested.length, 2, "the stale memo triggered one refresh");
+  await settle();
+
+  const second = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(second.provenance), false, "the complete memo was kept");
+  assert.equal(second.provenance.degradedProviders, undefined);
+  assert.ok((second.provenance.servedFromCacheAgeMs ?? 0) > 60 * 60 * 1000, "and its age is stated");
+  assert.equal(requested.length, 2, "the next call does not start another refresh at once");
+
+  // A few minutes later the site is asked again, and again while it stays
+  // incomplete, until it has every provider back.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 3);
+  await settle();
+
+  body = sitePricingResponse();
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 4);
+  await settle();
+
+  const recovered = await fetchComputeInstances("us-east");
+  assert.equal(recovered.provenance.servedFromCacheAgeMs, undefined, "a complete answer replaces the memo");
+  assert.equal(isDegradedCatalogue(recovered.provenance), false);
 });
 
 // ── Serving stale beats making someone wait 50s ──────────────────────

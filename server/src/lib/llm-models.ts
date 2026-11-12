@@ -779,12 +779,29 @@ const MIN_PLAUSIBLE_CATALOGUE = 80;
 /** Upstream must answer within this, well inside the platform's own ceiling. */
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
-/** How long a successful catalogue is reused before we ask upstream again. */
-const CACHE_TTL_MS = 15 * 60 * 1000;
+/** How long the site's catalogue is reused before we ask upstream again. */
+export const CACHE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * How long a catalogue served by direct OpenRouter (tier 2) is reused before
+ * the SITE is asked again.
+ *
+ * It used to share the 15 minutes above, so one failed read of the site (a
+ * single 502, one slow answer past the deadline) held this server on
+ * uncorrected prices for a quarter of an hour, with no host prices, no
+ * retirement notices and no upstream ids for the per-model tools, while the
+ * site had answered again a second later. The snapshot below was never
+ * memoised for that very reason; this tier was.
+ *
+ * Not zero: while the site is down, each attempt can cost its full timeout
+ * before OpenRouter is asked, and a minute's memo keeps that to one caller a
+ * minute instead of every caller.
+ */
+export const UNVERIFIED_CACHE_TTL_MS = 60 * 1000;
 
 // Best-effort only: this survives just as long as the process does (on Fly.io,
 // until the idle machine stops), and a cold start simply refetches.
-let cache: { result: LLMFetchResult; fetchedAt: number } | null = null;
+let cache: { result: LLMFetchResult; fetchedAt: number; ttlMs: number } | null = null;
 
 /** Drop the memo. Tests drive the tiers by stubbing fetch, so they need to be
  *  able to ask again rather than get the previous tier's answer back. */
@@ -1141,7 +1158,7 @@ function fetchFromSnapshot(): LLMFetchResult {
  * uncorrected ones.
  */
 export async function fetchLLMModels(): Promise<LLMFetchResult> {
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
+  if (cache && Date.now() - cache.fetchedAt < cache.ttlMs) {
     return cache.result;
   }
 
@@ -1166,14 +1183,16 @@ async function fetchAllTiers(): Promise<LLMFetchResult> {
 
   try {
     const result = await fetchFromSite();
-    cache = { result, fetchedAt: Date.now() };
+    cache = { result, fetchedAt: Date.now(), ttlMs: CACHE_TTL_MS };
     return result;
   } catch (siteError) {
     console.error("[llm-models] site API failed, falling back to direct OpenRouter:", siteError);
 
     try {
       const result = await fetchFromOpenRouter();
-      cache = { result, fetchedAt: Date.now() };
+      // Kept for a minute, not for the site's quarter of an hour: these prices
+      // are uncorrected, and the site may be back at the next call.
+      cache = { result, fetchedAt: Date.now(), ttlMs: UNVERIFIED_CACHE_TTL_MS };
       return result;
     } catch (openRouterError) {
       console.error("[llm-models] OpenRouter fetch failed, serving static snapshot:", openRouterError);

@@ -86,6 +86,7 @@ import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
   fetchComputeInstances,
+  incompleteCatalogueCaveat,
 } from "./lib/compute-pricing.js";
 import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
 import { deprecationLegend, deprecationTag, describeDeprecation } from "./lib/deprecation.js";
@@ -254,12 +255,19 @@ const computeProvenanceSchema = z.object({
   // AWS savingsPlan1yr/3yr columns, which upstream reads weekly.
   awsSavingsPlansAsOf: z.string().optional(),
   upstreamErrors: z.array(z.string()).optional(),
+  // How many of the providers the site reads live answered it on this read, and
+  // the ones that did not, each with the Linux rows it is left with: the site's
+  // static sample, a small part of that provider's catalogue.
+  liveProviders: z.object({ live: z.number(), expected: z.number() }).optional(),
+  degradedProviders: z.array(z.object({ provider: z.string(), rows: z.number() })).optional(),
   // Tier-2 diagnostics. `fallbackReason` says why tier 1 was missed, classified
   // and timed; `unappliedFilters` names the arguments this tier accepted and
   // then could not honour, so a consumer reading only `instances` is not left
   // to infer that from an empty array.
   fallbackReason: z.string().optional(),
   unappliedFilters: z.array(z.string()).optional(),
+  // True on tier 2 (the snapshot) and on a tier-1 answer with a provider in
+  // `degradedProviders`: "no match" is then not "no such instance".
   catalogueIsSubset: z.boolean().optional(),
   servedFromCacheAgeMs: z.number().optional(),
   dataAsOf: z.string().optional(),
@@ -1897,12 +1905,19 @@ tool(
       // prose, which a consumer reading `instances` alone never sees — and an
       // empty array is exactly the case where it most needs saying.
       const unapplied = provenance.unappliedFilters ?? [];
+      // Tier 1 has the same trap when the site could not read a provider live:
+      // it serves that provider's few static rows under HTTP 200, and "Azure,
+      // 64 vCPUs or more" then matches nothing out of 18 rows where the live
+      // catalogue holds hundreds.
+      const incomplete = filtered.length === 0 ? incompleteCatalogueCaveat(provenance, provider) : null;
       const subsetCaveat =
         provenance.tier === 2 && filtered.length === 0
           ? `\nNOTE: this is the ${enriched.length}-row static snapshot, not the ~5,800-instance ` +
             `live catalogue, so "no match" here does not mean no such instance exists.` +
             (unapplied.length ? ` Filters accepted but NOT applied: ${unapplied.join(", ")}.` : "")
-          : "";
+          : incomplete
+            ? `\nNOTE: ${incomplete}`
+            : "";
 
       // Build text summary. Every rate the row carries is printed, with its
       // saving against on-demand: the commitment rates used to exist in
@@ -1930,6 +1945,9 @@ tool(
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               (provenance.unavailablePriceColumns.length
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
+                : "") +
+              (provenance.upstreamErrors?.length
+                ? `Reported by the site on this read: ${provenance.upstreamErrors.join("; ")}.\n`
                 : "") +
               `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
               `Linux list prices in USD per hour. Spot and commitment rates show their saving against the ` +
@@ -2489,6 +2507,7 @@ tool(
         const providers = [...new Set(matches.map(inst => inst.provider))];
 
         if (matches.length === 0) {
+          const incomplete = incompleteCatalogueCaveat(computeProvenance, provider);
           const near = catalogue
             .filter(inst => inst.instanceType.toLowerCase().includes(wanted) || wanted.includes(inst.instanceType.toLowerCase()))
             .slice(0, 5)
@@ -2500,9 +2519,10 @@ tool(
             (near.length > 0 ? ` Close names: ${near.join(", ")}.` : "") +
             ` Instance names are matched exactly; list candidates with compare-compute-pricing ` +
             `(category "GPU / Accelerated"), or pass hourlyRate for hardware the catalogue does not carry.` +
-            (computeProvenance.catalogueIsSubset
+            (computeProvenance.tier === 2 && computeProvenance.catalogueIsSubset
               ? ` This is the static snapshot, a subset of the live catalogue, so "no match" does not mean no such instance exists.`
-              : "");
+              : "") +
+            (incomplete ? ` ${incomplete}` : "");
         } else if (providers.length > 1) {
           fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: say which with provider.`;
         } else {
@@ -3268,7 +3288,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.10.0",
+      version: "0.10.1",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.

@@ -32,7 +32,8 @@ export const SERVER_INSTRUCTIONS = [
   "- An optimized cost counts a batch or cache discount only where the answer says it applies. It is not " +
     "the price every workload pays.",
   '- Absent means not known, never "no": a model with no host list, no retirement notice or no price ' +
-    "history is not thereby unsold, safe or unchanged. A failed read is an error, not an empty result.",
+    "history is not thereby unsold, safe or unchanged, and an instance missing from a compute catalogue " +
+    "the answer calls incomplete is not thereby unavailable. A failed read is an error, not an empty result.",
   "- A price move with no label is not established as a repricing by the model's maker.",
   "- The break-even between an API and rented capacity assumes no throughput and no operations cost. Do " +
     "not supply one for the user: give the throughput each break-even requires, or ask for a measured one.",

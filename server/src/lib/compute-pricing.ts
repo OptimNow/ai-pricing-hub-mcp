@@ -22,6 +22,13 @@
  *    next to a live on-demand rate without saying which is which produces a
  *    FinOps answer nobody can audit, so that distinction, and that date, are
  *    carried through to the caller.
+ *  - A provider API that fails does not fail the site's answer. The site serves
+ *    that provider from its built-in static rows instead (18 Linux rows for
+ *    Azure against about 1,700 live ones on 2026-11-12), still under HTTP 200,
+ *    and says so in `meta.liveProviders`, `meta.sources` and `meta.errors`. It
+ *    keeps such an answer for minutes where it keeps a complete one for a day.
+ *    This module reads the three, says the catalogue is incomplete, and keeps
+ *    it for minutes too: see `isDegradedCatalogue` and DEGRADED_CACHE_TTL_MS.
  */
 
 import { computeInstances, computeDataLastUpdated } from "../data/pricing-data.js";
@@ -177,6 +184,30 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
  */
 const CACHE_STALE_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * How long an INCOMPLETE catalogue is reused before the site is asked again.
+ *
+ * The site keeps a complete answer for a day at its edge, one with a provider
+ * missing for 30 minutes, and one that is mostly static for 2 (`cacheControlFor`
+ * in its api/pricing.ts): an answer holding 18 static Azure rows in place of
+ * 1,700 live ones "must not outlive the outage". Memoising it here for the full
+ * hour undid that. Asking again is cheap while the site still holds the same
+ * answer (an edge hit), and it is what brings the complete catalogue back within
+ * minutes of the site having it. The refresh runs behind the caller, as for any
+ * stale memo.
+ */
+export const DEGRADED_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * The shortest gap between two background refreshes of one region.
+ *
+ * A refresh that fails, or that comes back incomplete while the memo is
+ * complete, leaves the memo as it was. Without a gap every call past the TTL
+ * would then start another request for a 1.4 MB document, for as long as the
+ * site stays degraded.
+ */
+const REFRESH_RETRY_MS = DEGRADED_CACHE_TTL_MS;
+
 export interface ComputeProvenance {
   /** 1 = site API, 2 = static snapshot. */
   tier: 1 | 2;
@@ -206,6 +237,18 @@ export interface ComputeProvenance {
   awsSavingsPlansAsOf?: string;
   /** Non-fatal upstream failures, e.g. a provider API that 404'd this run. */
   upstreamErrors?: string[];
+  /** How many of the providers the site reads live answered it on this read
+   *  (its `meta.liveProviders`, compute schema 1.2), repeated as sent. */
+  liveProviders?: { live: number; expected: number };
+  /**
+   * On tier 1 only: the providers the site normally reads live and could not
+   * on this read, with the number of Linux rows each is left with. Those rows
+   * are the site's built-in static sample, a small part of the provider's
+   * catalogue, so a missing instance is not evidence that it does not exist.
+   * Absent when every such provider answered. A provider the site never reads
+   * live (Alibaba) is static in `sources` and is not listed here.
+   */
+  degradedProviders?: { provider: string; rows: number }[];
   /**
    * On tier 2 only: why tier 1 was not reached, classified and timed —
    * e.g. `timeout after 20003ms/20000ms budget`.
@@ -228,9 +271,10 @@ export interface ComputeProvenance {
    */
   unappliedFilters?: string[];
   /**
-   * On tier 2 only: this tier serves a 137-row subset of the ~5,800 upstream,
-   * so an empty result means "no match in the snapshot", never "no such
-   * instance exists".
+   * True when the rows served are a part of the catalogue: on tier 2, the
+   * 137-row snapshot against ~6,000 upstream; on tier 1, an answer in which a
+   * provider could not be read live (`degradedProviders`). An empty result then
+   * means "no match in what was served", never "no such instance exists".
    */
   catalogueIsSubset?: boolean;
   /** Age of the memo entry that answered, when a stale one was served while a
@@ -256,6 +300,7 @@ interface SitePricingResponse {
     sourceRegions?: Record<string, string>;
     priceTypes?: Record<string, Record<string, string>>;
     awsSavingsPlansAsOf?: unknown;
+    liveProviders?: unknown;
     total?: number;
     catalogTotal?: number;
     errors?: string[];
@@ -270,6 +315,7 @@ export function resetComputePricingCache(): void {
   inflight.clear();
   cache.clear();
   refreshing.clear();
+  lastRefreshAt.clear();
 }
 
 /** Seed the memo directly. Lets a test exercise the stale-while-revalidate path
@@ -339,6 +385,113 @@ function classifyPriceColumns(priceTypes: Record<string, Record<string, string>>
   return { staticPriceColumns, unavailablePriceColumns };
 }
 
+/** `meta.liveProviders`, when it is two counts that make sense together. */
+function coerceLiveProviders(value: unknown): { live: number; expected: number } | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const { live, expected } = value as Record<string, unknown>;
+  const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+  return count(live) && count(expected) && live <= expected ? { live, expected } : undefined;
+}
+
+/**
+ * The providers the site normally reads live and could not on this read.
+ *
+ * Read from the answer itself, so no list of "live-capable" providers is kept
+ * here to drift: a provider counts when `meta.sources` says its rows are static
+ * AND `meta.errors` carries an entry under its name. The site writes that entry
+ * for every provider whose fetch it did not adopt ("Azure: throttled"), and
+ * none for a provider it never reads live (Alibaba). An entry for a part of a
+ * provider ("AWS Spot: timeout") names no provider and matches nothing.
+ */
+function degradedProvidersOf(
+  meta: NonNullable<SitePricingResponse["meta"]>,
+  instances: ComputeInstance[],
+): { provider: string; rows: number }[] {
+  const sources = meta.sources !== null && typeof meta.sources === "object" ? meta.sources : {};
+  const failed = new Set(
+    (Array.isArray(meta.errors) ? meta.errors : [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .map(entry => entry.split(":")[0].trim()),
+  );
+  return Object.entries(sources)
+    .filter(([provider, kind]) => kind === "static" && failed.has(provider))
+    .map(([provider]) => ({
+      provider,
+      rows: instances.filter(i => i.provider === provider && i.os === "Linux").length,
+    }));
+}
+
+/**
+ * True when the site answered (tier 1) with a provider it could not read live:
+ * part of what it served is its static sample, not that provider's catalogue.
+ *
+ * Either signal is enough. The names come from `meta.errors`; the count comes
+ * from `meta.liveProviders`, which still says so if the errors are not worded
+ * as this module expects.
+ */
+export function isDegradedCatalogue(provenance: ComputeProvenance): boolean {
+  if (provenance.tier !== 1) return false;
+  const counts = provenance.liveProviders;
+  return (provenance.degradedProviders?.length ?? 0) > 0 || (counts !== undefined && counts.live < counts.expected);
+}
+
+const listNames = (names: string[]): string =>
+  names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+
+/** The sentence that leads an answer built on an incomplete catalogue. */
+function degradedNotice(
+  liveProviders: { live: number; expected: number } | undefined,
+  degraded: { provider: string; rows: number }[],
+): string | undefined {
+  const missing = liveProviders ? liveProviders.expected - liveProviders.live : degraded.length;
+  if (degraded.length === 0 && missing <= 0) return undefined;
+
+  const answered = liveProviders
+    ? ` (${liveProviders.live} of the ${liveProviders.expected} providers it reads live answered)`
+    : "";
+  const tail =
+    ` An instance this answer does not list is not thereby unavailable, and an empty result does not ` +
+    `mean no such instance exists.`;
+
+  if (degraded.length === 0) {
+    return (
+      `INCOMPLETE CATALOGUE: optimtoken.optimnow.io could not read ${missing} provider${missing === 1 ? "" : "s"} ` +
+      `live on this read${answered}. Their rows are its built-in static sample, a small part of each ` +
+      `provider's catalogue; \`provenance.sources\` says which providers are static.` + tail
+    );
+  }
+  const names = degraded.map(d => d.provider);
+  const rows = degraded.map(d => `${d.rows} ${d.provider} row${d.rows === 1 ? "" : "s"}`);
+  return (
+    `INCOMPLETE CATALOGUE: optimtoken.optimnow.io could not read ${listNames(names)} live on this read${answered}. ` +
+    `It served its built-in static sample instead (${listNames(rows)}, Linux), a small part of ` +
+    `${names.length === 1 ? "that provider's" : "each provider's"} catalogue, at static prices.` + tail
+  );
+}
+
+/**
+ * What to say beside "no match" when the catalogue searched has a provider the
+ * site could not read live. Null when every provider answered, on the snapshot
+ * tier (each tool words that case itself), and when `provider` names one that
+ * WAS read live: its rows are all there, and the gap cannot bear on the answer.
+ */
+export function incompleteCatalogueCaveat(provenance: ComputeProvenance, provider?: string): string | null {
+  if (!isDegradedCatalogue(provenance)) return null;
+  const degraded = provenance.degradedProviders ?? [];
+  if (degraded.length === 0) {
+    return `Some providers could not be read live and are served from a small static sample, so "no match" does not mean no such instance exists.`;
+  }
+  // With a provider named, only that one bears on the answer.
+  const wanted = provider?.trim().toLowerCase();
+  const concerned = wanted ? degraded.filter(d => d.provider.toLowerCase() === wanted) : degraded;
+  if (concerned.length === 0) return null;
+  const names = concerned.map(d => d.provider);
+  return (
+    `${listNames(names)} could not be read live and ${names.length === 1 ? "is" : "are"} served from a small ` +
+    `static sample, so "no match" does not mean no such instance exists.`
+  );
+}
+
 async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<ComputeFetchResult> {
   const url = optimtokenUrl("api/pricing", { region });
   const startedAt = Date.now();
@@ -373,11 +526,18 @@ async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<
   const meta = payload.meta ?? {};
   const { staticPriceColumns, unavailablePriceColumns } = classifyPriceColumns(meta.priceTypes);
 
-  const notice = staticPriceColumns.length
+  const liveProviders = coerceLiveProviders(meta.liveProviders);
+  const degradedProviders = degradedProvidersOf(meta, instances);
+  const incomplete = degradedNotice(liveProviders, degradedProviders);
+
+  const staticNotice = staticPriceColumns.length
     ? `Not every price is live. These columns are served from constants rather than a ` +
       `provider API and may be stale or region-approximated: ${staticPriceColumns.join(", ")}. ` +
       `See priceTypes for the full per-column breakdown.`
     : undefined;
+  // The incomplete catalogue first: it changes what "no match" and "cheapest"
+  // mean, where the static columns only qualify figures the answer does print.
+  const notice = [incomplete, staticNotice].filter(Boolean).join(" ") || undefined;
 
   return {
     instances,
@@ -398,6 +558,9 @@ async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<
       awsSavingsPlansAsOf:
         typeof meta.awsSavingsPlansAsOf === "string" && meta.awsSavingsPlansAsOf ? meta.awsSavingsPlansAsOf : undefined,
       upstreamErrors: Array.isArray(meta.errors) && meta.errors.length ? meta.errors : undefined,
+      liveProviders,
+      degradedProviders: degradedProviders.length ? degradedProviders : undefined,
+      catalogueIsSubset: incomplete ? true : undefined,
       notice,
     },
   };
@@ -444,8 +607,10 @@ export async function fetchComputeInstances(
 ): Promise<ComputeFetchResult> {
   const cached = cache.get(region);
   const age = cached ? Date.now() - cached.fetchedAt : Infinity;
+  // An incomplete catalogue is worth minutes, not the hour: see the constant.
+  const ttl = cached && isDegradedCatalogue(cached.result.provenance) ? DEGRADED_CACHE_TTL_MS : CACHE_TTL_MS;
 
-  if (cached && age < CACHE_TTL_MS) {
+  if (cached && age < ttl) {
     return cached.result;
   }
 
@@ -499,12 +664,32 @@ const inflight = new Map<PricingRegion, Promise<ComputeFetchResult>>();
  *  N — each of which would cost upstream a 50s six-provider assembly. */
 const refreshing = new Set<PricingRegion>();
 
+/** When the last background refresh of each region started: REFRESH_RETRY_MS. */
+const lastRefreshAt = new Map<PricingRegion, number>();
+
 function refreshInBackground(region: PricingRegion): Promise<void> {
   if (refreshing.has(region)) return Promise.resolve();
+  const last = lastRefreshAt.get(region);
+  if (last !== undefined && Date.now() - last < REFRESH_RETRY_MS) return Promise.resolve();
   refreshing.add(region);
+  lastRefreshAt.set(region, Date.now());
 
   return fetchFromSite(region, upstreamBudget())
     .then(result => {
+      // An incomplete answer does not replace a complete memo. Compute list
+      // prices move on a scale of weeks, so the hours-old rows of a provider
+      // the site cannot read right now beat the 18 static ones it would send in
+      // their place. The memo is still inside CACHE_STALE_MS, or this refresh
+      // would not have been started; past it, the cold path takes what the site
+      // has and says it is incomplete.
+      const held = cache.get(region);
+      if (held && !isDegradedCatalogue(held.result.provenance) && isDegradedCatalogue(result.provenance)) {
+        const who = (result.provenance.degradedProviders ?? []).map(d => d.provider).join(", ") || "a provider";
+        console.error(
+          `[compute-pricing] refresh for "${region}" came back without ${who} read live; keeping the complete memo`,
+        );
+        return;
+      }
       cache.set(region, { result, fetchedAt: Date.now() });
     })
     .catch(error => {

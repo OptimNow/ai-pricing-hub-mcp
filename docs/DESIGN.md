@@ -81,6 +81,61 @@ Tier 1 is only accepted when the site reports `meta.source === "openrouter"` —
 anything else means the site is itself serving its own fallback and carries no
 fresh corrections.
 
+**How long each LLM tier is remembered (0.10.1).** The site's catalogue is
+memoised for 15 minutes, direct OpenRouter for one (`UNVERIFIED_CACHE_TTL_MS`
+in `lib/llm-models.ts`), the snapshot not at all. Until 0.10.1 tier 2 shared
+the 15 minutes. Reproduced on 2026-11-12 with the site answering HTTP 502 once
+and 200 a second later: this server served uncorrected prices for 15 minutes,
+with no host prices, no retirement notices and no upstream ids for
+`compare-model-hosts` and the price histories, and asked the site once in that
+time. The snapshot had never been memoised, for that very reason. The memo is
+a minute and not zero because, while the site is down, each attempt can cost
+its whole 15 s timeout before OpenRouter is asked: a minute keeps that to one
+caller a minute.
+
+**A provider the site could not read live (0.10.1).** `/api/pricing` does not
+fail when a provider API does. It serves that provider from its built-in static
+rows, still under HTTP 200, and says so three ways: `meta.liveProviders`
+(`{ live, expected }`, its schema 1.2), `meta.sources` and an entry in
+`meta.errors` under the provider's name. It also keeps such an answer for 30
+minutes at its edge, or 2 when most providers are missing, where a complete one
+is kept for a day (`cacheControlFor` in its `api/pricing.ts`). Until 0.10.1 this
+server read none of that. Reproduced on 2026-11-12 with the site's own handler
+and every provider API unreachable: 137 static rows arrived, were served as an
+ordinary tier-1 catalogue, memoised for the hour, and "Azure, 64 vCPUs or more"
+answered "0 of 137 compute instances match", where production that day answered
+"476 of 3,555". One provider missing is the likelier case and the worse trap:
+Azure falls from about 1,700 Linux rows to 18, and "the cheapest 16 vCPU
+instance" is then chosen without it. Four things hold it now, all in
+`lib/compute-pricing.ts`:
+
+- **The providers are read from the answer, not from a list kept here.** A
+  provider is degraded when `meta.sources` says its rows are static and
+  `meta.errors` carries an entry under its name (`degradedProvidersOf`). The
+  site writes that entry for every provider whose fetch it did not adopt, and
+  none for Alibaba, which it never reads live. `provenance.degradedProviders`
+  carries each name with the Linux rows it is left with, `liveProviders` is
+  repeated as sent, and `catalogueIsSubset` is set as it is on the snapshot
+  tier. If the errors name no provider while the count says one is missing, the
+  answer says how many and points at `provenance.sources`: no name is guessed.
+- **The text says it, twice.** The notice that leads the answer opens with
+  `INCOMPLETE CATALOGUE`, names the providers and their row counts, and says an
+  instance the answer does not list is not thereby unavailable.
+  `incompleteCatalogueCaveat()` repeats it beside an empty result in
+  `compare-compute-pricing` and beside an instance not found in
+  `estimate-self-hosting-breakeven`, unless the question named a provider that
+  was read live. `compare-compute-pricing` also prints `upstreamErrors`, which
+  existed in `structuredContent` only (decision 1b).
+- **An incomplete catalogue is memoised for 5 minutes** (`DEGRADED_CACHE_TTL_MS`),
+  not for the hour, then refreshed behind the caller like any stale memo. While
+  the site still holds the same answer the refresh is an edge hit.
+- **An incomplete answer does not replace a complete memo.** Compute list
+  prices move on a scale of weeks, so the hours-old live rows of a provider
+  beat the 18 static ones sent in their place. The refresh is retried every 5
+  minutes (`REFRESH_RETRY_MS`, which also spaces the retries after a failed
+  refresh: every call past the TTL used to start one). Past the 12-hour stale
+  window the cold path takes what the site has, and says it is incomplete.
+
 ### Project Structure
 
 ```
@@ -878,7 +933,7 @@ Each profile defines typical input/output token counts per request.
 
 - No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
 - No database — stateless tool execution
-- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background. An answer with a provider the site could not read live is memoised for 5 minutes instead: see "A provider the site could not read live" under Architecture.
 - **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
   **This paragraph used to say 55 s and "do not tune it down"; that was correct advice against a 50.5 s cold path, and upstream PR #57 (2026-08-18) cut that path by ~6x.** The rule it was protecting has not changed — never size this budget from the LLM endpoint's profile — but the number that satisfies it has. Re-measure before moving it again, and move all four places together (the two constants, the guard tests, and this bullet). Do not restore 55 s just because this paragraph once said so.
 - **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s (measured 2026-08-17, against the 50.5 s rebuild; not re-run since PR #57, but the mechanism does not depend on the rebuild's duration): an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.

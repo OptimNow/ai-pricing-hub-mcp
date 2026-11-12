@@ -9,7 +9,9 @@
 //
 //   npm run check-parity -- <path to the cloud-sparkle-compare checkout>
 //
-// The path defaults to a sibling folder of the repository root, or SITE_CHECKOUT.
+// The path defaults to SITE_CHECKOUT, then to a sibling folder of the repository
+// root under either of the site's names: cloud-sparkle-compare, as the owner's
+// checkout is still called, or ai-pricing-hub, as the repository is now.
 // Exits 1 on any difference. Outside CI on purpose: the site's repository is
 // private, and the check needs the live catalogue.
 //
@@ -25,15 +27,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
+const SIBLING_NAMES = ["cloud-sparkle-compare", "ai-pricing-hub"];
+const siblings = SIBLING_NAMES.map((name) => join(repoRoot, "..", name));
 const sitePath = resolve(
-  process.argv[2] || process.env.SITE_CHECKOUT || join(repoRoot, "..", "cloud-sparkle-compare"),
+  process.argv[2] ||
+    process.env.SITE_CHECKOUT ||
+    siblings.find((path) => existsSync(join(path, "tsconfig.app.json"))) ||
+    siblings[0],
 );
 const siteTsconfig = join(sitePath, "tsconfig.app.json");
 
 if (!existsSync(siteTsconfig)) {
   console.error(
-    `No site checkout at ${sitePath} (looked for tsconfig.app.json).\n` +
-      "Pass its path: npm run check-parity -- <path to cloud-sparkle-compare>",
+    `No site checkout at ${sitePath} (looked for tsconfig.app.json, and for a sibling folder named ` +
+      `${SIBLING_NAMES.join(" or ")}).\n` +
+      "Pass its path: npm run check-parity -- <path to the site's checkout>",
   );
   process.exit(2);
 }
