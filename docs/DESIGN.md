@@ -371,11 +371,13 @@ the process was only killed at the stop timeout.
 
 #### Publishing to the MCP registry
 
-`server.json` is what <https://registry.modelcontextprotocol.io> lists. Nothing
-publishes it automatically: it is a manual `mcp-publisher` run (the CLI is
-downloaded locally and git-ignored). **A published version can never be
-edited**, so any change to `server.json` (a new connector URL, a description)
-needs a version bump before the registry will show it. 0.4.0 went up on
+`server.json` is what <https://registry.modelcontextprotocol.io> lists. A merge
+does not publish it: the `Publish to the MCP registry` workflow
+(`.github/workflows/publish-registry.yml`) does, when somebody starts it, or a
+manual `mcp-publisher` run (the CLI is downloaded locally and git-ignored). **A
+published version can never be edited**, so any change to `server.json` (a new
+connector URL, a description) needs a version bump before the registry will
+show it. 0.4.0 went up on
 2026-10-05 with the Alpic URL, which is why the Fly URL shipped as 0.4.1, and
 the custom domain ships as 0.4.2.
 
@@ -403,9 +405,27 @@ fails if they disagree. Release order:
    deploys `master` and fails unless the live server announces the version this
    commit declares, so green means the new version is live. Publishing first
    would list a version the endpoint does not serve yet.
-2. `git pull` (`server.json` is read from disk), then from the repo root:
-   `mcp-publisher validate`, `mcp-publisher login github`, then
-   `mcp-publisher publish`.
+2. Start the `Publish to the MCP registry` workflow on `master` (Actions, the
+   workflow's name, Run workflow). It proves to the registry that the run
+   belongs to this repository with GitHub's OIDC token for that run
+   (`mcp-publisher login github-oidc`): no secret is stored and nobody logs in.
+   It refuses a version the live server does not announce, which is step 1
+   turned into a check; it stops with a notice when the registry already lists
+   the version; it verifies the Sigstore signature of the pinned CLI, validates
+   the manifest, publishes, and does step 3 itself. It has no other trigger,
+   because a publish cannot be undone, and `publish-workflow.test.ts` holds
+   that.
+
+   By hand, when the workflow cannot be used: `git pull` (`server.json` is read
+   from disk), then from the repo root `mcp-publisher validate`,
+   `mcp-publisher login github`, then `mcp-publisher publish`. That login
+   opens a browser, and it has to be made as the `OptimNow` account itself: on
+   GitHub `OptimNow` is a user account, not an organisation (checked
+   2026-11-12), so `io.github.OptimNow/` is that account's own namespace and
+   no other login is granted it. If the repository ever moves to an
+   organisation, read the registry's authentication page first: on that date
+   it said the browser login cannot be granted an organisation's namespace at
+   all (its issue #1468), and that the OIDC route can.
 3. Confirm the entry and its `remotes` URL:
    `https://registry.modelcontextprotocol.io/v0/servers/io.github.OptimNow%2Fai-pricing-hub/versions/latest`
    Not the `?search=` listing: right after the 0.4.1 publish on 2026-10-07 it
