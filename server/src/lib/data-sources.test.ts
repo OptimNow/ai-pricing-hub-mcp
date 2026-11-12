@@ -17,6 +17,7 @@ import {
   isDegradedCatalogue,
   incompleteCatalogueCaveat,
   DEGRADED_CACHE_TTL_MS,
+  PRICING_OS,
   UPSTREAM_TIMEOUT_MS,
   MEASURED_COLD_REBUILD_MS,
   MIN_COLD_PATH_HEADROOM,
@@ -725,6 +726,23 @@ test("the region is passed through to the site", async (t) => {
   assert.equal(result.provenance.region, "asia-pacific");
 });
 
+test("the compute catalogue is asked for by the compute page's own URL", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: sitePricingResponse() } : { throws: true }));
+
+  await fetchComputeInstances("europe");
+
+  // Character for character. The site's edge cache is keyed by the URL, and
+  // every miss is a fan-out to six provider APIs, so this server asks for the
+  // entry the site's visitors keep warm instead of holding one of its own
+  // (which is what `?region=europe` alone was, from the day the page started
+  // sending `os`). Another order or another case is answered with a 308 to
+  // this spelling: `canonicalPricingQuery()` in the site's api/pricing.ts.
+  assert.deepEqual(requested, [`${OPTIMTOKEN_BASE_URL}/api/pricing?region=europe&os=Linux`]);
+  assert.equal(PRICING_OS, "Linux");
+});
+
 test("an empty compute payload falls back instead of reporting no instances", async (t) => {
   t.after(restoreFetch);
   reset();
@@ -779,7 +797,9 @@ test("the compute snapshot admits it ignored the region filter", async (t) => {
 // Upstream PR #57 (2026-08-18) cut that 50.5s cold path to ~7.5s, so the
 // budget came down from 55s to 25s. The shape of the bug did not change with
 // it: a budget tuned to the LLM endpoint still makes tier 1 unreachable. Only
-// the number that would do it moved.
+// the number that would do it moved, and it moved again: on 2026-11-12 the
+// cold path measured 9 to 20s, and the budget went to 40s (the table is in
+// lib/compute-pricing.ts).
 
 test("the compute budget covers a cold upstream rebuild", () => {
   // The guard against re-tuning this budget to the LLM endpoint's profile. If
@@ -807,8 +827,8 @@ test("the compute budget keeps real headroom over the cold path", () => {
 test("a slow-but-reachable upstream reaches tier 1 instead of degrading", async (t) => {
   t.after(restoreFetch);
   reset();
-  // 400ms upstream, 5s budget — a wider ratio than production's 8.9s against
-  // 25s, and the inverse of the 50.5s-against-20s that broke.
+  // 400ms upstream, 5s budget — a wider ratio than production's 20s against
+  // 40s, and the inverse of the 50.5s-against-20s that broke.
   setComputeTimeoutForTest(5_000);
   stubFetch(url => (isSite(url) ? { body: sitePricingResponse(), delayMs: 400 } : { throws: true }));
 

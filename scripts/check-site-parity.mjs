@@ -223,8 +223,12 @@ report("standard rate behind a promotion", standardDiff.length, promotionCount |
 //    copied whole. On 2026-11-11, before it was copied again, 826 of 3,555
 //    Linux rows in us-east carried another processor here than on the site
 //    (121 of the 211 GPU rows) and 138 another category. Compared over the
-//    live compute catalogue, every operating system.
-const PRICING_URL = process.env.PRICING_API_URL || "https://optimtoken.optimnow.io/api/pricing?region=us-east";
+//    live compute catalogue's Linux rows, by the URL the site's compute page
+//    and this server both ask for: a URL of this script's own would be one
+//    more cold fan-out to six provider APIs on every run, and the three
+//    labels are read off the provider and the instance type, never the OS.
+const PRICING_URL =
+  process.env.PRICING_API_URL || "https://optimtoken.optimnow.io/api/pricing?region=us-east&os=Linux";
 const mcpCompute = await load(join(repoRoot, "server/src/lib/compute-categories.ts"));
 const siteCompute = await load(join(sitePath, "src/lib/compute-categories.ts"));
 const pricingResponse = await fetch(PRICING_URL, { headers: { Accept: "application/json" } });

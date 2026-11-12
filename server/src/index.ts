@@ -841,9 +841,11 @@ type Recommendation = z.infer<typeof recommendationSchema>;
  * Two wastes were stacked here. `enrichInstances()` ran over all ~6,050 rows on
  * every single request — 60-85% of warm CPU and ~2.6 MB of allocation — even
  * though the catalogue behind it is memoised for an hour and the enrichment is
- * a pure function of it. And ~41% of those rows are Windows, which the filter
+ * a pure function of it. And ~41% of those rows were Windows, which the filter
  * below discarded immediately afterwards, so nearly half the work could never
- * reach a caller.
+ * reach a caller. Since 0.10.1 the Windows rows are no longer downloaded (the
+ * fetch asks the site for Linux); the filter stays, for a site that ignores
+ * the parameter and for the snapshot.
  *
  * Keyed by the catalogue array identity rather than by region or a timestamp:
  * the memo in compute-pricing.ts hands back the same array for the life of an
@@ -1862,10 +1864,10 @@ tool(
     const emptyOutput = { instances: [], matchingCount: 0, catalogSize: 0, source: "error" };
 
     try {
-      // The whole regional catalogue, filtered here rather than upstream: the
-      // site caches per query string, so narrowing the URL would trade a warm
-      // edge hit for a cold rebuild — and "the 20 cheapest matches" is only
-      // correct when computed over everything.
+      // The region's whole Linux catalogue, filtered here rather than upstream:
+      // the site caches per query string, so narrowing the URL further would
+      // trade a warm edge hit for a cold rebuild — and "the 20 cheapest
+      // matches" is only correct when computed over everything.
       const { instances: catalogue, source, provenance } = await fetchComputeInstances(
         (region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION,
       );
@@ -3347,7 +3349,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
  * it.
  *
  * Deliberately fire-and-forget: start-up must not wait on an upstream
- * that can take 11 s, or a slow site turns into a failed boot. A failure here
+ * that can take 20 s, or a slow site turns into a failed boot. A failure here
  * is logged and dropped — the fetchers do not cache snapshot fallbacks, so a
  * failed warm leaves the cache empty and the first real caller simply pays what
  * it would have paid anyway.

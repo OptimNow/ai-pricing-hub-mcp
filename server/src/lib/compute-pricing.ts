@@ -8,10 +8,17 @@
  * Two upstream properties shape this module:
  *
  *  - The site assembles each region from six live provider APIs. A cache MISS
- *    costs ~7.5s; a HIT costs ~0.3s. Every distinct query string is its own
- *    cache entry, so we always request the *canonical* per-region URL and do
- *    all filtering locally. Adding `?provider=` to the URL would trade a warm
- *    hit for a cold miss and return less data.
+ *    cost 9 to 20 s on 2026-11-12; a HIT costs ~0.3s. Every distinct query
+ *    string is its own cache entry, and every miss is a fan-out to those six
+ *    APIs: three misses inside a minute were enough, that day, for Azure to
+ *    answer 429. So this module asks for exactly the URL the site's own
+ *    compute page asks for, `?region=<slug>&os=Linux`, and filters the rest
+ *    locally: one entry for the two of them, warmed by whichever asks first.
+ *    Until 0.10.1 it asked for the region alone. That had been the page's URL
+ *    until the site added `?os=`; from then on it was an entry of this
+ *    server's own, cold whenever this server was, and 1.44 MB of which the
+ *    Windows 42% was dropped on arrival. Adding `?provider=` would be the same
+ *    mistake again: a warm hit traded for a cold miss, and less data.
  *  - Prices are per-column, not per-row: `meta.priceTypes` says which of a
  *    provider's six price columns are live, which are static constants, and
  *    which are unavailable. GCP CUDs are `static` (us-east-1 numbers scaled by
@@ -45,6 +52,14 @@ import {
 export const PRICING_REGIONS = ["us-east", "us-west", "europe", "asia-pacific"] as const;
 export type PricingRegion = (typeof PRICING_REGIONS)[number];
 
+/**
+ * The operating system asked for, spelled as the site's canonical query spells
+ * it. The tools serve Linux only, and `region` then `os=Linux` is the compute
+ * page's default request. Any other spelling ("linux", `os` before `region`) is
+ * answered with a 308 to this one: a round trip, and nothing else gained.
+ */
+export const PRICING_OS = "Linux";
+
 export const DEFAULT_PRICING_REGION: PricingRegion = "us-east";
 
 export type ComputeSource = "optimtoken" | "static-fallback";
@@ -73,8 +88,8 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * How long we wait for `/api/pricing`.
  *
  * This is not the same number as the LLM endpoint's, and assuming it was is
- * what kept this tool pinned to tier 2. Re-measured against the live endpoint
- * on 2026-08-18 — 8 cold samples, two in each of the four regions, each on a
+ * what kept this tool pinned to tier 2. Measured against the live endpoint on
+ * 2026-08-18 — 8 cold samples, two in each of the four regions, each on a
  * guaranteed-cold cache key:
  *
  *   /api/llm-models   cold 0.19-0.42 s   warm  31 ms    (68 KB)
@@ -84,45 +99,59 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * the site assembles the region from six live provider APIs inside a function
  * whose own ceiling is `maxDuration: 60`.
  *
- * Those numbers replace the 50.5 s cold path measured on 2026-08-17, which is
+ * Those numbers replaced the 50.5 s cold path measured on 2026-08-17, which is
  * what bought the original 55 s budget. Upstream PR #57 landed on 2026-08-18
- * and cut the cold path by ~6x. The 55 s budget never broke anything — a
- * timeout that does not fire costs nothing — but it was justified in writing
- * by a number that had stopped being true, and a stale measurement in a file
- * this load-bearing is how the next person talks themselves into the wrong
- * value. Hence the correction rather than a silent leave-it.
+ * and cut the cold path by ~6x, and the budget came down to 25 s.
  *
- * And this server keeps meeting cold entries. The edge cache is per-key and
- * per-PoP: the deployed server returned tier 2 at a moment when the same URL
- * was serving a warm 200ms hit from another location, so it is not sharing
- * whatever entry ambient traffic has warmed. With no steady traffic of its
- * own to hold an entry open, it pays the rebuild.
+ * Re-measured on 2026-11-12, and the cold path had moved again. Six complete
+ * cold answers, from outside the Fly region and through a proxy that adds
+ * about half a second:
  *
- * 25s is ~2.3x the worst cold path observed, and the margin is the whole
- * point. The healthy path is ~7.5 s, but a throttled or failing provider API
- * upstream can still push it far past that, and the original reasoning is
- * untouched: the data cannot arrive faster than upstream can assemble it.
- * What changed is that covering a degraded upstream no longer costs the
- * caller 55 s. Do not trim this to the LLM endpoint's profile — that is the
- * regression the guard below exists to catch.
+ *   us-east       13.4 s, 13.9 s
+ *   us-west       19.5 s,  8.8 s
+ *   europe        14.8 s
+ *   asia-pacific   8.9 s
+ *
+ * Four of the six are past the 11 s this file took as the worst case, and the
+ * slowest left a 25 s budget 1.3x of headroom where the guard below asks for
+ * 2x. Why it slowed is not established (the catalogue went from about 5,800
+ * rows to 6,140 in the interval). A seventh sample is left out: it came back
+ * in 8.1 s because Azure answered 429 and the site served the region without
+ * it. That one was this measurement's own doing, three cold requests inside a
+ * minute, so take cold samples one at a time and minutes apart.
+ *
+ * 40 s is 2x the worst complete cold answer observed, and the margin is the
+ * whole point: a throttled or failing provider API upstream can still push the
+ * rebuild past it, and the data cannot arrive faster than upstream can
+ * assemble it. A budget that gives up first does not save the caller the wait
+ * next time either: an abandoned request leaves no warm entry behind (see the
+ * note under these constants). Do not trim this to the LLM endpoint's profile:
+ * that is the regression the guard below exists to catch.
+ *
+ * This server should also meet fewer cold entries than it did. The edge cache
+ * is per-key and per-PoP, and until 0.10.1 its key was its own (see the head
+ * of this file); it now shares the compute page's.
  */
-export const UPSTREAM_TIMEOUT_MS = 25_000;
+export const UPSTREAM_TIMEOUT_MS = 40_000;
 
 /** The cold-path time this budget has to cover.
  *
  *  First set to 8.9 s from 8 samples on 2026-08-18. Two independent re-measures
  *  the same day both exceeded it — 10.7 s and 9.3 s, on europe and asia-pacific
  *  — so 8 samples across 4 regions was not enough to characterise an endpoint
- *  that assembles six provider APIs live. Raised to 11 s, which covers every
- *  sample seen so far with the spread they actually show.
+ *  that assembles six provider APIs live. Raised to 11 s, which covered every
+ *  sample seen until then, and to 20 s on 2026-11-12, when four of six cold
+ *  samples were past 11 s and the slowest took 19.5 s (the table above).
  *
  *  The lesson is the file's own: a measurement here is load-bearing, so sample
- *  until the max stops moving rather than until the numbers look tidy.
+ *  until the max stops moving rather than until the numbers look tidy. Six
+ *  samples is not that. They were not extended because each one is a fan-out
+ *  to six provider APIs, and the seventh drew a 429.
  *
  *  Exported so a test can fail if the budget is ever trimmed back toward the
  *  cold path — precisely the regression that pinned this tool to tier 2 when a
  *  20 s budget met a 50.5 s rebuild. */
-export const MEASURED_COLD_REBUILD_MS = 11_000;
+export const MEASURED_COLD_REBUILD_MS = 20_000;
 
 /** How much headroom the budget must keep over the measured cold path.
  *
@@ -130,7 +159,8 @@ export const MEASURED_COLD_REBUILD_MS = 11_000;
  *  a tight and therefore meaningful assertion. At 25 s against 8.9 s it would
  *  pass at a 9 s budget too — which would be one slow provider API away from
  *  re-pinning the tool to tier 2. The ratio is what carries the guarantee now
- *  that the two numbers are no longer a hair apart. */
+ *  that the two numbers are no longer a hair apart. It is also what caught the
+ *  2026-11-12 re-measure: 25 s still exceeded 19.5 s, and no longer by 2x. */
 export const MIN_COLD_PATH_HEADROOM = 2;
 
 /**
@@ -141,7 +171,7 @@ export const MIN_COLD_PATH_HEADROOM = 2;
  * cheaply a moment later. Tested against the live endpoint on a guaranteed-cold
  * cache key (a fresh query string), aborting at 20s and then re-probing every
  * 5s: the key was *still cold at t+236s*, nearly five times the ~50s a rebuild
- * cost at the time (2026-08-17). The rebuild is ~7.5s now, and this experiment
+ * cost at the time (2026-08-17). The rebuild is 9 to 20 s now, and this experiment
  * has not been repeated against it — but the mechanism it exposed is not a
  * function of how long the rebuild takes.
  *
@@ -493,13 +523,13 @@ export function incompleteCatalogueCaveat(provenance: ComputeProvenance, provide
 }
 
 async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<ComputeFetchResult> {
-  const url = optimtokenUrl("api/pricing", { region });
+  // `region` then `os`, in that order and that case: the site's canonical
+  // spelling, and the compute page's own request (see the head of this file).
+  const params = { region, os: PRICING_OS };
+  const url = optimtokenUrl("api/pricing", params);
   const startedAt = Date.now();
 
-  const payload = await fetchOptimtokenJson<SitePricingResponse>("api/pricing", {
-    params: { region },
-    timeoutMs,
-  });
+  const payload = await fetchOptimtokenJson<SitePricingResponse>("api/pricing", { params, timeoutMs });
 
   // The guard rejections below are upstream failures too, and have to be
   // classified as such: "the shape was wrong" and "the request timed out" are
@@ -626,7 +656,7 @@ export async function fetchComputeInstances(
 
   // Cold miss. Share one rebuild between every caller that arrives while it is
   // running: measured, 5 concurrent cold callers fired 5 separate /api/pricing
-  // requests, each a six-provider assembly upstream costing 7-11s. The stale
+  // requests, each a six-provider assembly upstream costing 9-20s. The stale
   // branch above was already deduped; this one was not, which is the branch
   // that actually costs money.
   const existing = inflight.get(region);
