@@ -4,13 +4,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   CACHE_TTL_MS,
-  UNVERIFIED_CACHE_TTL_MS,
+  FALLBACK_CACHE_TTL_MS,
   coerceSiteModel,
   fetchLLMModels,
   hostPricingKey,
   resetLLMModelCache,
 } from "./llm-models.js";
-import { llmModels, computeInstances, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
+import {
+  llmModels,
+  computeInstances,
+  computeDataLastUpdated,
+  dataLastUpdated,
+  llmEloAsOf,
+} from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
   resetComputePricingCache,
@@ -33,16 +39,20 @@ import {
 import { isRecognisedLicence, opennessOf } from "./openness.js";
 
 /**
- * The fallback chain is the part of this server that only runs when something
- * is already broken, which is exactly why it needs tests: in production nobody
- * sees tier 2 or tier 3 until the day they are serving every request.
+ * The fallback is the part of this server that only runs when something is
+ * already broken, which is exactly why it needs tests: in production nobody
+ * sees the snapshot until the day it is serving every request.
  *
  * The property that matters is not "a fallback exists" but "a fallback says so".
- * OpenRouter intermittently publishes a model at exactly half its vendor's list
- * rate, and the corrections for that live only on the site. So a response that
- * fell past tier 1 is serving uncorrected prices to a caller whose tool
- * description tells it to report figures exactly as returned. Silence there is
- * the bug.
+ * The snapshot holds the prices, licences and Arena scores the site served on
+ * the day it was taken. A response that could not be read from the site is
+ * serving that day's figures to a caller whose tool description tells it to
+ * report figures exactly as returned. Silence there is the bug.
+ *
+ * Until 0.11.0 a second live source stood between the two: this server's own
+ * transform of OpenRouter's catalogue. It is gone (the reasons are at the head
+ * of lib/llm-models.ts), and a test below holds that nothing but the site is
+ * ever asked.
  */
 
 // ── Fixtures ────────────────────────────────────────────────────────
@@ -75,27 +85,6 @@ function siteModelsResponse(overrides: Record<string, unknown> = {}) {
       eloAsOf: "2026-08-13",
     },
     ...overrides,
-  };
-}
-
-/** Enough OpenRouter rows to clear the same floor after transform. */
-function openRouterPayload(count = 120) {
-  return {
-    data: Array.from({ length: count }, (_, i) => ({
-      id: `testvendor/alpha-${i}`,
-      name: `Alpha ${i}`,
-      created: 1_750_000_000,
-      description: "test model",
-      context_length: 128_000,
-      architecture: {
-        modality: "text->text",
-        input_modalities: ["text"],
-        output_modalities: ["text"],
-      },
-      pricing: { prompt: "0.000001", completion: "0.000002" },
-      top_provider: { context_length: 128_000, max_completion_tokens: 4096 },
-      supported_parameters: ["tools"],
-    })),
   };
 }
 
@@ -221,7 +210,6 @@ function reset() {
 }
 
 const isSite = (url: string) => url.startsWith(OPTIMTOKEN_BASE_URL);
-const isOpenRouter = (url: string) => url.includes("openrouter.ai");
 
 // ── One base URL, env-overridable ───────────────────────────────────
 
@@ -239,7 +227,7 @@ test("every upstream call goes through the one configured base URL", () => {
   );
 });
 
-// ── LLM: tier ordering ──────────────────────────────────────────────
+// ── LLM: the site, or the snapshot of it ────────────────────────────
 
 test("tier 1 — the site serves, and its prices are marked verified", async (t) => {
   t.after(restoreFetch);
@@ -255,42 +243,10 @@ test("tier 1 — the site serves, and its prices are marked verified", async (t)
   assert.equal(result.provenance.upstreamTimestamp, "2026-08-17T19:43:36.090Z");
   assert.equal(result.provenance.catalogTotal, 257);
   assert.equal(result.provenance.upstreamSchemaVersion, "2.0");
-  assert.equal(result.eloAsOf, "2026-08-13", "the site's own ELO vintage wins over the local constant");
-  assert.ok(!requested.some(isOpenRouter), "tier 1 succeeded, so tier 2 must not have been called");
+  assert.equal(result.eloAsOf, "2026-08-13", "the site's own ELO vintage wins over the snapshot's");
 });
 
-test("tier 2 — the site is down, OpenRouter serves, and the prices are flagged unverified", async (t) => {
-  t.after(restoreFetch);
-  reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-
-  const result = await fetchLLMModels();
-
-  assert.equal(result.source, "openrouter", "the existing direct path is kept as a working second tier");
-  assert.equal(result.provenance.tier, 2);
-  assert.equal(result.provenance.pricesVerified, false);
-
-  // The whole reason the site is preferred: this is the tier where GPT-5.6 Sol
-  // comes back at half of what OpenAI charges.
-  assert.match(
-    result.provenance.notice ?? "",
-    /UNVERIFIED PRICING/,
-    "a fallback must not silently downgrade correctness",
-  );
-  assert.match(result.provenance.notice ?? "", /half/i);
-  // And the licences: on this tier they are a guess from the model's name, and
-  // on 2026-11-12 the openness bucket they give differed from the site's for
-  // 84 of the 288 models both listed. The warning was about prices only.
-  assert.match(result.provenance.notice ?? "", /UNVERIFIED LICENCES/);
-  assert.match(result.provenance.notice ?? "", /openness/);
-  assert.ok(requested.some(isSite), "the site must be tried before OpenRouter");
-});
-
-test("tier 3 — both live sources are down, so the snapshot serves and says it is stale", async (t) => {
+test("tier 2 — the site cannot be read, so the snapshot serves and says which day it is from", async (t) => {
   t.after(restoreFetch);
   reset();
   stubFetch(() => ({ throws: true }));
@@ -298,69 +254,83 @@ test("tier 3 — both live sources are down, so the snapshot serves and says it 
   const result = await fetchLLMModels();
 
   assert.equal(result.source, "static-fallback");
-  assert.equal(result.provenance.tier, 3);
+  // 2, as on the compute side. Until 0.11.0 the snapshot was tier 3 and tier 2
+  // was direct OpenRouter: the numbering changed with the removal.
+  assert.equal(result.provenance.tier, 2);
   assert.equal(result.provenance.pricesVerified, false);
-  assert.match(result.provenance.notice ?? "", /STALE PRICING/);
-  assert.ok(result.provenance.dataAsOf, "the snapshot must date itself");
-  assert.ok(result.models.length > 0, "the snapshot is the whole point of tier 3");
+  assert.ok(result.models.length > 0, "the snapshot is the whole point of the fallback");
+
+  // What it is, and of which day: the caller quotes the number either way.
+  assert.match(result.provenance.notice ?? "", /^STALE PRICING/);
+  assert.match(result.provenance.notice ?? "", new RegExp(`snapshot of it taken on ${dataLastUpdated}`));
+  assert.equal(result.provenance.dataAsOf, dataLastUpdated);
+  assert.match(result.provenance.label, new RegExp(`taken ${dataLastUpdated}`));
+  // The Arena scores are the snapshot's, so their date is the one the site
+  // gave on the day it was taken, not a constant kept beside a copied table.
+  assert.equal(result.eloAsOf, llmEloAsOf);
+  assert.equal(result.provenance.eloAsOf, llmEloAsOf);
+  assert.match(llmEloAsOf, /^\d{4}-\d{2}-\d{2}$/);
 });
 
-test("the tiers are tried strictly in order", async (t) => {
+test("nothing but the site is ever asked for the catalogue", async (t) => {
   t.after(restoreFetch);
-  reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 500 };
-    if (isOpenRouter(url)) return { status: 500 };
-    return { throws: true };
-  });
 
-  await fetchLLMModels();
+  // Whatever the site answers, there is no second live source to turn to.
+  // The one that existed until 0.11.0 was a port of the site's transform that
+  // only ran when the site was down, so nothing measured it: when it was, the
+  // openness label differed from the site's on 84 of 288 models.
+  const answers: ReturnType<Responder>[] = [
+    { status: 503 },
+    { throws: true },
+    { badJson: true },
+    { body: { models: [], meta: { source: "openrouter" } } },
+  ];
+  for (const answer of answers) {
+    reset();
+    stubFetch(() => answer);
+    const result = await fetchLLMModels();
+    assert.equal(result.source, "static-fallback");
+    assert.deepEqual(requested, [`${OPTIMTOKEN_BASE_URL}/api/llm-models`]);
+  }
 
-  const siteIndex = requested.findIndex(isSite);
-  const orIndex = requested.findIndex(isOpenRouter);
-  assert.ok(siteIndex > -1 && orIndex > -1, "both live tiers must be attempted");
-  assert.ok(siteIndex < orIndex, "the site is tier 1 and must be asked first");
+  const source = readFileSync(fileURLToPath(new URL("./llm-models.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(source, /openrouter\.ai/, "lib/llm-models.ts names another host to read the catalogue from");
 });
 
-// ── LLM: refusing bad payloads ──────────────────────────────────────
-
-// ── LLM: how long each tier is remembered ──────────────────────────
+// ── LLM: how long each answer is remembered ────────────────────────
 //
 // Reproduced on 2026-11-12 with the site answering HTTP 502 once and 200 a
-// second later: this server kept serving direct OpenRouter for 15 minutes and
-// asked the site once in that time. The snapshot was never memoised, for
-// exactly this reason; the tier above it was.
+// second later: this server stayed on its fallback for 15 minutes and asked
+// the site once in that time. The fallback was direct OpenRouter then, and
+// shared the site's memo. It is the snapshot now, and it is remembered for a
+// minute: long enough that a hanging site costs one caller its timeout and not
+// every caller, short enough that a single failed read is over in a minute.
 
-test("one failed read of the site does not hold the uncorrected tier for the site's TTL", async (t) => {
+test("one failed read of the site does not hold the snapshot for the site's TTL", async (t) => {
   t.after(restoreFetch);
   reset();
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
 
   let siteUp = false;
-  stubFetch(url => {
-    if (isSite(url)) return siteUp ? { body: siteModelsResponse() } : { status: 502 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-  const siteRequests = () => requested.filter(isSite).length;
+  stubFetch(url => (isSite(url) ? (siteUp ? { body: siteModelsResponse() } : { status: 502 }) : { throws: true }));
 
   assert.equal((await fetchLLMModels()).provenance.tier, 2);
-  assert.equal(siteRequests(), 1);
+  assert.equal(requested.length, 1);
 
   // The site answers again at once. Inside the short memo it is not asked:
-  // while it is down, each attempt can cost its whole timeout.
+  // while it hangs, each attempt costs its whole timeout.
   siteUp = true;
-  t.mock.timers.tick(UNVERIFIED_CACHE_TTL_MS - 1_000);
+  t.mock.timers.tick(FALLBACK_CACHE_TTL_MS - 1_000);
   assert.equal((await fetchLLMModels()).provenance.tier, 2);
-  assert.equal(siteRequests(), 1, "inside the short memo the site is not asked again");
+  assert.equal(requested.length, 1, "inside the short memo the site is not asked again");
 
-  // Past it, the site is asked first, and its corrected prices are back.
+  // Past it, the site is asked, and its prices are back.
   t.mock.timers.tick(2_000);
   const recovered = await fetchLLMModels();
   assert.equal(recovered.provenance.tier, 1, "a minute later the site must be serving again");
   assert.equal(recovered.provenance.pricesVerified, true);
   assert.equal(recovered.provenance.notice, undefined);
-  assert.ok(UNVERIFIED_CACHE_TTL_MS < CACHE_TTL_MS, "the uncorrected tier must be remembered for less than the site");
+  assert.ok(FALLBACK_CACHE_TTL_MS < CACHE_TTL_MS, "the snapshot must be remembered for less than the site");
 });
 
 test("the site's own catalogue is still reused for the full TTL", async (t) => {
@@ -379,59 +349,49 @@ test("the site's own catalogue is still reused for the full TTL", async (t) => {
   assert.equal(requested.length, 2);
 });
 
+// ── LLM: refusing bad payloads ──────────────────────────────────────
+
 test("a malformed site payload falls through instead of being served", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: { models: "not an array", meta: { source: "openrouter" } } };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url =>
+    isSite(url) ? { body: { models: "not an array", meta: { source: "openrouter" } } } : { throws: true },
+  );
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter", "a 200 with a broken body is an upstream failure");
+  assert.equal(result.source, "static-fallback", "a 200 with a broken body is an upstream failure");
 });
 
 test("an empty site payload falls through rather than becoming an empty catalogue", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: { models: [], meta: { source: "openrouter" } } };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url => (isSite(url) ? { body: { models: [], meta: { source: "openrouter" } } } : { throws: true }));
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter");
+  assert.equal(result.source, "static-fallback");
   assert.ok(result.models.length > 0, "'no models found' must never be the answer to an empty 200");
 });
 
 test("a collapsed-but-non-empty site catalogue is refused by the floor", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: siteModelsResponse({ models: siteModels(5) }) };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url => (isSite(url) ? { body: siteModelsResponse({ models: siteModels(5) }) } : { throws: true }));
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter", "5 models is a broken upstream, not a small catalogue");
+  assert.equal(result.source, "static-fallback", "5 models is a broken upstream, not a small catalogue");
 });
 
 test("the site serving its own fallback is not treated as authoritative", async (t) => {
   t.after(restoreFetch);
   reset();
   // meta.source === "error" means the site itself fell back to static data, so
-  // it carries no fresh corrections and is no better than our own tier 2.
-  stubFetch(url => {
-    if (isSite(url)) return { body: siteModelsResponse({ meta: { source: "error", total: 120 } }) };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  // it carries no fresh corrections and is no better than our own snapshot.
+  stubFetch(url =>
+    isSite(url) ? { body: siteModelsResponse({ meta: { source: "error", total: 120 } }) } : { throws: true },
+  );
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter");
+  assert.equal(result.source, "static-fallback");
   assert.equal(result.provenance.pricesVerified, false);
 });
 
@@ -510,7 +470,7 @@ test("a retirement notice survives the trip from the site", () => {
   }
 });
 
-test("retirement notices are dated on tier 1, and absent with a warning on the fallback tiers", async (t) => {
+test("retirement notices are dated on tier 1, and absent with a warning on the snapshot", async (t) => {
   t.after(restoreFetch);
 
   reset();
@@ -530,23 +490,16 @@ test("retirement notices are dated on tier 1, and absent with a warning on the f
   });
   assert.equal(tier1.models.filter(m => m.deprecation).length, 1, "and no other model gained one");
 
-  // Below tier 1 nobody holds the table. No model carries a notice, and the
-  // warning that leads every answer says that this silence proves nothing.
-  reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-  const tier2 = await fetchLLMModels();
-  reset();
-  stubFetch(() => ({ throws: true }));
-  const tier3 = await fetchLLMModels();
-
-  for (const [name, result] of [["tier 2", tier2], ["tier 3", tier3]] as const) {
-    assert.equal(result.provenance.deprecationsVerifiedAt, undefined, `${name} dates no notice`);
-    assert.equal(result.models.filter(m => m.deprecation).length, 0, `${name} carries no notice`);
-    assert.match(result.provenance.notice ?? "", /Retirement notices are served by optimtoken\.optimnow\.io only/, name);
+  // The snapshot holds no copy of the table. No model carries a notice, and
+  // the warning that leads every answer says that this silence proves nothing.
+  for (const answer of [{ status: 503 }, { throws: true }] as ReturnType<Responder>[]) {
+    reset();
+    stubFetch(() => answer);
+    const snapshot = await fetchLLMModels();
+    assert.equal(snapshot.provenance.tier, 2);
+    assert.equal(snapshot.provenance.deprecationsVerifiedAt, undefined, "the snapshot dates no notice");
+    assert.equal(snapshot.models.filter(m => m.deprecation).length, 0, "the snapshot carries no notice");
+    assert.match(snapshot.provenance.notice ?? "", /Retirement notices are served by optimtoken\.optimnow\.io only/);
   }
 });
 
@@ -634,28 +587,16 @@ test("per-host prices travel beside the models, dated, and never on them", async
   }
 });
 
-test("the fallback tiers have no per-host prices and claim none", async (t) => {
+test("the snapshot has no per-host prices and claims none", async (t) => {
   t.after(restoreFetch);
 
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-  const tier2 = await fetchLLMModels();
-  assert.equal(tier2.provenance.tier, 2);
-  assert.equal(tier2.hostPricing.size, 0);
-  assert.equal(tier2.openRouterIds.size, 0);
-  assert.equal(tier2.provenance.hostPricingAsOf, undefined);
-
-  reset();
   stubFetch(() => ({ throws: true }));
-  const tier3 = await fetchLLMModels();
-  assert.equal(tier3.provenance.tier, 3);
-  assert.equal(tier3.hostPricing.size, 0);
-  assert.equal(tier3.openRouterIds.size, 0);
-  assert.equal(tier3.provenance.hostPricingAsOf, undefined);
+  const snapshot = await fetchLLMModels();
+  assert.equal(snapshot.provenance.tier, 2);
+  assert.equal(snapshot.hostPricing.size, 0);
+  assert.equal(snapshot.openRouterIds.size, 0);
+  assert.equal(snapshot.provenance.hostPricingAsOf, undefined);
 });
 
 test("a site that sends no host data is still tier 1, with nothing to say about hosts", async (t) => {

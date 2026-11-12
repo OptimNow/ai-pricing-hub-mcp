@@ -96,20 +96,24 @@ Invoice Processing, Call Summary, Agent Workflow.
 ## Where the numbers come from
 
 `optimtoken.optimnow.io` is the single source of truth. When it cannot be reached, the
-server degrades in tiers rather than failing, and says which tier it used.
+server answers from a snapshot of it rather than failing, and says so.
 
-| Tool | Tier 1 | Tier 2 | Tier 3 |
-|---|---|---|---|
-| LLM tools | `GET /api/llm-models` | OpenRouter direct | embedded snapshot |
-| Compute tool | `GET /api/pricing?region=` | not available | embedded snapshot (137 rows) |
-| Every host of a model | `GET /api/model-hosts?id=` | not available | not available: the summary on the model rows answers |
-| Price changes | `GET /api/price-changes` | not available | not available: the tool says so, never "nothing moved" |
+| Tool | Tier 1 | Tier 2 |
+|---|---|---|
+| LLM tools | `GET /api/llm-models` | embedded snapshot of it |
+| Compute tools | `GET /api/pricing?region=&os=Linux` | embedded snapshot (137 rows) |
+| Every host of a model | `GET /api/model-hosts?id=` | none: the summary on the model rows answers |
+| Price changes | `GET /api/price-changes` | none: the tool says so, never "nothing moved" |
 
-**Tiers 2 and 3 serve uncorrected prices**, and that matters more than it sounds. An
-upstream feed once published a frontier model at half its real list price, which halves
-every monthly figure derived from it. So every response carries a `provenance` object
-with `pricesVerified`, and the lower tiers put a notice at the top of the answer. A
-fallback should never quietly downgrade correctness.
+**The snapshot holds the site's figures of the day it was taken**: its corrected prices,
+its verified licences and its Arena scores, any of which may have moved since. So every
+response carries a `provenance` object with `pricesVerified`, true on tier 1 only, and a
+snapshot answer opens with a notice stating its day. A fallback should never quietly
+downgrade correctness.
+
+Until 0.11.0 the LLM tools had a tier between the two: OpenRouter's catalogue, read
+directly. It was removed once it was measured against the site's own reading of the same
+payload: the open source, open weights or proprietary label differed for 84 of 288 models.
 
 Tier 1 is accepted only when the catalogue reports that it is itself serving fresh
 upstream data. If the site is on its own fallback, it carries no corrections, and this
@@ -128,14 +132,18 @@ npm test                 # cost logic, schema conformance, data sources, the HTT
 npm run build            # tsc, to dist/server/src/index.js
 ```
 
-The static fallback catalogue is refreshed by hand, not on a schedule:
+The two snapshots are refreshed by hand, not on a schedule, and before each release:
 
 ```bash
 npm run refresh-fallback
 ```
 
-Because it is manual, check its `dataAsOf` before trusting a tier-3 response. An
-unrefreshed fallback ages silently.
+```bash
+npm run refresh-compute-fallback
+```
+
+Because it is manual, check its `dataAsOf` before trusting a snapshot response. An
+unrefreshed snapshot ages silently.
 
 ```text
 ai-pricing-hub-mcp/

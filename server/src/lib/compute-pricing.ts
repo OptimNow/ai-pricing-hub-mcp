@@ -16,7 +16,7 @@
  *    answer 429. So this module asks for exactly the URL the site's own
  *    compute page asks for, `?region=<slug>&os=Linux`, and filters the rest
  *    locally: one entry for the two of them, warmed by whichever asks first.
- *    Until 0.10.1 it asked for the region alone. That had been the page's URL
+ *    Until 0.11.0 it asked for the region alone. That had been the page's URL
  *    until the site added `?os=`; from then on it was an entry of this
  *    server's own, cold whenever this server was, and 1.44 MB of which the
  *    Windows 42% was dropped on arrival. Adding `?provider=` would be the same
@@ -132,7 +132,7 @@ const MIN_PLAUSIBLE_COMPUTE_CATALOGUE = 100;
  * that is the regression the guard below exists to catch.
  *
  * This server should also meet fewer cold entries than it did. The edge cache
- * is per-key and per-PoP, and until 0.10.1 its key was its own (see the head
+ * is per-key and per-PoP, and until 0.11.0 its key was its own (see the head
  * of this file); it now shares the compute page's.
  */
 export const UPSTREAM_TIMEOUT_MS = 40_000;

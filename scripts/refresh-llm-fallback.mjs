@@ -191,6 +191,19 @@ updated = updated.replace(
   /export const dataLastUpdated = "[^"]*";/,
   `export const dataLastUpdated = "${today}";`,
 );
+// The Arena scores on these rows are dated by the site, not by this script:
+// the snapshot is the only place the server reads them from when the site is
+// down, and it has to say how old they are. A site that states no date leaves
+// the constant as it was, with a warning, rather than date the scores today.
+if (typeof meta.eloAsOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(meta.eloAsOf)) {
+  if (!/export const llmEloAsOf = "[^"]*";/.test(updated)) {
+    console.error("Constant llmEloAsOf not found in the data file. Fallback left untouched.");
+    process.exit(1);
+  }
+  updated = updated.replace(/export const llmEloAsOf = "[^"]*";/, `export const llmEloAsOf = "${meta.eloAsOf}";`);
+} else {
+  console.warn(`The site stated no usable eloAsOf ("${meta.eloAsOf}"): llmEloAsOf is left as it was.`);
+}
 
 if (updated === source) {
   console.log("No changes.");

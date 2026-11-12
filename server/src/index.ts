@@ -843,7 +843,7 @@ type Recommendation = z.infer<typeof recommendationSchema>;
  * though the catalogue behind it is memoised for an hour and the enrichment is
  * a pure function of it. And ~41% of those rows were Windows, which the filter
  * below discarded immediately afterwards, so nearly half the work could never
- * reach a caller. Since 0.10.1 the Windows rows are no longer downloaded (the
+ * reach a caller. Since 0.11.0 the Windows rows are no longer downloaded (the
  * fetch asks the site for Linux); the filter stays, for a site that ignores
  * the parameter and for the snapshot.
  *
@@ -1657,7 +1657,7 @@ tool(
       // announced its retirement is set aside here: after the scoring, which
       // stays over the whole catalogue as on the site, and before the picks.
       // It is counted and, where it would have ranked, named: left out is not
-      // the same as hidden. No row carries a notice on tiers 2 and 3, so
+      // the same as hidden. No row carries a notice on the snapshot, so
       // nothing is set aside there and the notice that leads the text says why.
       const evaluatedAll = ranked.map(m => ({ m, constraints: checks(m), shortfall: shortfall(m) }));
       const evaluated = evaluatedAll.filter(e => !e.m.deprecation);
@@ -3290,7 +3290,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.10.1",
+      version: "0.11.0",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.

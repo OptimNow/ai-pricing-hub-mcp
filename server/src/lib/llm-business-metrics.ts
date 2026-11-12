@@ -410,7 +410,7 @@ export const FINOPS_MIN_PRICE_PERCENTILE = 30;
  *  The site decides it from a table it keeps by hand (its model-lifecycle.ts)
  *  and publishes the notice as `deprecation` on the row (schemaVersion 2.8),
  *  which is what is read here. The table itself is not copied: a list kept by
- *  hand in two places drifts in silence. On tiers 2 and 3 no row carries a
+ *  hand in two places drifts in silence. On the snapshot no row carries a
  *  notice, so the gate cannot bite there, and the response says so. */
 export function checkFinOpsFriendly(
   model: LLMModel,

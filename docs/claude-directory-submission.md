@@ -75,13 +75,12 @@ In this order. The first three are blocking.
    new). The policy asks that documentation "precisely match actual
    functionality". Its registry name is also lower-cased
    (`io.github.optimnow/...`); the registry entry is `io.github.OptimNow/ai-pricing-hub`.
-4. **Decide what to do with the OpenRouter fallback.** The checklist says
+4. **Done in 0.11.0: the OpenRouter fallback is removed.** The checklist says
    "your server must call your own first-party APIs, or APIs you legitimately
-   proxy". Tier 1 is our own API. Tier 2 calls `openrouter.ai`'s public model
-   list directly when the site is unreachable. Either declare it in the portal's
-   data-handling step as a third-party API used only as a fallback, or remove
-   tier 2 so the LLM tools fall straight to the embedded snapshot. Removing it
-   is the safer answer and also deletes the largest block of ported code.
+   proxy". Tier 1 is our own API, and since 0.11.0 it is the only API this
+   server calls: when the site is unreachable the LLM tools answer from the
+   embedded snapshot. Until then a second tier called `openrouter.ai`'s public
+   model list directly, which would have had to be declared.
 5. **Run `npm run check-parity`** so the figures the listing will show are the
    site's. See "Keeping in sync" in `DESIGN.md`.
 
@@ -162,11 +161,9 @@ Progress saves in the browser between steps.
 5. **Company.** OptimNow, `https://optimnow.io`, and the contact that should
    receive review updates.
 6. **Authentication.** No authentication.
-7. **Data handling.** The API is your own (`optimtoken.optimnow.io`). If tier 2
-   is still in the server, declare it: when the site is unreachable, the LLM
-   tools fall back to `openrouter.ai`'s public model list, a third-party API
-   you do not control, and mark the response unverified. No health data, no
-   sponsored content.
+7. **Data handling.** The API is your own (`optimtoken.optimnow.io`), and it is
+   the only one the server calls (the OpenRouter fallback went in 0.11.0). No
+   health data, no sponsored content.
 8. **Test & launch.** Credentials are a mandatory field. Write that the server
    is public and unauthenticated, no account exists or is needed, and paste
    the prompt table above as the walkthrough. Confirm every tool was run.

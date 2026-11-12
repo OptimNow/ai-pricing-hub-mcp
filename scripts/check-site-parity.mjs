@@ -10,9 +10,7 @@
 //   npm run check-parity -- <path to the cloud-sparkle-compare checkout>
 //
 // It also holds the schema version of each endpoint this server reads to the
-// one it was last read against (lib/site-schema.ts), and ends with a report,
-// not a check, on tier 2: this server's transform of OpenRouter's catalogue
-// beside the site's, over one payload.
+// one it was last read against (lib/site-schema.ts).
 //
 // The site runs this script on a schedule (.github/workflows/mcp-parity.yml in
 // its repository, which can clone this public one; the reverse needs a secret)
@@ -308,78 +306,6 @@ const carried = new Set(pairs.flatMap(([, m]) => Object.keys(m).filter((k) => m[
 carried.add("hostPricing").add("openRouterId");
 const notCarried = [...siteFields].filter((f) => !carried.has(f));
 console.log(`\nSite row fields not carried here: ${notCarried.join(", ") || "none"}.`);
-
-// 7. Tier 2, direct OpenRouter. A report, not a pass or fail: this tier is
-//    uncorrected by design (the site's price corrections, its verified
-//    licences and its nightly host data stay on the site) and every answer it
-//    serves says so. What nothing said was how far its copy of the site's
-//    OTHER rules had moved: the transform is a port last re-read in August
-//    2026, and it only runs when the site cannot be reached. Both transforms
-//    are run here over one payload, so the distance is a number.
-const OPENROUTER_URL = process.env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1/models";
-console.log("\nTier 2 (direct OpenRouter), beside the site's transform of the same payload. A report, not a check:");
-let upstream = null;
-try {
-  const openRouterResponse = await fetch(OPENROUTER_URL, { headers: { Accept: "application/json" } });
-  if (!openRouterResponse.ok) throw new Error(`HTTP ${openRouterResponse.status}`);
-  upstream = (await openRouterResponse.json())?.data;
-  if (!Array.isArray(upstream)) throw new Error("no data array");
-} catch (error) {
-  upstream = null;
-  console.log(`  not run: ${OPENROUTER_URL} could not be read (${error instanceof Error ? error.message : String(error)}).`);
-}
-if (upstream) {
-  const siteApi = await load(join(sitePath, "api/llm-models.ts"));
-  const byKey = (models) => {
-    const map = new Map();
-    for (const m of models) if (!map.has(`${m.provider}|${m.model}`)) map.set(`${m.provider}|${m.model}`, m);
-    return map;
-  };
-  const onSite = byKey(siteApi.transformModels(upstream));
-  let onServer = null;
-  try {
-    onServer = byKey(mcpModels.transformModels(upstream));
-  } catch (error) {
-    // The site's transform drops a malformed upstream row and counts it. A
-    // throw here is what tier 2 would do in production: fail, and hand over to
-    // the snapshot.
-    console.log(`  this server's transform THREW on the live payload: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (onServer) {
-    const onlySite = [...onSite.keys()].filter((k) => !onServer.has(k));
-    const onlyServer = [...onServer.keys()].filter((k) => !onSite.has(k));
-    const shared = [...onSite.keys()].filter((k) => onServer.has(k));
-    const FIELDS = {
-      "list price": (m) => `${m.inputPricePer1M}/${m.outputPricePer1M}`,
-      "batch price": (m) => `${m.batchInputPricePer1M ?? "-"}/${m.batchOutputPricePer1M ?? "-"}`,
-      "cache read": (m) => m.cachedInputPricePer1M ?? "-",
-      "cache write": (m) => m.cacheWritePricePer1M ?? "-",
-      "price tier": (m) => m.category,
-      licence: (m) => m.license ?? "-",
-      // What a caller filters on. Each side buckets with its own lists, which
-      // check 3 above holds identical: a difference here is the licence guess.
-      openness: (m, side) => (side === "site" ? siteOpenness : mcpOpenness).opennessOf(m.license),
-      capabilities: (m) => [...(m.capabilities ?? [])].sort().join("+"),
-      parameters: (m) => m.parameters ?? "-",
-      "release date": (m) => m.releaseDate ?? "-",
-      "Arena score": (m) => m.eloScore ?? "-",
-      "context window": (m) => m.contextWindow,
-    };
-    const name = (k) => k.replace("|", " ");
-    const some = (list) => list.slice(0, 4).map(name).join(", ") + (list.length > 4 ? `, and ${list.length - 4} more` : "");
-    console.log(`  ${upstream.length} upstream rows: ${onSite.size} models on the site, ${onServer.size} here.`);
-    console.log(`  listed by the site only: ${onlySite.length}${onlySite.length ? ` (${some(onlySite)})` : ""}`);
-    console.log(`  listed here only: ${onlyServer.length}${onlyServer.length ? ` (${some(onlyServer)})` : ""}`);
-    console.log(`  of the ${shared.length} listed by both, how many differ on:`);
-    for (const [label, read] of Object.entries(FIELDS)) {
-      const differing = shared.filter((k) => String(read(onSite.get(k), "site")) !== String(read(onServer.get(k), "here")));
-      const example = differing[0]
-        ? ` (${name(differing[0])}: ${read(onSite.get(differing[0]), "site")} on the site, ${read(onServer.get(differing[0]), "here")} here)`
-        : "";
-      console.log(`    ${label.padEnd(15)} ${String(differing.length).padStart(4)}${example}`);
-    }
-  }
-}
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} check(s) failed: ${failures.join("; ")}.`);

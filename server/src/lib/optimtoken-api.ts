@@ -117,9 +117,8 @@ export function optimtokenUrl(path: string, params?: Record<string, QueryValue>)
 }
 
 /**
- * GET a JSON document from the site, with the same abort discipline the direct
- * OpenRouter path has always used: a hard deadline, and the timer cleared on
- * every exit so a slow response cannot leave a handle behind.
+ * GET a JSON document from the site, under a hard deadline, with the timer
+ * cleared on every exit so a slow response cannot leave a handle behind.
  *
  * Throws on transport failure, non-2xx, or a body that is not a JSON object.
  * Callers decide what a *semantically* unusable payload is — that judgement

@@ -5,7 +5,7 @@
  * The unit tests and the contract guard in server/src/*.test.ts run offline and
  * cover the helpers and the wiring. This covers the third thing neither can:
  * what the live catalogue plus the live handlers actually put on the wire. It
- * needs a running server and the OpenRouter API, so it is deliberately NOT part
+ * needs a running server and the site's live API, so it is deliberately NOT part
  * of `npm test` or CI — run it by hand after touching anything cost-related.
  *
  *   npm run build && npm run start
