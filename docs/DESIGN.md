@@ -419,13 +419,13 @@ fails if they disagree. Release order:
    By hand, when the workflow cannot be used: `git pull` (`server.json` is read
    from disk), then from the repo root `mcp-publisher validate`,
    `mcp-publisher login github`, then `mcp-publisher publish`. That login
-   opens a browser. The registry's authentication page (read 2026-11-12) says
-   it cannot currently be granted an organisation's namespace, whatever the
-   account's role (its issue #1468), and names two routes that can: the OIDC
-   token the workflow uses, and `mcp-publisher login github --token <token>`
-   with a personal access token of an organisation Owner that carries
-   `read:org` and no repository scope. A publish refused for
-   `io.github.OptimNow/` after a browser login is that, not a broken manifest.
+   opens a browser, and it has to be made as the `OptimNow` account itself: on
+   GitHub `OptimNow` is a user account, not an organisation (checked
+   2026-11-12), so `io.github.OptimNow/` is that account's own namespace and
+   no other login is granted it. If the repository ever moves to an
+   organisation, read the registry's authentication page first: on that date
+   it said the browser login cannot be granted an organisation's namespace at
+   all (its issue #1468), and that the OIDC route can.
 3. Confirm the entry and its `remotes` URL:
    `https://registry.modelcontextprotocol.io/v0/servers/io.github.OptimNow%2Fai-pricing-hub/versions/latest`
    Not the `?search=` listing: right after the 0.4.1 publish on 2026-10-07 it

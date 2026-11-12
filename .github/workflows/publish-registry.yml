@@ -6,11 +6,10 @@
 # browser, publish. It is the step that gets forgotten. On 2026-11-12 the
 # registry still listed 0.4.2 while production served 0.9.0: five releases had
 # gone by without it. It also cannot be done by anyone, or anything, that
-# does not hold a maintainer's GitHub session, and the registry's
-# authentication page (read 2026-11-12) says that browser login cannot
-# currently be granted an organisation's namespace at all (its issue #1468):
-# it names this route, and a personal access token of an organisation Owner,
-# as the two that can.
+# does not hold the GitHub session of the OptimNow account itself: on GitHub
+# OptimNow is a user account, not an organisation, so io.github.OptimNow/ is
+# that account's own namespace and the CLI's browser login grants it to no
+# other login.
 #
 # This workflow needs no session. The registry accepts GitHub's OIDC token for
 # a workflow run as proof that the run belongs to this repository, and lets it
