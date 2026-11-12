@@ -79,10 +79,45 @@ snapshot sets a `notice` that leads the text output and states its day. A
 fallback must never silently downgrade correctness. The snapshot carries no
 host prices and no retirement notices, and says so.
 
-**Refresh both snapshots before each release**: `npm run refresh-fallback` and
-`npm run refresh-compute-fallback`. With no second live source (below), the
-snapshot's age is the age of every figure this server serves while the site is
-down.
+**Both snapshots are refreshed every Monday** (13:30 UTC, an hour after the site's
+own daily refresh) by `.github/workflows/refresh-fallback.yml`, which runs
+`npm run refresh-fallback` and `npm run refresh-compute-fallback`, then typecheck,
+tests and build on the result, and pushes the one changed file to `master` with a
+deploy key; `ci.yml` runs on that push and deploys. With no second live source
+(below), the snapshot's age is the age of every figure this server serves while the
+site is down, and "before each release", the rule until 2026-11-12, tied that age to
+how often the code changed: the compute rows had gone eight months without a refresh.
+
+What the job guarantees, and what it does not:
+
+- A green run means "nothing moved" or "on master". Without the key, or if the push
+  is refused, it opens a `chore/fallback-refresh` pull request assigned to the
+  maintainer, starts `ci.yml` on it so the required `check` status appears, and fails.
+- The two scripts keep their own refusals (site down, site on its fallback, a provider
+  lost, a collapsed catalogue). One that refuses does not cost the other its week, and
+  still ends the run red once the other has landed.
+- A refresh the tests reject (a capability string nobody mapped) stops before any
+  push: that one needs a human.
+- 19 of the 137 compute rows exist only in the site's static catalogue, in its private
+  repository. The job leaves them as they were. Run `npm run refresh-compute-fallback`
+  by hand, beside a checkout of the site, when that catalogue changes.
+
+The ruleset on `master` asks for a pull request, one approving review and the `check`
+status, none of which a job can supply for its own pull request, so the push needs
+"Deploy keys" in the ruleset's bypass list. A bypass for GitHub Actions is not offered
+on a repository owned by a personal account. One-time setup, in a POSIX shell (Git
+Bash on Windows), from an empty folder:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "main-push ai-pricing-hub-mcp" -f main-push-key
+gh repo deploy-key add main-push-key.pub --repo OptimNow/ai-pricing-hub-mcp --allow-write --title "main-push (refresh-fallback)"
+gh secret set MAIN_PUSH_DEPLOY_KEY --repo OptimNow/ai-pricing-hub-mcp < main-push-key
+rm main-push-key main-push-key.pub
+```
+
+Then, on GitHub: Settings -> Rules -> Rulesets -> `protect-default-branch` -> Bypass list ->
+Add bypass -> Deploy keys, mode Always. To withdraw the arrangement, delete the deploy
+key (Settings -> Deploy keys): the job goes back to the pull request and says so in red.
 
 **Why there is no second live source (0.11.0).** Until 0.11.0 the LLM tools had
 three tiers: the site, then `openrouter.ai` read directly and run through this
@@ -220,6 +255,7 @@ ai-pricing-hub-mcp/
 │   ├── check-connector.mjs           # Manual: call a deployed connector: tools, tier, eight calls at once
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
 ├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
+├── .github/workflows/refresh-fallback.yml  # Mondays: re-snapshots both fallbacks, tests them, pushes to master
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
 ├── server.json                       # Manifest for the official MCP registry
