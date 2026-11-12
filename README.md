@@ -183,7 +183,9 @@ npm test                 # cost logic, schema conformance, data sources, the HTT
 npm run build            # tsc, to dist/server/src/index.js
 ```
 
-The two snapshots are refreshed by hand before each release:
+The two snapshots are refreshed every Monday by the `Refresh fallback snapshots`
+workflow, which runs the two commands below, tests the result and pushes it to
+`master`; `ci.yml` then deploys it. They also run by hand:
 
 ```bash
 npm run refresh-fallback
@@ -193,8 +195,8 @@ npm run refresh-fallback
 npm run refresh-compute-fallback
 ```
 
-Because it is manual, check the snapshot's `dataAsOf` before trusting a snapshot
-answer.
+A snapshot is still up to a week old, and older if a refresh was refused: check
+the snapshot's `dataAsOf` before trusting a snapshot answer.
 
 ```text
 ai-pricing-hub-mcp/

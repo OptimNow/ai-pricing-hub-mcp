@@ -1,0 +1,235 @@
+name: Refresh fallback snapshots
+
+# Weekly re-snapshot of the two static fallbacks in server/src/data/pricing-data.ts:
+# the model list and the 137 compute rows. They are what this server answers from
+# when optimtoken.optimnow.io cannot be read, so their age is the age of every
+# figure served during an outage.
+#
+# WHY. Both were refreshed by hand, "before each release", which is the step that
+# gets forgotten: on 2026-11-12 the compute rows were still dated 2026-03-06, and
+# 96 of the 137 differed from what the site itself serves when a provider fails
+# (on-demand rates by up to 69%). A release is also the wrong clock. Prices move
+# every week whether or not this server's code does.
+#
+# WHAT IT RUNS. `npm run refresh-fallback` and `npm run refresh-compute-fallback`,
+# unchanged. Each one refuses to write when the site does not answer, answers
+# from its own fallback, lost a provider, or returned a catalogue that collapsed.
+# The two are independent here: one that refuses does not cost the other its
+# week. A refusal still ends the run red, after whatever the other produced has
+# landed, because a snapshot that could not be taken is worth a look.
+#
+# Then the three commands of ci.yml's `check` job (typecheck, tests, build) run
+# on the refreshed file, in this job. A refresh that brings in something the
+# tests reject (a capability string nobody mapped, for one) stops here: nothing
+# is pushed, no pull request is opened.
+#
+# WHERE THE RESULT GOES. The commit touches one file, the data file, and is
+# pushed to master with a deploy key (the MAIN_PUSH_DEPLOY_KEY secret). That
+# push starts ci.yml like any other, which checks again and deploys, so the live
+# server carries the new snapshot within minutes. Without the key, or if the
+# push is refused, the job opens a pull request assigned to the maintainer,
+# starts ci.yml on it and FAILS: a green run means "nothing moved" or "on master".
+#
+# WHY A DEPLOY KEY. The ruleset on master asks for a pull request, one approving
+# review and the `check` status. A pull request opened with the job's token gets
+# no CI run (GitHub starts no workflow from it) and no job can approve its own,
+# so it would wait for a human every week, which is the manual step again. A
+# bypass for GitHub Actions is not offered on a repository owned by a personal
+# account, and would cover anything that later runs as the bot. A deploy key is
+# offered, and is narrower: it reaches one step, for one push, after the checks.
+# The ruleset lists "Deploy keys" as a bypass actor, mode Always. Same route as
+# cloud-sparkle-compare's refresh jobs (31 Oct 2026) and as the two ROI
+# calculator repositories (12 Nov 2026).
+#
+# One-time setup (docs/DESIGN.md has the commands):
+#   - a deploy key with write access, its private half in the
+#     MAIN_PUSH_DEPLOY_KEY secret;
+#   - "Deploy keys" in the bypass list of the ruleset on master, mode Always.
+#
+# WHAT IT DOES NOT REFRESH. 19 of the 137 compute rows are instance types the
+# site only serves from its own static catalogue (16 GCP shared-core and older
+# types, 3 DigitalOcean sizes). That file lives in the site's repository, which
+# is private, so this job leaves those rows as they were and names them in its
+# log. They move only when the site's static catalogue does: run
+# `npm run refresh-compute-fallback` by hand, beside a checkout of the site,
+# when that happens.
+
+on:
+  schedule:
+    # Mondays 13:30 UTC: an hour after the site's own daily refresh (12:30 UTC),
+    # so the snapshot is of that day's catalogue.
+    - cron: '30 13 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # starts ci.yml on the pull request branch, which no push from this job would
+
+# A manual run racing the scheduled one would push twice from the same parent.
+concurrency:
+  group: refresh-fallback
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'OptimNow/ai-pricing-hub-mcp'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the engines field in package.json.
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      # continue-on-error: a refusal is reported by the last step, once the
+      # other snapshot has had its chance.
+      - name: Refresh the model snapshot
+        id: llm
+        continue-on-error: true
+        run: npm run refresh-fallback
+
+      - name: Refresh the compute snapshot
+        id: compute
+        continue-on-error: true
+        run: npm run refresh-compute-fallback
+
+      - name: Did anything move?
+        id: changes
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Both snapshots already match the site: nothing to commit."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git status --short
+            git diff --stat
+          fi
+
+      # The `check` job of ci.yml, command for command. Keep the two in step.
+      - name: Typecheck
+        if: steps.changes.outputs.changed == 'true'
+        run: npm run typecheck
+
+      - name: Tests
+        if: steps.changes.outputs.changed == 'true'
+        run: npm test
+
+      - name: Build
+        if: steps.changes.outputs.changed == 'true'
+        run: npm run build
+
+      # The deploy key reaches this step and no other: the install, the two
+      # scripts, the tests and the build above never see it.
+      - name: Land the snapshots on master, or hand them to a human
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_KEY: ${{ secrets.MAIN_PUSH_DEPLOY_KEY }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: chore/fallback-refresh
+          DATA_FILE: server/src/data/pricing-data.ts
+        run: |
+          set -euo pipefail
+
+          # The scripts write one file. Anything else in the tree is not theirs
+          # (the build writes to dist/, which git ignores) and is not committed.
+          moved=$(git status --porcelain | awk '{print $NF}')
+          if [ "$moved" != "$DATA_FILE" ]; then
+            echo "::error title=Unexpected files::The refresh changed more than $DATA_FILE: $(printf '%s' "$moved" | tr '\n' ' '). Nothing was committed."
+            exit 1
+          fi
+
+          {
+            echo "Weekly re-snapshot of the static fallbacks from optimtoken.optimnow.io."
+            echo
+            echo '```'
+            git diff --stat -- "$DATA_FILE"
+            git diff -- "$DATA_FILE" | grep -E '^[+-]export const (dataLastUpdated|llmEloAsOf|computeDataLastUpdated)' || true
+            echo '```'
+            echo
+            echo "\`npm run typecheck\`, \`npm test\` and \`npm run build\` passed on this file in the job."
+          } > "$RUNNER_TEMP/refresh-summary.md"
+          cat "$RUNNER_TEMP/refresh-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DATA_FILE"
+          git commit -m "chore: weekly refresh of the fallback snapshots"
+
+          why="the MAIN_PUSH_DEPLOY_KEY secret is not set"
+          if [ -n "$DEPLOY_KEY" ]; then
+            key_file="$RUNNER_TEMP/main-push-deploy-key"
+            known_hosts="$RUNNER_TEMP/main-push-known-hosts"
+            trap 'rm -f "$key_file"' EXIT
+
+            # GitHub's host keys come from its API, never trusted on first use.
+            gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts"
+            if [ ! -s "$known_hosts" ]; then
+              echo "::error title=No GitHub host keys::Could not read GitHub's SSH host keys from the API, so the deploy key cannot be used safely. Re-run the workflow."
+              exit 1
+            fi
+
+            ( umask 077; printf '%s\n' "$DEPLOY_KEY" > "$key_file" )
+            if GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
+                 git push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$DEFAULT_BRANCH"; then
+              rm -f "$key_file"
+              echo "Snapshots pushed to $DEFAULT_BRANCH with the deploy key. ci.yml runs on that push: it checks and deploys."
+              # A pull request left over from a week the push was refused now
+              # holds an older snapshot than master: close it with its branch.
+              if [ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
+                gh pr close "$BRANCH" --delete-branch \
+                  --comment "Superseded: this week's snapshots were pushed to $DEFAULT_BRANCH by the job."
+              fi
+              exit 0
+            fi
+            rm -f "$key_file"
+            why="the push with the deploy key was refused (the lines above say why: no write access, \"Deploy keys\" missing from the ruleset's bypass list, or $DEFAULT_BRANCH moved during the run)"
+          fi
+
+          # A pull request, for a human. The branch is reused, so this replaces
+          # whatever the previous run left there. Only ever force-pushes this
+          # bot branch.
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          {
+            echo "Opened by the weekly \`Refresh fallback snapshots\` job instead of a push to \`$DEFAULT_BRANCH\`: $why."
+            echo
+            cat "$RUNNER_TEMP/refresh-summary.md"
+            echo
+            echo "The job started \`ci.yml\` on this branch, so the \`check\` status the ruleset asks for appears below. The approving review is yours."
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          if [ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/pr-body.md"
+            echo "Updated the open pull request."
+          else
+            # The assignment is the notification: a failed scheduled run sends
+            # no mail anyone reads.
+            gh pr create \
+              --base "$DEFAULT_BRANCH" \
+              --head "$BRANCH" \
+              --title "Weekly refresh of the fallback snapshots" \
+              --assignee "$GITHUB_REPOSITORY_OWNER" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
+
+          # A push made with the job's token starts no workflow, so the `check`
+          # status would never appear on this pull request. Start it by hand:
+          # the deploy job of ci.yml runs on master only.
+          gh workflow run ci.yml --ref "$BRANCH" \
+            || echo "::warning::Could not start ci.yml on $BRANCH; run it from the Actions tab so the check status appears on the pull request."
+
+          echo "::error title=Snapshots not on $DEFAULT_BRANCH::$why. They wait in the pull request on $BRANCH."
+          exit 1
+
+      # Last, so that what the other script produced has landed first.
+      - name: Fail when a snapshot could not be taken
+        if: steps.llm.outcome == 'failure' || steps.compute.outcome == 'failure'
+        run: |
+          echo "::error title=A refresh refused to write::model snapshot: ${{ steps.llm.outcome }}, compute snapshot: ${{ steps.compute.outcome }}. The script's own lines above say why (the site did not answer, answered from its fallback, lost a provider, or its catalogue shrank). The snapshot it guards is left as it was."
+          exit 1
