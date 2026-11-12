@@ -529,6 +529,12 @@ test("per-host prices travel beside the models, dated, and never on them", async
   );
   assert.equal(result.hostPricing.size, 1, "a row with no host data has no entry: unknown, never one host");
 
+  // The upstream id is kept for every row that has one, with or without a
+  // usable host summary: a model's price history is asked by it.
+  assert.equal(result.openRouterIds.get(hostPricingKey({ provider: "TestVendor", model: "Alpha 0" })), "testvendor/alpha-0");
+  assert.equal(result.openRouterIds.get(hostPricingKey({ provider: "TestVendor", model: "Alpha 1" })), "testvendor/alpha-1");
+  assert.equal(result.openRouterIds.size, 2, "and a row the site gave no id has none");
+
   // Every tool spreads a model row into structuredContent, and their schemas
   // refuse undeclared properties: a host field on the row would make a strict
   // client reject four tools at once.
@@ -549,6 +555,7 @@ test("the fallback tiers have no per-host prices and claim none", async (t) => {
   const tier2 = await fetchLLMModels();
   assert.equal(tier2.provenance.tier, 2);
   assert.equal(tier2.hostPricing.size, 0);
+  assert.equal(tier2.openRouterIds.size, 0);
   assert.equal(tier2.provenance.hostPricingAsOf, undefined);
 
   reset();
@@ -556,6 +563,7 @@ test("the fallback tiers have no per-host prices and claim none", async (t) => {
   const tier3 = await fetchLLMModels();
   assert.equal(tier3.provenance.tier, 3);
   assert.equal(tier3.hostPricing.size, 0);
+  assert.equal(tier3.openRouterIds.size, 0);
   assert.equal(tier3.provenance.hostPricingAsOf, undefined);
 });
 

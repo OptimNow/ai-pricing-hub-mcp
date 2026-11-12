@@ -9,7 +9,7 @@ keeps what an agent needs in every session and lists the sections below.
 Runtime:      Node, the official MCP SDK, node:http. No framework.
 Language:     TypeScript
 Build:        tsc (dist/server/src/index.js)
-UI:           none. Seven tools; each answers with text and structuredContent
+UI:           none. Eight tools; each answers with text and structuredContent
 Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
 Transport:    Streamable HTTP at /mcp, stateless (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
@@ -66,6 +66,7 @@ second host.
 | LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
 | Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
 | Every host of a model (`compare-model-hosts`) | `GET /api/model-hosts?id=` | — | — (the summary on the model rows answers instead) |
+| Price changes (`track-llm-price-changes`) | `GET /api/price-changes` | — | — (the tool returns an error, never an empty list) |
 
 The compute tool served the static array alone until optimtoken became the
 source of truth. Its `openWorldHint` was corrected to `true` at that point.
@@ -86,7 +87,7 @@ fresh corrections.
 ai-pricing-hub-mcp/
 ├── server/
 │   └── src/
-│       ├── index.ts                  # The 7 tools, createServer(), listen, cache warm-up
+│       ├── index.ts                  # The 8 tools, createServer(), listen, cache warm-up
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
@@ -96,6 +97,7 @@ ai-pricing-hub-mcp/
 │       │   ├── compute-rates.ts      # A compute row's rates as text, and what each saves on on-demand
 │       │   ├── host-prices.ts        # Per-host prices: port of the site's reader, coercion, wording
 │       │   ├── model-hosts.ts        # Every host of a model: the site's /api/model-hosts, read on demand
+│       │   ├── price-changes.ts      # What moved: the site's /api/price-changes, its flags and their wording
 │       │   ├── deprecation.ts        # Retirement notices: reading the site's, and wording them
 │       │   ├── output-schema.ts      # Forces JSON Schema 2020-12 on tool outputSchemas
 │       │   ├── llm-models.ts         # 3-tier model fetch, ELO enrichment, name resolution
@@ -106,7 +108,7 @@ ai-pricing-hub-mcp/
 │       │   ├── compute-categories.ts # Instance category, processor, use cases: the site's file, copied whole
 │       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
 │       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
-│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, public-url, self-hosting
+│       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, price-changes, public-url, self-hosting
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
 ├── docs/
@@ -747,6 +749,64 @@ site gains a break-even calculator, port it here rather than keep two.
 carries `provenance` (API prices) and `computeProvenance` (instance rates). The
 compute notice lists every provider's static columns; it leads the text only on
 a fallback tier or when one of them belongs to the instance's own provider.
+
+### What moved: `track-llm-price-changes` (0.9.0)
+
+Every other tool quotes today's price. None could say whether it had just
+changed, and "is this price stable enough to budget on" is a FinOps question.
+The site keeps a price archive (since 2026-08-15) and published it on
+2026-11-11 as `GET /api/price-changes` (its own schema, 1.0): without an id,
+the moves of the trend window, the last 7 days at most, which is what its
+barometer page lists; with `?id=`, one model's quoted price since tracking
+began. The eighth tool reads both (`lib/price-changes.ts`).
+
+- **One tool, two modes.** Without `models`: the week across the catalogue.
+  With `models` (1 to 4 names): each one's history, one request per model.
+  `mode` says which was served. A week's filter (`direction`, `provider`,
+  `includeFlagged`) passed with `models` is refused, not ignored: a filter
+  that silently did nothing would let "falls only" be read into a history that
+  also lists rises.
+- **A move is not a repricing.** Most models are sold by several hosts and the
+  site quotes one of them, so the quoted price can move while every host holds
+  its rate. The site flags what it can establish: `hostSwitch` (the host
+  quoted changed) and `outlierHost` (an outlier listing). On 2026-11-11, 23 of
+  the week's 30 moves were flagged. The tool returns the two groups apart
+  (`priceChanges`, `flaggedMoves`), as the barometer does, tags each flagged
+  line and explains the tag once. A flag this server does not know is printed
+  under its own name, never dropped.
+- **No flag is "none established", nothing more.** The site writes a flag only
+  when it is established. The legend says an unflagged move is not a statement
+  that the model maker repriced, and to check the maker's page before
+  reporting it as one. Decision 12 in `CLAUDE.md`.
+- **No fallback, and no empty list on failure.** This server holds no price
+  archive and cannot build one. When the endpoint fails the tool returns an
+  error that says the read failed and that this is not "nothing moved";
+  `coercePriceChanges` throws on an answer with no `changes` array for the same
+  reason. A quiet week is an empty list from the site, and only that.
+- **Three kinds of "no history".** A model whose price never changed has an
+  empty `changes` list. A model the archive does not hold yet has no `first`
+  and no `changes`: `known` is false with the reason. A name the site's
+  catalogue does not list is reported the same way. None is printed as
+  "never changed".
+- **The FinOps reading is the monthly bill.** Each move is costed for a
+  workload (`useCasePreset`, `volumePreset`): the bill before, after, and the
+  difference. The blended percentage weighs output at 70%, so a workload with
+  another mix can move the other way: on 2026-11-11 GLM 5.3 Flash read −14.1%
+  blended while a support-ticket workload rose from $9 to $10 a month. The
+  text says so.
+- **The counts are restated from the moves kept.** `moved`, `up`, `down` and
+  `flagged` are counted on the moves this server accepted, so the summary
+  cannot contradict the list under it. `tracked` cannot be recounted: it is
+  the site's figure, or null.
+- **The catalogue annotates, and is not required for the week.** When the
+  catalogue is tier 1, a move also carries the model's retirement notice and,
+  where it differs from the archive's last price, the price quoted today
+  (`quotedNow`): the archive is a nightly file and the catalogue is live. The
+  history mode does need the catalogue, for name resolution and for the
+  upstream id (`LLMFetchResult.openRouterIds`, beside the rows like
+  `hostPricing`), so it refuses on a fallback tier.
+- **Two provenances.** `provenance` is the archive's (window, first and newest
+  day); `catalogueProvenance` is the catalogue's.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

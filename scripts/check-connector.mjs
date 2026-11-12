@@ -9,7 +9,7 @@
  * or the *.fly.dev host. The script checks, in order:
  *
  *   1. initialize   -> HTTP 200 and serverInfo
- *   2. tools/list   -> the seven tools, each with a title, readOnlyHint, a
+ *   2. tools/list   -> the eight tools, each with a title, readOnlyHint, a
  *                      2020-12 outputSchema, and no widget template
  *   3. resources    -> none: the server publishes no `ui://` resources since
  *                      0.5.0, and a client must not be offered any
@@ -37,6 +37,7 @@ const EXPECTED_TOOLS = [
   "compare-compute-pricing",
   "compare-model-hosts",
   "estimate-self-hosting-breakeven",
+  "track-llm-price-changes",
 ];
 const JSON_SCHEMA_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 

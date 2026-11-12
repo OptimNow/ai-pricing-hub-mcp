@@ -130,6 +130,8 @@ test("the fields fixed by each past regression are still rounded", () => {
     "monthlyOperationsCost",
     "fullLoadCostPerRequest",
     "fleetMinusApiMonthly",
+    // track-llm-price-changes: a difference of two monthly bills.
+    "monthlyDelta",
   ]) {
     assert.ok(rounded.has(field), `${field} is no longer rounded at the boundary`);
   }
@@ -176,6 +178,7 @@ test("every tool declares provenance in its output schema", () => {
     "recommendOutputSchema",
     "modelHostsOutputSchema",
     "selfHostingOutputSchema",
+    "priceChangesOutputSchema",
   ]) {
     const start = schemaRegion.indexOf(`const ${schema} = {`);
     assert.ok(start > -1, `${schema} not found`);
@@ -200,15 +203,19 @@ test("every structuredContent that reached upstream carries provenance", () => {
     b => !/^\{\s*\.\.\.emptyOutput,\s*error:[^,}]+\}$/.test(b.trim().replace(/\s+/g, " ")),
   );
 
-  // 7 successes, plus five paths that fail *after* a good fetch and so still
-  // owe the caller provenance: estimate-llm-cost's no-match path,
+  // 9 successes (track-llm-price-changes has two: the week's moves and a
+  // model's history), plus eight paths that fail *after* a good fetch and so
+  // still owe the caller provenance: estimate-llm-cost's no-match path,
   // compare-models-side-by-side's "fewer than 2 names resolved",
-  // compare-model-hosts's "no name resolved", and
-  // estimate-self-hosting-breakeven's "no model matched" and "no such instance".
+  // compare-model-hosts's "no name resolved",
+  // estimate-self-hosting-breakeven's "no model matched" and "no such
+  // instance", and track-llm-price-changes's "no name resolved", "catalogue on
+  // a fallback tier" and "no history could be read", which have the
+  // catalogue's provenance to give.
   assert.equal(
     reachedUpstream.length,
-    12,
-    `expected 12 upstream-backed outputs (7 successes + 5 post-fetch failures), saw ${reachedUpstream.length}`,
+    17,
+    `expected 17 upstream-backed outputs (9 successes + 8 post-fetch failures), saw ${reachedUpstream.length}`,
   );
   for (const block of reachedUpstream) {
     assert.match(
@@ -248,7 +255,7 @@ test("every tool emits a 2020-12 outputSchema", () => {
   // reject before the handler runs — the bug that made every tool here
   // uncallable from Claude Code. See lib/output-schema.ts.
   const declarations = [...source.matchAll(/outputSchema:\s*([^,\n]+)/g)].map(m => m[1].trim());
-  assert.equal(declarations.length, 7, `expected 7 outputSchema declarations, saw ${declarations.length}`);
+  assert.equal(declarations.length, 8, `expected 8 outputSchema declarations, saw ${declarations.length}`);
   for (const declaration of declarations) {
     assert.match(
       declaration,
