@@ -8,7 +8,8 @@
  * different URL to check a local `npm run start` (http://localhost:3000/mcp)
  * or the *.fly.dev host. The script checks, in order:
  *
- *   1. initialize   -> HTTP 200 and serverInfo
+ *   1. initialize   -> HTTP 200, serverInfo, and the instructions the server
+ *                      sends the calling model (since 0.10.0)
  *   2. tools/list   -> the eight tools, each with a title, readOnlyHint, a
  *                      2020-12 outputSchema, and no widget template
  *   3. resources    -> none: the server publishes no `ui://` resources since
@@ -88,6 +89,12 @@ const init = await rpc("initialize", {
 console.log(`initialize -> HTTP ${init.status} in ${init.elapsed} ms`);
 console.log(JSON.stringify(init.payload?.result ?? init.payload, null, 2));
 check(init.status === 200 && init.payload?.result?.serverInfo?.name === "ai-pricing-hub", "initialize serverInfo", init.payload?.result?.serverInfo?.version);
+const instructions = init.payload?.result?.instructions;
+check(
+  typeof instructions === "string" && instructions.trim().length > 0,
+  "initialize sends instructions for the calling model",
+  typeof instructions === "string" ? `${instructions.length} characters` : "none",
+);
 await rpc("notifications/initialized");
 
 const tools = await rpc("tools/list");

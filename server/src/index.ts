@@ -102,6 +102,7 @@ import {
 } from "./lib/price-changes.js";
 import type { PriceChangesWindow, PriceMove } from "./lib/price-changes.js";
 import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./lib/model-hosts.js";
+import { SERVER_INSTRUCTIONS } from "./lib/server-instructions.js";
 import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
@@ -3264,10 +3265,15 @@ tool(
  * that overlaps another with HTTP 500.
  */
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: "ai-pricing-hub",
-    version: "0.9.0",
-  });
+  const server = new McpServer(
+    {
+      name: "ai-pricing-hub",
+      version: "0.10.0",
+    },
+    // Said once per connection: what the server is for and how to repeat its
+    // figures. The tools' own texts carry the same rules, answer by answer.
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   for (const register of tools) register(server);
   return server;
 }

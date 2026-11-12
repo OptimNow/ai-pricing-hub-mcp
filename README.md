@@ -76,6 +76,11 @@ This server replaces recall with a lookup:
 
 All eight are read-only and take no credentials. Nothing you send is stored.
 
+**The server says how to read its answers.** When an assistant connects, it receives a
+short set of instructions: which questions the server answers, and to repeat each figure
+with its date, its source and its label (a promotion, a retirement notice, a static
+rate), without turning "not known" into "no".
+
 **End of life is on every answer.** A model whose maker has announced the retirement of
 its API is labelled with the date and the replacement the maker names, wherever it
 appears, and loses the FinOps Friendly badge. The notices are read by hand from each
