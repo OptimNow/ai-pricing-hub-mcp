@@ -144,8 +144,10 @@ policy asks a server to be "frugal with their use of tokens".
   `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png`.
 - **Listing copy, example prompts and test instructions.** In
   `claude-directory-listing.md`, field by field, since 2026-11-12: the name,
-  the one-liner, the description, the slug, eight use cases with their
-  prompts (one for each tool), and the text of the Test & launch step.
+  (`AI Economics`), the one-liner, the description, the slug
+  (`optimnow-ai-economics`), twelve example prompts in two groups (plain
+  questions and detailed ones, every tool covered), and the text of the Test
+  & launch step.
   `listing.test.ts` holds the three length limits and fails when a tool has no
   prompt. The suggestions that stood here until then are replaced by that
   file.

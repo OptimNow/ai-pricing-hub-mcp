@@ -54,11 +54,17 @@ test("the description says how many tools there are, and which host they call", 
   assert.doesNotMatch(description, /anthropic|official|endorsed|certified|partner/i);
 });
 
-test("every tool has one example prompt and one test call, and no other tool is named", () => {
+test("every tool has an example prompt and one test call, and no other tool is named", () => {
   const useCases = listing.slice(listing.indexOf("\n## Step 4. Use cases\n"), listing.indexOf("\n## Step 5. Company\n"));
-  const promptRows = useCases.split("\n").filter((line) => /^\| \d+ \|/.test(line));
+  // Two tables: A rows are the plain questions, B rows the detailed ones.
+  const promptRows = useCases.split("\n").filter((line) => /^\| [AB]\d+ \|/.test(line));
+  assert.ok(promptRows.length >= 3, "the policy asks for at least three working examples");
   const prompted = promptRows.map((row) => /`([a-z-]+)` \|$/.exec(row)?.[1]);
-  assert.deepEqual([...prompted].sort(), [...declaredTools].sort());
+  for (const [index, name] of prompted.entries()) {
+    assert.ok(name && declaredTools.includes(name), `row ${index + 1} names no tool the server declares`);
+  }
+  // A tool with no prompt is a tool no reviewer is shown how to use.
+  assert.deepEqual([...new Set(prompted)].sort(), [...declaredTools].sort());
   for (const row of promptRows) {
     const prompt = row.split("|")[3]?.trim() ?? "";
     assert.ok(prompt.length >= 20 && /[.?]$/.test(prompt), `not a full sentence: ${prompt}`);
@@ -68,13 +74,11 @@ test("every tool has one example prompt and one test call, and no other tool is 
     .split("\n")
     .map((line) => /^(\d+)\. ([a-z-]+) (\{.*\})$/.exec(line))
     .filter((match) => match !== null);
+  // One call for each tool: the walk a reviewer is asked to make.
   assert.deepEqual(calls.map((call) => call[2]).sort(), [...declaredTools].sort());
   for (const call of calls) {
     // The arguments are pasted as JSON a reviewer can copy.
     assert.doesNotThrow(() => JSON.parse(call[3] ?? ""), `call ${call[1]}`);
-    // A prompt and its call carry the same number, so a reviewer can pair them.
-    const row = promptRows.find((line) => line.startsWith(`| ${call[1]} |`));
-    assert.ok(row?.includes(`\`${call[2]}\``), `call ${call[1]} (${call[2]}) and prompt ${call[1]} name different tools`);
   }
 });
 

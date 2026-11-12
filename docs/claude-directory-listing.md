@@ -50,11 +50,18 @@ This is the public part.
 
 ### Name
 
-Limit: 100 characters.
+Limit: 100 characters. The owner's choice of 2026-11-12, over `OptimToken`.
 
 ```text
-OptimToken
+AI Economics
 ```
+
+It says what the connector is about to someone who has never met the brand,
+and it follows the Cloud FinOps listing, whose name is its subject too. What it
+costs: the site, the documentation page, the privacy policy and the registry
+entry all say OptimToken, and every answer names `optimtoken.optimnow.io` as
+its source. The description's first paragraph makes the link, so that a
+reader who meets both names knows they are one thing. Keep that sentence.
 
 ### One-liner
 
@@ -70,11 +77,11 @@ Current prices for AI models and cloud compute, each with its source and date: w
 Limit: 2,000 characters. The portal renders Markdown lists and links.
 
 ```text
-OptimToken gives Claude current prices for AI models and cloud compute. A cost question gets a figure with its source and its date, where Claude would otherwise answer from memory. It is built and maintained by OptimNow, a Cloud Financial Management (FinOps) advisory, and its catalogue is refreshed every day.
+AI Economics gives Claude current prices for AI models and cloud compute. A cost question gets a figure with its source and its date, where Claude would otherwise answer from memory. OptimNow, a Cloud Financial Management (FinOps) advisory, builds and maintains it on OptimToken, its price catalogue, refreshed every day.
 
 8 read-only tools. A tool is a function Claude calls while answering. Each one answers a question:
 
-- What is on the market? About 300 models, filtered on price, quality (Arena ELO) and capabilities.
+- What is on the market? About 300 models, filtered on price, quality (Arena ELO), openness and capabilities.
 - Which model fits our workload and our budget?
 - How do 2 to 4 named models compare?
 - What does a workload cost per request and per month, and what do caching and batch pricing change?
@@ -83,15 +90,15 @@ OptimToken gives Claude current prices for AI models and cloud compute. A cost q
 - What does a cloud instance cost on AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba: on demand, spot and with a commitment?
 - At what volume does renting capacity cost the same as paying the API?
 
-Every answer says which source served it and when. A promotional price, a retirement notice and a rate that is not live are labelled. A figure that is not known is reported as not known.
+A promotional price, a retirement notice and a rate that is not live are labelled. A figure that is not known is reported as not known.
 
 Where the figures come from: all 8 tools read OptimNow's own optimtoken.optimnow.io and call no other service. That site compiles public price data every day (OpenRouter's catalogue for models, the providers' price lists for compute) and corrects model prices against vendor pricing pages.
 
 What it does not do: it never connects to your cloud or AI accounts, needs no account or credentials, and does not store your questions. It quotes list prices, not your negotiated rates.
 
-Example questions: "Recommend a model for support tickets under $500 a month.", "Who sells Llama 3.3 70B, and at what price?", "Which LLM prices changed this week?"
+Example questions: "Show me the smartest models for the lowest price.", "How do open-weights models compare with proprietary ones?", "What does an AWS instance cost on spot or with a 3-year savings plan?"
 
-Documentation: https://optimtoken.optimnow.io/mcp. Source: https://github.com/OptimNow/ai-pricing-hub-mcp.
+Source code: https://github.com/OptimNow/ai-pricing-hub-mcp.
 ```
 
 Rules this text follows, to keep at the next edit. The first six are the ones
@@ -109,7 +116,9 @@ the maintainer set for the Cloud FinOps listing on 2026-11-11:
   directory terms forbid it.
 - Say where the site's figures come from. The server calls OptimNow's API
   only, and that API compiles data other parties publish: a reader who
-  budgets on a figure should know both.
+  budgets on a figure should know both. The owner confirmed it on 2026-11-12.
+- The example questions are plain ones, as a decision-maker would ask them.
+  The detailed ones are in the Use cases step.
 
 ### Categories
 
@@ -132,21 +141,22 @@ the Cloud FinOps listing: the server is a plain remote MCP server with no UI.
 | Icon | `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png` (512 × 512, or upload `assets/icon.png`) |
 | Has an MCP App | Unticked. The server has had no view since 0.5.0. Check the box after every save: on the Cloud FinOps listing it was found ticked again on 2026-11-11 |
 
-The support field takes the issue tracker, as the Cloud FinOps listing does.
-The policy asks for "verified contact information and support channels for
+The support field takes the issue tracker, as the Cloud FinOps listing does
+(the owner's choice, 2026-11-12). The policy asks for "verified contact information and support channels for
 users with product or security concerns": the privacy page also gives
 `optimnow.io/contact`.
 
 ### URL slug
 
-Permanent once published. **The owner's decision.**
+Permanent once published. The owner's choice of 2026-11-12, to confirm on the
+day: it cannot be changed afterwards.
 
 ```text
-optimnow-optimtoken
+optimnow-ai-economics
 ```
 
-It follows the Cloud FinOps listing, whose slug is `optimnow-cloud-finops`.
-The alternative is `optimtoken`, shorter, and the name of the site.
+It follows the Cloud FinOps listing, whose slug is `optimnow-cloud-finops`,
+and it holds no product name, so it survives a renaming.
 
 ## Step 4. Use cases
 
@@ -155,23 +165,54 @@ The connector reads data only.
 
 The block has two columns per row, **Use case** and **Example prompt**, and the
 reviewer reads a row as the two joined. The policy asks for at least three
-working examples; these are eight, one for each tool. If the block takes fewer
-rows, keep rows 2, 5, 6 and 8: they are the least like a plain price lookup.
+working examples. There are twelve here, in two groups, and every tool has at
+least one. If the block takes fewer rows, enter the plain questions first.
+
+Plain questions, as a decision-maker asks them:
 
 | # | Use case | Example prompt | Tool |
 |---|---|---|---|
-| 1 | Survey the market under a price and a quality bar | Show me the models under $1 per million input tokens with an Arena ELO above 1300. | `compare-llm-models` |
-| 2 | Pick a model for a workload and a budget | Recommend a model for support tickets under $500 a month. | `recommend-llm-model` |
-| 3 | Compare named models | Compare Claude Sonnet 5.5, GPT-5.5 and Gemini 4 Argon side by side. | `compare-models-side-by-side` |
-| 4 | Budget a workload | About 800 input tokens and 200 output tokens per request, 4 million requests a month, 60% of the prompt cached: what does that cost on Claude Sonnet 5.5? | `estimate-llm-cost` |
-| 5 | Choose where to buy a model | Who sells Llama 3.3 70B, and what would a coding workload cost at the cheapest host? | `compare-model-hosts` |
-| 6 | Follow price changes | Which LLM prices changed this week, and which of those are real price changes rather than a change of host? | `track-llm-price-changes` |
-| 7 | Compare compute instances | Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, with what a 3-year commitment saves on each. | `compare-compute-pricing` |
-| 8 | Decide between the API and rented capacity | At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B on support tickets? | `estimate-self-hosting-breakeven` |
+| A1 | Find the best value on the market | Show me the smartest models for the lowest price. | `compare-llm-models` |
+| A2 | See what the leading models cost | What do the top frontier models cost today? | `compare-llm-models` |
+| A3 | Weigh open models against proprietary ones | How do the best open-weights models compare with the best proprietary ones, on quality and on price? | `compare-llm-models` |
+| A4 | Pick a model for a workload and a budget | Recommend a model for support tickets under $500 a month. | `recommend-llm-model` |
+| A5 | Know when a price moves | Which AI model prices changed this week? | `track-llm-price-changes` |
+| A6 | See what a discount is worth on compute | What does an 8-vCPU, 32 GB instance cost on AWS in Europe: on demand, on spot and with a 1-year or 3-year savings plan? | `compare-compute-pricing` |
 
-Each prompt was answered by production on 2026-11-12 through the call of step
-8 with the same number. Every model name resolved to one model: "Llama 3.3
-70B" to Meta Llama 3.3 70B Instruct, the three names of row 3 to themselves.
+Detailed questions, as a FinOps practitioner or an engineer asks them:
+
+| # | Use case | Example prompt | Tool |
+|---|---|---|---|
+| B1 | Compare named models | Compare Claude Sonnet 5.5, GPT-5.5 and Gemini 4 Argon side by side. | `compare-models-side-by-side` |
+| B2 | Budget a workload | About 800 input tokens and 200 output tokens per request, 4 million requests a month, 60% of the prompt cached: what does that cost on Claude Sonnet 5.5? | `estimate-llm-cost` |
+| B3 | Choose where to buy a model | Who sells Llama 3.3 70B, and what would a coding workload cost at the cheapest host? | `compare-model-hosts` |
+| B4 | Tell a price change from a change of host | Which of this week's price moves are real price changes rather than a change of the host quoted? | `track-llm-price-changes` |
+| B5 | Compare compute across providers | Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, with what a 3-year commitment saves on each. | `compare-compute-pricing` |
+| B6 | Decide between the API and rented capacity | At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B on support tickets? | `estimate-self-hosting-breakeven` |
+
+What production answered on 2026-11-12, by the call a model would make:
+
+- A1: `compare-llm-models` with `sortBy: "efficiency"`.
+- A2: `compare-llm-models` with `category: "Frontier"`.
+- A3: `compare-llm-models` once with `openness: "Open weights"` and once with
+  `openness: "Proprietary"`. A third bucket exists, `Open source`: an answer
+  that says "open models" should say which it means.
+- A6: `compare-compute-pricing` with `region: "europe"`, `provider: "AWS"` and
+  8 vCPUs and 32 GB as both minimum and maximum. Each row carries on demand,
+  spot and the 1-year and 3-year savings plan and reserved rates, each with
+  its saving.
+- A4, A5 and B1 to B6: the calls of step 8.
+
+Every model name resolved to one model: "Llama 3.3 70B" to Meta Llama 3.3 70B
+Instruct, the three names of B1 to themselves.
+
+**Not used: "Which frontier models were released most recently, and what do
+they cost?"** The owner asked for it on 2026-11-12. At 0.11.0 the answers of
+`compare-llm-models` do not print a release date and cannot be sorted by it
+(the date exists in `structuredContent` only, to the month), so an assistant
+would answer the "most recently" part from memory, which is what this
+connector exists to prevent. A2 is the nearest question the server answers.
+Add the other one when the tool prints the release date and sorts on it.
 
 ## Step 5. Company
 
@@ -217,7 +258,7 @@ Each answer is a text block, with the same figures as structured content, and it
 
 A model name that matches nothing is reported by name, for example: "Zzyzx Nonexistent 9" matched no model. An invalid argument returns a validation error that names the field, for example: expected number, received string at limit. Neither is a bare 500.
 
-The same 8 questions in plain words, for a chat with the connector on, are the example prompts of the Use cases step.
+The same questions in plain words, for a chat with the connector on, are the example prompts of the Use cases step.
 ```
 
 Change the date in that text to the day the calls are run again. Tick "I have
