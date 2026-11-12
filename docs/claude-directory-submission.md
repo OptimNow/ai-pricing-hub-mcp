@@ -1,11 +1,12 @@
 # Publishing this server in the Claude connectors directory
 
-Status as of 2026-11-11: **not submitted, and not ready to be.** Version 0.5.0
-makes the server tools only (no MCP App, no widgets) and fixes a defect that
-would have failed review. It was deployed on 2026-11-11 and
-`scripts/check-connector.mjs` passed against production the same day. The
-portal reads the live server, so run that script again after any later deploy,
-then work through "Before you submit" below.
+Status as of 2026-11-12: **not submitted. The server is ready; the listing
+material is not written.** Production serves 0.11.0, and the five blocking
+checks of "Before you submit" passed that day (each says how it was checked).
+What is left is item 6 there, and the listing copy and example prompts, which
+the owner decided on 2026-11-12 to write on the day of the submission. The
+portal reads the live server, so run `scripts/check-connector.mjs` again after
+any later deploy.
 
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
@@ -14,6 +15,11 @@ much the same material, so prepare it once.
 
 - **Portal:** <https://claude.ai/directory/manage>, **Submit new**, then
   **MCP connector**. There is no separate "Claude Marketplace" submission.
+- **Not the MCP registry.** `server.json` is published to
+  <https://registry.modelcontextprotocol.io> after each deploy (`DESIGN.md`,
+  "Publishing to the MCP registry"). That is another listing, kept by another
+  party, and publishing there submits nothing here: the portal asks for the URL
+  and reads the live server.
 - **Plan:** any paid plan (Pro, Max, Ultra, Team or Enterprise). On an
   individual plan you submit from your own account; on Team and Enterprise an
   Owner submits. The listing belongs to the account or organisation you submit
@@ -46,11 +52,13 @@ returns them as `structuredContent` too.
 
 ## Before you submit
 
-In this order. The first three are blocking.
+In this order. Items 1 to 5 were re-checked on 2026-11-12, against 0.11.0 in
+production; item 6 is open.
 
-1. **Done on 2026-11-11: 0.5.0 is deployed and `node scripts/check-connector.mjs`
-   passes against the published URL.** Run it again after every deploy. Against
-   0.4.2 it failed on two counts, both of which a reviewer would have met:
+1. **Done, last on 2026-11-12: `node scripts/check-connector.mjs` passes against
+   the published URL** (0.11.0, after the deploy of that day). Run it again
+   after every deploy. Against 0.4.2 it failed on two counts, both of which a
+   reviewer would have met:
    - **Concurrent calls fail.** Under 0.4.2, a tool call that overlaps another
      is answered HTTP 500 "Internal server error": eight concurrent calls
      behind one slow upstream fetch gave seven 500s in production on
@@ -60,29 +68,43 @@ In this order. The first three are blocking.
      turns Degraded above a 5% error rate. Fixed in 0.5.0 (one MCP server per
      request).
    - The five widget resources were still listed.
-2. **Make the documentation and privacy pages readable without a browser.**
-   `https://optimtoken.optimnow.io/mcp` and `/privacy` answered HTTP 429 with a
-   "Vercel Security Checkpoint" page to every non-browser client tried on
-   2026-11-11 (curl, with and without a browser or `Claude-User` user agent).
-   They render normally in a browser, and `/api/*`, `/llms.txt` and
-   `/openapi.json` are not challenged. Whether Anthropic's automatic scan
-   fetches the two URLs is not documented; a reviewer in a browser will see
-   them. Exempt the public pages from the challenge in the site's Vercel
-   firewall rather than find out.
-3. **Update the site's `/mcp` page** (in the site's repository, not this one).
-   It still says "the widgets render only for that form" and lists the old
-   `estimate-llm-cost` parameters (`cacheHitRate` and `batchEligible` are
-   new). The policy asks that documentation "precisely match actual
-   functionality". Its registry name is also lower-cased
-   (`io.github.optimnow/...`); the registry entry is `io.github.OptimNow/ai-pricing-hub`.
+2. **Check that the documentation and privacy pages are readable without a
+   browser.** On 2026-11-12 `https://optimtoken.optimnow.io/mcp` and `/privacy`
+   answered HTTP 200 with their full text to curl (26 KB and 6 KB, no challenge
+   page). The day before, both answered HTTP 429 with a "Vercel Security
+   Checkpoint" page to every non-browser client tried (curl, with and without
+   a browser or `Claude-User` user agent), while rendering normally in a
+   browser; `/api/*`, `/llms.txt` and `/openapi.json` were not challenged.
+   What lifted the challenge is not known, and the check of 2026-11-12 is one
+   client from one network: repeat the two requests on the day of the
+   submission. Whether Anthropic's automatic scan fetches the two URLs is not
+   documented. If the challenge is back, exempt the public pages from it in
+   the site's Vercel firewall rather than find out.
+3. **Done on 2026-11-12: the site's `/mcp` page describes this server** (in the
+   site's repository, not this one). It lists the eight tools and the two
+   tiers, names `cacheHitRate`, carries no sentence about widgets, and writes
+   the registry name as the registry does (`io.github.OptimNow/ai-pricing-hub`).
+   The policy asks that documentation "precisely match actual functionality",
+   so the page moves with every tool or parameter added here.
 4. **Done in 0.11.0: the OpenRouter fallback is removed.** The checklist says
    "your server must call your own first-party APIs, or APIs you legitimately
    proxy". Tier 1 is our own API, and since 0.11.0 it is the only API this
    server calls: when the site is unreachable the LLM tools answer from the
    embedded snapshot. Until then a second tier called `openrouter.ai`'s public
    model list directly, which would have had to be declared.
-5. **Run `npm run check-parity`** so the figures the listing will show are the
-   site's. See "Keeping in sync" in `DESIGN.md`.
+5. **Done on 2026-11-12, and daily since: `npm run check-parity` reports no
+   difference**, so the figures the listing will show are the site's. The
+   site's repository runs it every day (`mcp-parity.yml` there) and opens an
+   issue on a difference: check that no `mcp-parity` issue is open. See
+   "Keeping in sync" in `DESIGN.md`.
+6. **Open: the repository's description on GitHub.** The About box of
+   `OptimNow/ai-pricing-hub-mcp` read "Live data from OpenRouter, AWS, Azure,
+   GCP, OCI, OVH, DigitalOcean" on 2026-11-12. The server reads none of them:
+   since 0.11.0 it calls `optimtoken.optimnow.io` and nothing else, which is
+   also what item 4 and the Data handling step declare. A reviewer who opens
+   the repository reads that line first. It is a setting of the repository,
+   edited on github.com (the gear beside About); nothing in this checkout
+   holds it.
 
 ## What is already correct
 
@@ -109,12 +131,18 @@ policy asks a server to be "frugal with their use of tokens".
 
 ## Material to prepare
 
-- **Icon.** The only square asset on the site is `/optimnow-icon.png` at
-  96 × 96. Have a larger square PNG ready; the portal does not publish a size,
-  so 512 × 512 is safe.
-- **Listing copy.** Limits: name up to 100 characters, one-liner up to 200,
-  description up to 2,000, one to five categories from the portal's list, and a
-  URL slug that is **permanent once published**. Suggested:
+- **Icon.** `assets/icon.png`, 512 × 512, square, in this repository since
+  2026-11-12 (the portal does not publish a size). It is rendered from
+  `assets/icon.svg`, the OptimNow mark as the Cloud FinOps connector's listing
+  uses it (`plugins/cloud-finops/.claude-plugin/icon.svg` in
+  `OptimNow/cloud-finops-skills`; that listing uploaded a 96 × 96 PNG of the
+  same mark). To upload it, or to give the portal an address:
+  `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png`.
+- **Listing copy. To write on the day of the submission** (owner's decision,
+  2026-11-12); what follows is a starting point, not the text. Limits: name up
+  to 100 characters, one-liner up to 200, description up to 2,000, one to five
+  categories from the portal's list, and a URL slug that is **permanent once
+  published**. Suggested:
   - Name: `OptimToken`
   - Slug: `optimtoken`
   - One-liner: "Live, verified LLM and cloud compute prices: cost per request, monthly budget, and a ranked model pick for your workload."
@@ -123,7 +151,8 @@ policy asks a server to be "frugal with their use of tokens".
     and that every answer carries a `provenance` block saying which source
     served it and whether the prices are vendor-verified. Do not claim or
     imply Anthropic endorsement; the terms forbid it.
-- **Example prompts.** The policy asks for at least three that work. Model
+- **Example prompts. To settle on the day of the submission**, for the reason
+  given next. The policy asks for at least three that work. Model
   names age: on 2026-11-11 "Gemini 3.1 Pro" resolved to a Preview model with an
   ambiguity note, and GPT-4o is two generations old. Check each still resolves
   cleanly the day you paste it.
@@ -170,8 +199,8 @@ Progress saves in the browser between steps.
 9. **Compliance.** Seven acknowledgments: directory guidelines, first-party
    API usage, financial transactions, AI media generation, prompt injection,
    conversation data collection, public documentation. All seven apply
-   cleanly to a read-only pricing tool, first-party API usage subject to the
-   tier 2 decision.
+   cleanly to a read-only pricing tool. First-party API usage holds since
+   0.11.0: the site's API is the only one the server calls.
 10. **Review and submit.** Quality warnings such as very short answers are
     shown here and forwarded to the review team.
 
