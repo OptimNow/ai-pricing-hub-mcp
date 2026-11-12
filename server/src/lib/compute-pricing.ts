@@ -1,11 +1,13 @@
 /**
  * Cloud compute pricing, fetched from optimtoken.optimnow.io.
  *
- * The static array in ../data/pricing-data.ts is 137 frozen rows against the
- * site's ~5,800, has no region dimension, and nobody re-snapshots it. It stays
- * as a fallback so the server still answers without network, and nothing more.
+ * The static array in ../data/pricing-data.ts is 137 rows against the site's
+ * ~6,000 and has no region dimension. It stays as a fallback so the server
+ * still answers without network, and nothing more. Nobody re-snapshotted it
+ * from March to November 2026; scripts/refresh-compute-fallback.mjs does now,
+ * and the answer states the day (`computeDataLastUpdated`).
  *
- * Two upstream properties shape this module:
+ * Three upstream properties shape this module:
  *
  *  - The site assembles each region from six live provider APIs. A cache MISS
  *    cost 9 to 20 s on 2026-11-12; a HIT costs ~0.3s. Every distinct query

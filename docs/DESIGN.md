@@ -173,6 +173,7 @@ ai-pricing-hub-mcp/
 │   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
+│   ├── refresh-compute-fallback.mjs  # Re-reads the figures of the 137 static compute rows
 │   ├── check-site-parity.mjs         # Manual: run this server's logic and the site's over the live catalogue
 │   ├── check-connector.mjs           # Manual: call a deployed connector: tools, tier, eight calls at once
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
@@ -508,7 +509,8 @@ Three things keep the two honest:
   is private. **Run it before each release and after any change to the cost
   code.** 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
   scores, 3 badges, 17 openness buckets. After: none.
-- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated` only: the static compute rows have their own date, `computeDataLastUpdated`, because the script never touches them.
+- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated` only: the static compute rows have their own date, `computeDataLastUpdated`, and their own script.
+- `npm run refresh-compute-fallback` (0.10.1) rewrites the figures of the 137 static compute rows, the ones served when the site cannot be reached at all. Nobody had re-snapshotted them since 2026-03-06: on 2026-11-12, 96 of the 137 differed from what the site itself serves for a provider it cannot read, on-demand rates by up to 69% and savings-plan rates by up to 28%. Each row is read from the live catalogue (`?region=us-east&os=Linux`, the URL this server and the compute page share) when it lists the instance type, 118 rows that day, and otherwise from the site's own static catalogue in its checkout, 19 rows (16 GCP types and 3 DigitalOcean sizes the site only serves while it cannot read the provider). The sample and its section comments are kept: a row is added or removed by hand. The script refuses an answer in which a provider was not read live, because that answer holds the site's static rows in place of today's prices, and a test holds every row to the one layout the script recognises.
 - The tier-2 ELO table in `lib/llm-models.ts` is the site's, copied whole between the `ELO-SCORES-START/END` markers together with `ELO_AS_OF`. The site rewrites every value weekly from one read of Arena's leaderboard; a partial copy would mix two scales. The rest of the tier-2 transform (exclusions, licence prefixes, release dates) was last ported in August 2026 and has not been re-read since.
 
 Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.

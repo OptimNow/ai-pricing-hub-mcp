@@ -11,6 +11,7 @@
     "start": "node dist/server/src/index.js",
     "deploy": "fly deploy",
     "refresh-fallback": "node scripts/refresh-llm-fallback.mjs",
+    "refresh-compute-fallback": "node scripts/refresh-compute-fallback.mjs",
     "check-parity": "node scripts/check-site-parity.mjs",
     "test": "node --import tsx --test \"server/src/**/*.test.ts\""
   },

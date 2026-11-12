@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   CACHE_TTL_MS,
   UNVERIFIED_CACHE_TTL_MS,
@@ -8,7 +10,7 @@ import {
   hostPricingKey,
   resetLLMModelCache,
 } from "./llm-models.js";
-import { llmModels, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
+import { llmModels, computeInstances, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
   resetComputePricingCache,
@@ -555,6 +557,24 @@ test("each snapshot states its own date", () => {
   // snapshot re-dated compute rows it had not touched.
   assert.match(dataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
   assert.match(computeDataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("the refresh script can see every static compute row", () => {
+  // scripts/refresh-compute-fallback.mjs rewrites the rows between two markers,
+  // line by line, and leaves alone any line it does not recognise as a row. So
+  // a row added by hand in another layout would keep its figures for ever
+  // while the date above it moved. The pattern is the script's own ROW.
+  const source = readFileSync(fileURLToPath(new URL("../data/pricing-data.ts", import.meta.url)), "utf8");
+  const start = source.indexOf("// COMPUTE-FALLBACK-START");
+  const end = source.indexOf("// COMPUTE-FALLBACK-END");
+  assert.ok(start > -1 && end > start, "pricing-data.ts lost the markers the script rewrites between");
+
+  const ROW = /^\s*\{ provider: "[^"]+", instanceType: "[^"]+", os: "Linux", .*\},\s*$/;
+  const seen = source.slice(start, end).split(/\r?\n/).filter(line => ROW.test(line));
+  assert.equal(seen.length, computeInstances.length, "a static row is laid out in a way the refresh script skips");
+  for (const row of computeInstances) {
+    assert.equal(typeof row.onDemandHourly, "number", `${row.provider} ${row.instanceType} has no on-demand rate`);
+  }
 });
 
 // ── Per-host prices ─────────────────────────────────────────────────
