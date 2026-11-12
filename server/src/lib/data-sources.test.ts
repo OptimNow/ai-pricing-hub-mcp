@@ -1,12 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { coerceSiteModel, fetchLLMModels, hostPricingKey, resetLLMModelCache } from "./llm-models.js";
-import { llmModels, computeDataLastUpdated, dataLastUpdated } from "../data/pricing-data.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import {
+  CACHE_TTL_MS,
+  FALLBACK_CACHE_TTL_MS,
+  coerceSiteModel,
+  fetchLLMModels,
+  hostPricingKey,
+  resetLLMModelCache,
+} from "./llm-models.js";
+import {
+  llmModels,
+  computeInstances,
+  computeDataLastUpdated,
+  dataLastUpdated,
+  llmEloAsOf,
+} from "../data/pricing-data.js";
 import {
   fetchComputeInstances,
   resetComputePricingCache,
   primeComputePricingCache,
   setComputeTimeoutForTest,
+  isDegradedCatalogue,
+  incompleteCatalogueCaveat,
+  DEGRADED_CACHE_TTL_MS,
+  PRICING_OS,
   UPSTREAM_TIMEOUT_MS,
   MEASURED_COLD_REBUILD_MS,
   MIN_COLD_PATH_HEADROOM,
@@ -20,16 +39,20 @@ import {
 import { isRecognisedLicence, opennessOf } from "./openness.js";
 
 /**
- * The fallback chain is the part of this server that only runs when something
- * is already broken, which is exactly why it needs tests: in production nobody
- * sees tier 2 or tier 3 until the day they are serving every request.
+ * The fallback is the part of this server that only runs when something is
+ * already broken, which is exactly why it needs tests: in production nobody
+ * sees the snapshot until the day it is serving every request.
  *
  * The property that matters is not "a fallback exists" but "a fallback says so".
- * OpenRouter intermittently publishes a model at exactly half its vendor's list
- * rate, and the corrections for that live only on the site. So a response that
- * fell past tier 1 is serving uncorrected prices to a caller whose tool
- * description tells it to report figures exactly as returned. Silence there is
- * the bug.
+ * The snapshot holds the prices, licences and Arena scores the site served on
+ * the day it was taken. A response that could not be read from the site is
+ * serving that day's figures to a caller whose tool description tells it to
+ * report figures exactly as returned. Silence there is the bug.
+ *
+ * Until 0.11.0 a second live source stood between the two: this server's own
+ * transform of OpenRouter's catalogue. It is gone (the reasons are at the head
+ * of lib/llm-models.ts), and a test below holds that nothing but the site is
+ * ever asked.
  */
 
 // ── Fixtures ────────────────────────────────────────────────────────
@@ -62,27 +85,6 @@ function siteModelsResponse(overrides: Record<string, unknown> = {}) {
       eloAsOf: "2026-08-13",
     },
     ...overrides,
-  };
-}
-
-/** Enough OpenRouter rows to clear the same floor after transform. */
-function openRouterPayload(count = 120) {
-  return {
-    data: Array.from({ length: count }, (_, i) => ({
-      id: `testvendor/alpha-${i}`,
-      name: `Alpha ${i}`,
-      created: 1_750_000_000,
-      description: "test model",
-      context_length: 128_000,
-      architecture: {
-        modality: "text->text",
-        input_modalities: ["text"],
-        output_modalities: ["text"],
-      },
-      pricing: { prompt: "0.000001", completion: "0.000002" },
-      top_provider: { context_length: 128_000, max_completion_tokens: 4096 },
-      supported_parameters: ["tools"],
-    })),
   };
 }
 
@@ -208,7 +210,6 @@ function reset() {
 }
 
 const isSite = (url: string) => url.startsWith(OPTIMTOKEN_BASE_URL);
-const isOpenRouter = (url: string) => url.includes("openrouter.ai");
 
 // ── One base URL, env-overridable ───────────────────────────────────
 
@@ -226,7 +227,7 @@ test("every upstream call goes through the one configured base URL", () => {
   );
 });
 
-// ── LLM: tier ordering ──────────────────────────────────────────────
+// ── LLM: the site, or the snapshot of it ────────────────────────────
 
 test("tier 1 — the site serves, and its prices are marked verified", async (t) => {
   t.after(restoreFetch);
@@ -242,37 +243,10 @@ test("tier 1 — the site serves, and its prices are marked verified", async (t)
   assert.equal(result.provenance.upstreamTimestamp, "2026-08-17T19:43:36.090Z");
   assert.equal(result.provenance.catalogTotal, 257);
   assert.equal(result.provenance.upstreamSchemaVersion, "2.0");
-  assert.equal(result.eloAsOf, "2026-08-13", "the site's own ELO vintage wins over the local constant");
-  assert.ok(!requested.some(isOpenRouter), "tier 1 succeeded, so tier 2 must not have been called");
+  assert.equal(result.eloAsOf, "2026-08-13", "the site's own ELO vintage wins over the snapshot's");
 });
 
-test("tier 2 — the site is down, OpenRouter serves, and the prices are flagged unverified", async (t) => {
-  t.after(restoreFetch);
-  reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-
-  const result = await fetchLLMModels();
-
-  assert.equal(result.source, "openrouter", "the existing direct path is kept as a working second tier");
-  assert.equal(result.provenance.tier, 2);
-  assert.equal(result.provenance.pricesVerified, false);
-
-  // The whole reason the site is preferred: this is the tier where GPT-5.6 Sol
-  // comes back at half of what OpenAI charges.
-  assert.match(
-    result.provenance.notice ?? "",
-    /UNVERIFIED PRICING/,
-    "a fallback must not silently downgrade correctness",
-  );
-  assert.match(result.provenance.notice ?? "", /half/i);
-  assert.ok(requested.some(isSite), "the site must be tried before OpenRouter");
-});
-
-test("tier 3 — both live sources are down, so the snapshot serves and says it is stale", async (t) => {
+test("tier 2 — the site cannot be read, so the snapshot serves and says which day it is from", async (t) => {
   t.after(restoreFetch);
   reset();
   stubFetch(() => ({ throws: true }));
@@ -280,28 +254,99 @@ test("tier 3 — both live sources are down, so the snapshot serves and says it 
   const result = await fetchLLMModels();
 
   assert.equal(result.source, "static-fallback");
-  assert.equal(result.provenance.tier, 3);
+  // 2, as on the compute side. Until 0.11.0 the snapshot was tier 3 and tier 2
+  // was direct OpenRouter: the numbering changed with the removal.
+  assert.equal(result.provenance.tier, 2);
   assert.equal(result.provenance.pricesVerified, false);
-  assert.match(result.provenance.notice ?? "", /STALE PRICING/);
-  assert.ok(result.provenance.dataAsOf, "the snapshot must date itself");
-  assert.ok(result.models.length > 0, "the snapshot is the whole point of tier 3");
+  assert.ok(result.models.length > 0, "the snapshot is the whole point of the fallback");
+
+  // What it is, and of which day: the caller quotes the number either way.
+  assert.match(result.provenance.notice ?? "", /^STALE PRICING/);
+  assert.match(result.provenance.notice ?? "", new RegExp(`snapshot of it taken on ${dataLastUpdated}`));
+  assert.equal(result.provenance.dataAsOf, dataLastUpdated);
+  assert.match(result.provenance.label, new RegExp(`taken ${dataLastUpdated}`));
+  // The Arena scores are the snapshot's, so their date is the one the site
+  // gave on the day it was taken, not a constant kept beside a copied table.
+  assert.equal(result.eloAsOf, llmEloAsOf);
+  assert.equal(result.provenance.eloAsOf, llmEloAsOf);
+  assert.match(llmEloAsOf, /^\d{4}-\d{2}-\d{2}$/);
 });
 
-test("the tiers are tried strictly in order", async (t) => {
+test("nothing but the site is ever asked for the catalogue", async (t) => {
+  t.after(restoreFetch);
+
+  // Whatever the site answers, there is no second live source to turn to.
+  // The one that existed until 0.11.0 was a port of the site's transform that
+  // only ran when the site was down, so nothing measured it: when it was, the
+  // openness label differed from the site's on 84 of 288 models.
+  const answers: ReturnType<Responder>[] = [
+    { status: 503 },
+    { throws: true },
+    { badJson: true },
+    { body: { models: [], meta: { source: "openrouter" } } },
+  ];
+  for (const answer of answers) {
+    reset();
+    stubFetch(() => answer);
+    const result = await fetchLLMModels();
+    assert.equal(result.source, "static-fallback");
+    assert.deepEqual(requested, [`${OPTIMTOKEN_BASE_URL}/api/llm-models`]);
+  }
+
+  const source = readFileSync(fileURLToPath(new URL("./llm-models.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(source, /openrouter\.ai/, "lib/llm-models.ts names another host to read the catalogue from");
+});
+
+// ── LLM: how long each answer is remembered ────────────────────────
+//
+// Reproduced on 2026-11-12 with the site answering HTTP 502 once and 200 a
+// second later: this server stayed on its fallback for 15 minutes and asked
+// the site once in that time. The fallback was direct OpenRouter then, and
+// shared the site's memo. It is the snapshot now, and it is remembered for a
+// minute: long enough that a hanging site costs one caller its timeout and not
+// every caller, short enough that a single failed read is over in a minute.
+
+test("one failed read of the site does not hold the snapshot for the site's TTL", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 500 };
-    if (isOpenRouter(url)) return { status: 500 };
-    return { throws: true };
-  });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let siteUp = false;
+  stubFetch(url => (isSite(url) ? (siteUp ? { body: siteModelsResponse() } : { status: 502 }) : { throws: true }));
+
+  assert.equal((await fetchLLMModels()).provenance.tier, 2);
+  assert.equal(requested.length, 1);
+
+  // The site answers again at once. Inside the short memo it is not asked:
+  // while it hangs, each attempt costs its whole timeout.
+  siteUp = true;
+  t.mock.timers.tick(FALLBACK_CACHE_TTL_MS - 1_000);
+  assert.equal((await fetchLLMModels()).provenance.tier, 2);
+  assert.equal(requested.length, 1, "inside the short memo the site is not asked again");
+
+  // Past it, the site is asked, and its prices are back.
+  t.mock.timers.tick(2_000);
+  const recovered = await fetchLLMModels();
+  assert.equal(recovered.provenance.tier, 1, "a minute later the site must be serving again");
+  assert.equal(recovered.provenance.pricesVerified, true);
+  assert.equal(recovered.provenance.notice, undefined);
+  assert.ok(FALLBACK_CACHE_TTL_MS < CACHE_TTL_MS, "the snapshot must be remembered for less than the site");
+});
+
+test("the site's own catalogue is still reused for the full TTL", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  stubFetch(url => (isSite(url) ? { body: siteModelsResponse() } : { throws: true }));
 
   await fetchLLMModels();
+  t.mock.timers.tick(CACHE_TTL_MS - 1_000);
+  assert.equal((await fetchLLMModels()).provenance.tier, 1);
+  assert.equal(requested.length, 1, "a tier-1 catalogue is not refetched inside its TTL");
 
-  const siteIndex = requested.findIndex(isSite);
-  const orIndex = requested.findIndex(isOpenRouter);
-  assert.ok(siteIndex > -1 && orIndex > -1, "both live tiers must be attempted");
-  assert.ok(siteIndex < orIndex, "the site is tier 1 and must be asked first");
+  t.mock.timers.tick(2_000);
+  await fetchLLMModels();
+  assert.equal(requested.length, 2);
 });
 
 // ── LLM: refusing bad payloads ──────────────────────────────────────
@@ -309,56 +354,44 @@ test("the tiers are tried strictly in order", async (t) => {
 test("a malformed site payload falls through instead of being served", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: { models: "not an array", meta: { source: "openrouter" } } };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url =>
+    isSite(url) ? { body: { models: "not an array", meta: { source: "openrouter" } } } : { throws: true },
+  );
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter", "a 200 with a broken body is an upstream failure");
+  assert.equal(result.source, "static-fallback", "a 200 with a broken body is an upstream failure");
 });
 
 test("an empty site payload falls through rather than becoming an empty catalogue", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: { models: [], meta: { source: "openrouter" } } };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url => (isSite(url) ? { body: { models: [], meta: { source: "openrouter" } } } : { throws: true }));
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter");
+  assert.equal(result.source, "static-fallback");
   assert.ok(result.models.length > 0, "'no models found' must never be the answer to an empty 200");
 });
 
 test("a collapsed-but-non-empty site catalogue is refused by the floor", async (t) => {
   t.after(restoreFetch);
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { body: siteModelsResponse({ models: siteModels(5) }) };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  stubFetch(url => (isSite(url) ? { body: siteModelsResponse({ models: siteModels(5) }) } : { throws: true }));
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter", "5 models is a broken upstream, not a small catalogue");
+  assert.equal(result.source, "static-fallback", "5 models is a broken upstream, not a small catalogue");
 });
 
 test("the site serving its own fallback is not treated as authoritative", async (t) => {
   t.after(restoreFetch);
   reset();
   // meta.source === "error" means the site itself fell back to static data, so
-  // it carries no fresh corrections and is no better than our own tier 2.
-  stubFetch(url => {
-    if (isSite(url)) return { body: siteModelsResponse({ meta: { source: "error", total: 120 } }) };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
+  // it carries no fresh corrections and is no better than our own snapshot.
+  stubFetch(url =>
+    isSite(url) ? { body: siteModelsResponse({ meta: { source: "error", total: 120 } }) } : { throws: true },
+  );
 
   const result = await fetchLLMModels();
-  assert.equal(result.source, "openrouter");
+  assert.equal(result.source, "static-fallback");
   assert.equal(result.provenance.pricesVerified, false);
 });
 
@@ -437,7 +470,7 @@ test("a retirement notice survives the trip from the site", () => {
   }
 });
 
-test("retirement notices are dated on tier 1, and absent with a warning on the fallback tiers", async (t) => {
+test("retirement notices are dated on tier 1, and absent with a warning on the snapshot", async (t) => {
   t.after(restoreFetch);
 
   reset();
@@ -457,23 +490,16 @@ test("retirement notices are dated on tier 1, and absent with a warning on the f
   });
   assert.equal(tier1.models.filter(m => m.deprecation).length, 1, "and no other model gained one");
 
-  // Below tier 1 nobody holds the table. No model carries a notice, and the
-  // warning that leads every answer says that this silence proves nothing.
-  reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-  const tier2 = await fetchLLMModels();
-  reset();
-  stubFetch(() => ({ throws: true }));
-  const tier3 = await fetchLLMModels();
-
-  for (const [name, result] of [["tier 2", tier2], ["tier 3", tier3]] as const) {
-    assert.equal(result.provenance.deprecationsVerifiedAt, undefined, `${name} dates no notice`);
-    assert.equal(result.models.filter(m => m.deprecation).length, 0, `${name} carries no notice`);
-    assert.match(result.provenance.notice ?? "", /Retirement notices are served by optimtoken\.optimnow\.io only/, name);
+  // The snapshot holds no copy of the table. No model carries a notice, and
+  // the warning that leads every answer says that this silence proves nothing.
+  for (const answer of [{ status: 503 }, { throws: true }] as ReturnType<Responder>[]) {
+    reset();
+    stubFetch(() => answer);
+    const snapshot = await fetchLLMModels();
+    assert.equal(snapshot.provenance.tier, 2);
+    assert.equal(snapshot.provenance.deprecationsVerifiedAt, undefined, "the snapshot dates no notice");
+    assert.equal(snapshot.models.filter(m => m.deprecation).length, 0, "the snapshot carries no notice");
+    assert.match(snapshot.provenance.notice ?? "", /Retirement notices are served by optimtoken\.optimnow\.io only/);
   }
 });
 
@@ -489,6 +515,24 @@ test("each snapshot states its own date", () => {
   // snapshot re-dated compute rows it had not touched.
   assert.match(dataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
   assert.match(computeDataLastUpdated, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("the refresh script can see every static compute row", () => {
+  // scripts/refresh-compute-fallback.mjs rewrites the rows between two markers,
+  // line by line, and leaves alone any line it does not recognise as a row. So
+  // a row added by hand in another layout would keep its figures for ever
+  // while the date above it moved. The pattern is the script's own ROW.
+  const source = readFileSync(fileURLToPath(new URL("../data/pricing-data.ts", import.meta.url)), "utf8");
+  const start = source.indexOf("// COMPUTE-FALLBACK-START");
+  const end = source.indexOf("// COMPUTE-FALLBACK-END");
+  assert.ok(start > -1 && end > start, "pricing-data.ts lost the markers the script rewrites between");
+
+  const ROW = /^\s*\{ provider: "[^"]+", instanceType: "[^"]+", os: "Linux", .*\},\s*$/;
+  const seen = source.slice(start, end).split(/\r?\n/).filter(line => ROW.test(line));
+  assert.equal(seen.length, computeInstances.length, "a static row is laid out in a way the refresh script skips");
+  for (const row of computeInstances) {
+    assert.equal(typeof row.onDemandHourly, "number", `${row.provider} ${row.instanceType} has no on-demand rate`);
+  }
 });
 
 // ── Per-host prices ─────────────────────────────────────────────────
@@ -543,28 +587,16 @@ test("per-host prices travel beside the models, dated, and never on them", async
   }
 });
 
-test("the fallback tiers have no per-host prices and claim none", async (t) => {
+test("the snapshot has no per-host prices and claims none", async (t) => {
   t.after(restoreFetch);
 
   reset();
-  stubFetch(url => {
-    if (isSite(url)) return { status: 503 };
-    if (isOpenRouter(url)) return { body: openRouterPayload() };
-    return { throws: true };
-  });
-  const tier2 = await fetchLLMModels();
-  assert.equal(tier2.provenance.tier, 2);
-  assert.equal(tier2.hostPricing.size, 0);
-  assert.equal(tier2.openRouterIds.size, 0);
-  assert.equal(tier2.provenance.hostPricingAsOf, undefined);
-
-  reset();
   stubFetch(() => ({ throws: true }));
-  const tier3 = await fetchLLMModels();
-  assert.equal(tier3.provenance.tier, 3);
-  assert.equal(tier3.hostPricing.size, 0);
-  assert.equal(tier3.openRouterIds.size, 0);
-  assert.equal(tier3.provenance.hostPricingAsOf, undefined);
+  const snapshot = await fetchLLMModels();
+  assert.equal(snapshot.provenance.tier, 2);
+  assert.equal(snapshot.hostPricing.size, 0);
+  assert.equal(snapshot.openRouterIds.size, 0);
+  assert.equal(snapshot.provenance.hostPricingAsOf, undefined);
 });
 
 test("a site that sends no host data is still tier 1, with nothing to say about hosts", async (t) => {
@@ -660,6 +692,23 @@ test("the region is passed through to the site", async (t) => {
   assert.equal(result.provenance.region, "asia-pacific");
 });
 
+test("the compute catalogue is asked for by the compute page's own URL", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: sitePricingResponse() } : { throws: true }));
+
+  await fetchComputeInstances("europe");
+
+  // Character for character. The site's edge cache is keyed by the URL, and
+  // every miss is a fan-out to six provider APIs, so this server asks for the
+  // entry the site's visitors keep warm instead of holding one of its own
+  // (which is what `?region=europe` alone was, from the day the page started
+  // sending `os`). Another order or another case is answered with a 308 to
+  // this spelling: `canonicalPricingQuery()` in the site's api/pricing.ts.
+  assert.deepEqual(requested, [`${OPTIMTOKEN_BASE_URL}/api/pricing?region=europe&os=Linux`]);
+  assert.equal(PRICING_OS, "Linux");
+});
+
 test("an empty compute payload falls back instead of reporting no instances", async (t) => {
   t.after(restoreFetch);
   reset();
@@ -714,7 +763,9 @@ test("the compute snapshot admits it ignored the region filter", async (t) => {
 // Upstream PR #57 (2026-08-18) cut that 50.5s cold path to ~7.5s, so the
 // budget came down from 55s to 25s. The shape of the bug did not change with
 // it: a budget tuned to the LLM endpoint still makes tier 1 unreachable. Only
-// the number that would do it moved.
+// the number that would do it moved, and it moved again: on 2026-11-12 the
+// cold path measured 9 to 20s, and the budget went to 40s (the table is in
+// lib/compute-pricing.ts).
 
 test("the compute budget covers a cold upstream rebuild", () => {
   // The guard against re-tuning this budget to the LLM endpoint's profile. If
@@ -742,8 +793,8 @@ test("the compute budget keeps real headroom over the cold path", () => {
 test("a slow-but-reachable upstream reaches tier 1 instead of degrading", async (t) => {
   t.after(restoreFetch);
   reset();
-  // 400ms upstream, 5s budget — a wider ratio than production's 8.9s against
-  // 25s, and the inverse of the 50.5s-against-20s that broke.
+  // 400ms upstream, 5s budget — a wider ratio than production's 20s against
+  // 40s, and the inverse of the 50.5s-against-20s that broke.
   setComputeTimeoutForTest(5_000);
   stubFetch(url => (isSite(url) ? { body: sitePricingResponse(), delayMs: 400 } : { throws: true }));
 
@@ -849,6 +900,190 @@ test("tier 1 claims no unapplied filters", async (t) => {
 
   assert.equal(provenance.unappliedFilters, undefined);
   assert.equal(provenance.catalogueIsSubset, undefined);
+  // Every provider the site reads live answered. An error about a part of one
+  // (the fixture's "AWS SavingsPlan: ...") names no provider and is not a gap.
+  assert.deepEqual(provenance.liveProviders, { live: 6, expected: 6 });
+  assert.equal(provenance.degradedProviders, undefined);
+  assert.equal(isDegradedCatalogue(provenance), false);
+  assert.equal(incompleteCatalogueCaveat(provenance), null);
+  assert.doesNotMatch(provenance.notice ?? "", /INCOMPLETE CATALOGUE/);
+});
+
+// ── A provider the site could not read live ─────────────────────────
+//
+// The site does not fail when a provider API does. It serves that provider's
+// built-in static rows under HTTP 200 and says so in meta. Reproduced on
+// 2026-11-12 with the site's own handler and every provider API unreachable:
+// 137 static rows, `liveProviders: { live: 0, expected: 6 }`. This server read
+// none of it, memoised the answer for the hour and answered "0 of 137 compute
+// instances match" for Azure at 64 vCPUs or more, where the live catalogue
+// matched 476 of 3,555.
+
+/** The site's answer on a read where Azure's API throttled it: 18 static Azure
+ *  rows in place of the live catalogue, and the three fields that say so. */
+function degradedPricingResponse() {
+  const base = sitePricingResponse();
+  const azure = Array.from({ length: 18 }, (_, i) => ({
+    ...base.instances[0],
+    provider: "Azure",
+    instanceType: `D${2 + i}s_v5`,
+  }));
+  return {
+    instances: [...base.instances, ...azure],
+    meta: {
+      ...base.meta,
+      sources: { AWS: "live", Azure: "static", Alibaba: "static" },
+      liveProviders: { live: 5, expected: 6 },
+      errors: ["Azure: throttled", "AWS Spot: timeout"],
+    },
+  };
+}
+
+/** Let a background refresh, which nothing awaits, run to its end. */
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
+
+test("a provider the site could not read live is named, counted and called a subset", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  stubFetch(url => (isSite(url) ? { body: degradedPricingResponse() } : { throws: true }));
+
+  const { provenance } = await fetchComputeInstances("us-east");
+
+  assert.equal(provenance.tier, 1, "the site did answer: this is not the snapshot tier");
+  assert.deepEqual(provenance.liveProviders, { live: 5, expected: 6 });
+  // Azure only. Alibaba is static on every read and carries no error; "AWS
+  // Spot" is a part of a provider that was read live.
+  assert.deepEqual(provenance.degradedProviders, [{ provider: "Azure", rows: 18 }]);
+  assert.equal(provenance.catalogueIsSubset, true, "18 rows in place of a provider's catalogue is a subset");
+  assert.equal(isDegradedCatalogue(provenance), true);
+
+  // The notice leads the text of every answer built on this catalogue.
+  assert.match(provenance.notice ?? "", /^INCOMPLETE CATALOGUE/);
+  assert.match(provenance.notice ?? "", /could not read Azure live/);
+  assert.match(provenance.notice ?? "", /18 Azure rows/);
+  assert.match(provenance.notice ?? "", /5 of the 6 providers it reads live answered/);
+  assert.match(provenance.notice ?? "", /does not mean no such instance exists/);
+  // The static columns are still named, after it.
+  assert.match(provenance.notice ?? "", /AWS\.savingsPlan1yr/);
+
+  // Beside "no match": said for Azure and for no provider filter, not for a
+  // provider whose rows are all there.
+  assert.match(incompleteCatalogueCaveat(provenance) ?? "", /^Azure could not be read live/);
+  assert.match(incompleteCatalogueCaveat(provenance, "azure") ?? "", /^Azure could not be read live/);
+  assert.equal(incompleteCatalogueCaveat(provenance, "AWS"), null);
+
+  // With two providers missing, a question about one names that one only.
+  const both = { ...provenance, degradedProviders: [{ provider: "AWS", rows: 51 }, { provider: "Azure", rows: 18 }] };
+  assert.match(incompleteCatalogueCaveat(both) ?? "", /^AWS and Azure could not be read live and are served/);
+  assert.match(incompleteCatalogueCaveat(both, "Azure") ?? "", /^Azure could not be read live and is served/);
+  assert.equal(incompleteCatalogueCaveat(both, "GCP"), null);
+});
+
+test("the site's count alone is enough when its errors name no provider", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  const base = sitePricingResponse();
+  const body = { ...base, meta: { ...base.meta, liveProviders: { live: 4, expected: 6 }, errors: undefined } };
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+
+  const { provenance } = await fetchComputeInstances("us-east");
+
+  // No name is invented: the answer says how many, and where to read which.
+  assert.equal(provenance.degradedProviders, undefined);
+  assert.equal(isDegradedCatalogue(provenance), true);
+  assert.equal(provenance.catalogueIsSubset, true);
+  assert.match(provenance.notice ?? "", /^INCOMPLETE CATALOGUE: optimtoken\.optimnow\.io could not read 2 providers live/);
+  assert.match(incompleteCatalogueCaveat(provenance, "AWS") ?? "", /^Some providers could not be read live/);
+});
+
+test("a liveProviders that is not two sensible counts is dropped, not trusted", async (t) => {
+  t.after(restoreFetch);
+  const base = sitePricingResponse();
+  for (const liveProviders of ["5/6", { live: 7, expected: 6 }, { live: -1, expected: 6 }, { live: 5 }, null]) {
+    reset();
+    stubFetch(url => (isSite(url) ? { body: { ...base, meta: { ...base.meta, liveProviders } } } : { throws: true }));
+    const { provenance } = await fetchComputeInstances("us-east");
+    assert.equal(provenance.liveProviders, undefined, JSON.stringify(liveProviders));
+    assert.equal(isDegradedCatalogue(provenance), false);
+  }
+});
+
+test("an incomplete catalogue is asked again within minutes, a complete one within the hour", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let body: unknown = degradedPricingResponse();
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+
+  assert.equal(isDegradedCatalogue((await fetchComputeInstances("us-east")).provenance), true);
+  assert.equal(requested.length, 1);
+
+  // Inside the short TTL the memo answers and nothing is asked.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS - 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 1);
+
+  // Past it the site is asked again, behind the caller, who is not made to
+  // wait for a rebuild. The site has every provider back.
+  body = sitePricingResponse();
+  t.mock.timers.tick(2_000);
+  const stale = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(stale.provenance), true, "this caller still gets the memo, labelled");
+  assert.ok((stale.provenance.servedFromCacheAgeMs ?? 0) >= DEGRADED_CACHE_TTL_MS);
+  assert.equal(requested.length, 2, "an incomplete memo must be refreshed after minutes, not after the hour");
+  await settle();
+
+  const fresh = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(fresh.provenance), false, "the complete catalogue replaced the incomplete one");
+  assert.equal(fresh.provenance.servedFromCacheAgeMs, undefined);
+
+  // The complete catalogue keeps the hour: minutes later nothing is asked.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 2);
+});
+
+test("an incomplete answer does not replace a complete memo, and is not asked for on every call", async (t) => {
+  t.after(restoreFetch);
+  reset();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+  let body: unknown = sitePricingResponse();
+  stubFetch(url => (isSite(url) ? { body } : { throws: true }));
+  await fetchComputeInstances("us-east");
+
+  // An hour on, the site can no longer read Azure. The refresh brings back 18
+  // static Azure rows; the memo holds the live ones, an hour old.
+  body = degradedPricingResponse();
+  t.mock.timers.tick(61 * 60 * 1000);
+  const first = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(first.provenance), false);
+  assert.equal(requested.length, 2, "the stale memo triggered one refresh");
+  await settle();
+
+  const second = await fetchComputeInstances("us-east");
+  assert.equal(isDegradedCatalogue(second.provenance), false, "the complete memo was kept");
+  assert.equal(second.provenance.degradedProviders, undefined);
+  assert.ok((second.provenance.servedFromCacheAgeMs ?? 0) > 60 * 60 * 1000, "and its age is stated");
+  assert.equal(requested.length, 2, "the next call does not start another refresh at once");
+
+  // A few minutes later the site is asked again, and again while it stays
+  // incomplete, until it has every provider back.
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 3);
+  await settle();
+
+  body = sitePricingResponse();
+  t.mock.timers.tick(DEGRADED_CACHE_TTL_MS + 1_000);
+  await fetchComputeInstances("us-east");
+  assert.equal(requested.length, 4);
+  await settle();
+
+  const recovered = await fetchComputeInstances("us-east");
+  assert.equal(recovered.provenance.servedFromCacheAgeMs, undefined, "a complete answer replaces the memo");
+  assert.equal(isDegradedCatalogue(recovered.provenance), false);
 });
 
 // ── Serving stale beats making someone wait 50s ──────────────────────

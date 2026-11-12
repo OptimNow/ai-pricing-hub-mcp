@@ -70,9 +70,9 @@ on. Do not write test prompts asking for "Linux instances" or "macOS": they read
 as supported filters that silently do nothing, which invites a reviewer to file
 it as misleading behaviour.
 
-Responses carry `provenance`. On tiers 2 and 3 the prices are uncorrected and a
-`notice` leads the text output. If a reviewer hits a fallback tier, the notice
-is expected behaviour, not a defect.
+Responses carry `provenance`. On tier 2, the snapshot, the figures are those of
+the day it was taken and a `notice` leads the text output. If a reviewer hits
+the snapshot, the notice is expected behaviour, not a defect.
 
 ## Result template
 

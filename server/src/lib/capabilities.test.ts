@@ -3,59 +3,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { llmModels, LLM_CAPABILITIES } from "../data/pricing-data.js";
-import { coerceSiteModel, inferCapabilities } from "./llm-models.js";
+import { coerceSiteModel } from "./llm-models.js";
 
 /**
  * "Code" left the capability list on 2026-10-05, on the site first (its LLM
  * schemaVersion 2.5) and here the same day. It was assigned to any model whose
  * output cost $0.50 per 1M tokens or more: a price threshold, not a capability.
- * These tests hold the four places that state the list to the one declaration.
+ * These tests hold the places that state the list to the one declaration.
+ *
+ * Until 0.11.0 this server also inferred capabilities itself, on its OpenRouter
+ * tier, and three tests here held that copy of the site's rule (Reasoning from
+ * the upstream parameter, never from a name; no Code by name or by price). The
+ * tier is gone: every capability now arrives from the site, or from the
+ * snapshot taken of it, and is filtered to the declared list on the way in.
  */
-
-type UpstreamModel = Parameters<typeof inferCapabilities>[0];
-const upstream = (id: string, completion: string, supported_parameters: string[] = []) =>
-  ({
-    id,
-    name: id,
-    created: 0,
-    description: "",
-    context_length: 128000,
-    architecture: { input_modalities: ["text"], output_modalities: ["text"] },
-    pricing: { prompt: "0.000001", completion },
-    supported_parameters,
-  }) as unknown as UpstreamModel;
-
-test("the OpenRouter tier tags Reasoning from the upstream parameter", () => {
-  // The site's rule since 2026-09-21: the model exposes a reasoning control.
-  assert.deepEqual(
-    inferCapabilities(upstream("anthropic/claude-opus-5", "0.000025", ["reasoning", "tools"])),
-    ["Text", "Reasoning", "Agents"],
-  );
-});
-
-test("a name alone never tags Reasoning", () => {
-  // Each of these fired under the old name rule: a "-pro" suffix, "o4" inside
-  // "pro4", a vendor called Thinking Machines, "r1", "reason".
-  for (const id of [
-    "amazon/nova-pro-v1",
-    "upstage/solar-pro4",
-    "thinking-machines/inkling",
-    "deepseek/deepseek-r1",
-    "acme/reasoner",
-  ]) {
-    assert.deepEqual(inferCapabilities(upstream(id, "0.000002")), ["Text"], id);
-  }
-});
 
 test("the declared list has no Code", () => {
   assert.deepEqual([...LLM_CAPABILITIES], ["Text", "Vision", "Reasoning", "Agents", "Image Gen", "Audio"]);
-});
-
-test("the OpenRouter tier assigns Code neither by name nor by price", () => {
-  // Both halves of the removed rule: a code-named id, and an output price of
-  // $0.50 per 1M tokens or more.
-  assert.deepEqual(inferCapabilities(upstream("mistralai/codestral-2508", "0.0000009")), ["Text"]);
-  assert.deepEqual(inferCapabilities(upstream("openai/gpt-5.5", "0.00003")), ["Text"]);
 });
 
 test("a site row from an older deployment loses the values this server does not declare", () => {

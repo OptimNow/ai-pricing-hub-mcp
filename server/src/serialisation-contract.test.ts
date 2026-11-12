@@ -238,6 +238,24 @@ test("the compute output exposes per-column price provenance", () => {
   }
 });
 
+test("an incomplete compute catalogue is declared, and said in the text of both tools that search it", () => {
+  const start = schemaRegion.indexOf("const computeProvenanceSchema");
+  const body = schemaRegion.slice(start, schemaRegion.indexOf("\n});", start));
+  // A strict host refuses a response carrying a field its schema does not
+  // declare, and lib/compute-pricing.ts returns all three on a degraded read.
+  for (const field of ["liveProviders", "degradedProviders", "catalogueIsSubset", "upstreamErrors"]) {
+    assert.match(body, new RegExp(`^\\s+${field}:`, "m"), `computeProvenanceSchema no longer declares ${field}`);
+  }
+
+  // "No match" out of a provider's 18 static rows is not "no such instance":
+  // the comparison says it beside an empty result, the break-even beside an
+  // instance it did not find.
+  const uses = source.match(/incompleteCatalogueCaveat\(/g) ?? [];
+  assert.ok(uses.length >= 2, `incompleteCatalogueCaveat is called ${uses.length} time(s), by fewer than two tools`);
+  // What the site reported exists in structuredContent; the text has to say it.
+  assert.match(source, /Reported by the site on this read: \$\{provenance\.upstreamErrors\.join/);
+});
+
 test("the LLM provenance keeps the verified-pricing flag", () => {
   const start = schemaRegion.indexOf("const llmProvenanceSchema");
   assert.ok(start > -1, "llmProvenanceSchema not found");

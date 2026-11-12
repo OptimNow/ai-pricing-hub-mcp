@@ -1,14 +1,22 @@
 /**
- * LLM model fetching, filtering, and enrichment logic.
+ * The LLM catalogue: read from the site, or from the snapshot taken of it.
  *
- * Ported from cloud-sparkle-compare/api/llm-models.ts (the endpoint behind
- * optimtoken.optimnow.io), minus its Vercel HTTP wrapper. Keep the two in sync:
- * divergence here is what let the MCP drift half a year behind the web app.
+ * Until 0.11.0 this file also held a port of the site's own transform of
+ * OpenRouter's catalogue (cloud-sparkle-compare/api/llm-models.ts: the Arena
+ * table, the exclusion rules, the licence prefixes, 700 lines of it), run as a
+ * second tier when the site could not be reached. It was removed, on the
+ * owner's decision, once it was measured against the site's transform of the
+ * same payload (2026-11-12, 288 models listed by both): the openness label
+ * differed on 84, the licence on 113, and 23 models the site lists were
+ * missing. It was ahead of a days-old snapshot on price freshness and behind
+ * on everything else. Do not bring a second live source back without
+ * something that holds it to the site: a port that only runs when the site is
+ * down drifts unseen. docs/DESIGN.md, "Data sources and the fallback chain".
  */
 
 // ── Types ──────────────────────────────────────────────────────────
 
-import { llmModels, dataLastUpdated, LLM_CAPABILITIES } from "../data/pricing-data.js";
+import { llmModels, dataLastUpdated, llmEloAsOf, LLM_CAPABILITIES } from "../data/pricing-data.js";
 import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.js";
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
 import { isRecognisedLicence, opennessOf } from "./openness.js";
@@ -16,6 +24,7 @@ import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
 import { coerceHostPricing } from "./host-prices.js";
 import type { ModelHostPricing } from "./host-prices.js";
 import { NO_DEPRECATION_DATA, coerceDeprecation } from "./deprecation.js";
+import { noteSiteSchema } from "./site-schema.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
 
@@ -25,732 +34,12 @@ export function hostPricingKey(m: { provider: string; model: string }): string {
 }
 
 /**
- * Which tier of the fallback chain served the response.
+ * Which source served the response: the site, or the snapshot.
  *
- * `"openrouter"` and `"static-fallback"` keep the exact meaning they have
- * always had — direct OpenRouter, and the frozen snapshot — so anything
- * downstream reading this field keeps working. `"optimtoken"` is the preferred
- * tier.
+ * `"static-fallback"` keeps the meaning it has always had. A third value,
+ * `"openrouter"`, was served by the tier removed in 0.11.0 and is never sent.
  */
-export type ModelSource = "optimtoken" | "openrouter" | "static-fallback";
-
-interface OpenRouterModel {
-  id: string;
-  name: string;
-  created: number;
-  description: string;
-  context_length: number;
-  architecture: {
-    modality: string;
-    input_modalities: string[];
-    output_modalities: string[];
-  };
-  pricing: {
-    prompt: string;
-    completion: string;
-    input_cache_read?: string;
-    /** Price of WRITING a token into the prompt cache, at the default (roughly
-     *  5-minute) lifetime. The dearer `input_cache_write_1h` some vendors also
-     *  publish is deliberately not read: the optimized-cost formula models
-     *  exactly one cache lifetime. Same choice as the site. */
-    input_cache_write?: string;
-  };
-  top_provider: { context_length: number; max_completion_tokens: number };
-  supported_parameters: string[];
-  hugging_face_id?: string;
-}
-
-// ── Static ELO scores (from Arena, ex-LMArena) ──
-// Read by tier 2 only (direct OpenRouter): on tier 1 the site sends each
-// model's score together with its own `meta.eloAsOf`. The map is the site's,
-// copied whole from cloud-sparkle-compare/api/llm-models.ts, where
-// scripts/rebase-elo-scores.mjs rewrites every value weekly from one read of
-// Arena's leaderboard dataset, so all of them sit on one scale. Copy the whole
-// map and ELO_AS_OF together, never a few rows: a partial refresh mixes two
-// scales. ELO_AS_OF is the board's own publish date and is reported in every
-// response as `eloAsOf`.
-
-export const ELO_AS_OF = "2026-11-08";
-
-// ELO-SCORES-START — copied from the site; hand edits here are lost on the next copy.
-const ELO_SCORES: Record<string, number> = {
-  "google/gemini-4-argon": 1530,
-  "anthropic/claude-fable-5.1": 1513,
-  "anthropic/claude-opus-5.5": 1513,
-  "meta/muse-wonder": 1504,
-  "anthropic/claude-opus-5": 1502,
-  "google/gemini-3.8-flash": 1500,
-  "anthropic/claude-opus-4.6": 1497,
-  "xiaomi/mimo-v2.6-pro": 1492,
-  "anthropic/claude-fable-5": 1491,
-  "meta/muse-spark-1.3": 1491,
-  "google/gemini-3.7-flash": 1489,
-  "qwen/qwen3.8-max-0902": 1485,
-  "meta/muse-spark-1.2": 1484,
-  "anthropic/claude-opus-4.7": 1483,
-  "google/gemini-3.5-flash": 1483,
-  "google/gemini-3.1-pro-preview": 1480,
-  "google/gemini-3.6-flash": 1479,
-  "meta/muse-spark-1.1": 1479,
-  "z-ai/glm-5.3": 1476,
-  "moonshotai/kimi-k3": 1475,
-  "qwen/qwen3.7-max": 1475,
-  "z-ai/glm-5.3-flash": 1471,
-  "z-ai/glm-5.2": 1469,
-  "anthropic/claude-sonnet-5.5": 1468,
-  "openai/gpt-5.5": 1466,
-  "xiaomi/mimo-v2.5-pro": 1464,
-  "deepseek/deepseek-v4.1-flash": 1463,
-  "z-ai/glm-5.1": 1463,
-  "anthropic/claude-sonnet-4.6": 1458,
-  "google/gemini-2.5-pro": 1458,
-  "openai/gpt-5.6-sol": 1457,
-  "moonshotai/kimi-k2.6": 1455,
-  "anthropic/claude-opus-4.8": 1454,
-  "qwen/qwen3.7-plus": 1454,
-  "openai/gpt-5.4": 1452,
-  "anthropic/claude-opus-4.5": 1451,
-  "deepseek/deepseek-v4-pro": 1451,
-  "x-ai/grok-4.20-multi-agent": 1451,
-  "xiaomi/mimo-v2.6-flash": 1451,
-  "openai/gpt-5.6-terra": 1449,
-  "x-ai/grok-4.5": 1448,
-  "openai/gpt-6.1-sol": 1446,
-  "z-ai/glm-5": 1446,
-  "deepseek/deepseek-v4-pro-0813": 1445,
-  "moonshotai/kimi-k2.5": 1445,
-  "nvidia/nemotron-3-ultra-550b-a55b": 1445,
-  "x-ai/grok-4.20": 1444,
-  "google/gemma-4-31b-it": 1443,
-  "stepfun/step-5-preview": 1443,
-  "thinkingmachines/inkling": 1443,
-  "anthropic/claude-sonnet-5": 1442,
-  "openai/gpt-6-astra": 1440,
-  "z-ai/glm-4.6": 1440,
-  "anthropic/claude-sonnet-4.5": 1439,
-  "openai/gpt-5.2-chat": 1439,
-  "tencent/hy3": 1439,
-  "qwen/qwen3.5-397b-a17b": 1438,
-  "z-ai/glm-5v-turbo": 1438,
-  "qwen/qwen3.6-plus": 1436,
-  "qwen/qwen3.8-27b": 1436,
-  "z-ai/glm-4.7": 1435,
-  "google/gemini-3.5-flash-lite": 1434,
-  "google/gemma-4-26b-a4b-it": 1434,
-  "deepseek/deepseek-v4-flash": 1432,
-  "openai/gpt-5.6-luna": 1431,
-  "x-ai/grok-4.6": 1430,
-  "z-ai/glm-4.5": 1430,
-  "mistralai/mistral-large-2512": 1429,
-  "deepseek/deepseek-r1-0528": 1428,
-  "minimax/minimax-m3": 1428,
-  "xiaomi/mimo-v2.5": 1428,
-  "deepseek/deepseek-v3.2": 1425,
-  "mistralai/mistral-medium-3.1": 1425,
-  "reflection/beam-1.0-501b-a23b": 1425,
-  "deepseek/deepseek-v3.2-exp": 1422,
-  "openai/gpt-5.1": 1422,
-  "mistralai/mistral-medium-3-5": 1421,
-  "deepseek/deepseek-chat-v3.1": 1420,
-  "qwen/qwen3-vl-235b-a22b-instruct": 1420,
-  "anthropic/claude-opus-4.1": 1419,
-  "qwen/qwen3-235b-a22b-2507": 1419,
-  "deepseek/deepseek-v3.1-terminus": 1417,
-  "google/gemini-2.5-flash": 1417,
-  "qwen/qwen3-next-80b-a3b-instruct": 1417,
-  "qwen/qwen3.5-122b-a10b": 1417,
-  "qwen/qwen3-235b-a22b-thinking-2507": 1415,
-  "thinkingmachines/inkling-small": 1414,
-  "openai/gpt-5.2": 1412,
-  "openai/gpt-5.4-mini": 1412,
-  "mistralai/mistral-large-4-0": 1410,
-  "openai/o3": 1410,
-  "qwen/qwen3.5-27b": 1409,
-  "nvidia/nemotron-3.5-super-vl": 1407,
-  "openai/gpt-5": 1406,
-  "minimax/minimax-m2.7": 1405,
-  "stepfun/step-3.5-flash": 1403,
-  "anthropic/claude-haiku-5.5": 1399,
-  "x-ai/grok-4.7": 1398,
-  "qwen/qwen3.5-flash-02-23": 1397,
-  "x-ai/grok-4.3": 1397,
-  "anthropic/claude-haiku-4.5": 1396,
-  "openai/gpt-6-sol": 1396,
-  "qwen/qwen3.5-35b-a3b": 1395,
-  "meta/muse-glimmer-30b": 1389,
-  "openai/gpt-6-luna": 1388,
-  "upstage/solar-pro4": 1388,
-  "qwen/qwen3-30b-a3b-instruct-2507": 1384,
-  "z-ai/glm-4.5-air": 1384,
-  "openai/gpt-4.1": 1383,
-  "moonshotai/kimi-k2-0905": 1380,
-  "nvidia/nemotron-3-super-120b-a12b": 1377,
-  "z-ai/glm-4.6v": 1376,
-  "deepseek/deepseek-chat-v3-0324": 1375,
-  "openai/gpt-5-mini": 1374,
-  "openai/gpt-5.4-nano": 1372,
-  "moonshotai/kimi-k2": 1371,
-  "mistralai/mistral-medium-3": 1370,
-  "openai/gpt-oss-120b": 1365,
-  "amazon/nova-2-lite-v1": 1362,
-  "minimax/minimax-m2.5": 1359,
-  "google/gemma-3-27b-it": 1358,
-  "qwen/qwen3-coder": 1357,
-  "z-ai/glm-4.7-flash": 1351,
-  "nvidia/nemotron-3-nano-30b-a3b": 1348,
-  "minimax/minimax-m1": 1343,
-  "openai/gpt-4.1-mini": 1341,
-  "qwen/qwen3-32b": 1340,
-  "mistralai/mistral-small-3.2-24b-instruct": 1338,
-  "google/gemma-3-12b-it": 1334,
-  "deepseek/deepseek-chat": 1333,
-  "z-ai/glm-4.5v": 1333,
-  "cohere/command-a": 1331,
-  "nvidia/nemotron-3.5-lightning": 1329,
-  "openai/gpt-5-nano": 1320,
-  "ibm-granite/granite-4.2-8b": 1318,
-  "qwen/qwen3-30b-a3b": 1317,
-  "google/gemma-3-4b-it": 1291,
-  "openai/gpt-oss-20b": 1288,
-  "meta-llama/llama-4-maverick": 1287,
-  "openai/gpt-4o-mini": 1286,
-  "openai/gpt-4.1-nano": 1285,
-  "openai/gpt-4o": 1283,
-  "meta-llama/llama-4-scout": 1279,
-  "mistralai/mistral-small-3.1-24b-instruct": 1277,
-  "meta-llama/llama-3.3-70b-instruct": 1274,
-  "qwen/qwen-2.5-72b-instruct": 1269,
-  "mistralai/mistral-large-2407": 1266,
-  "meta-llama/llama-3.1-70b-instruct": 1261,
-  "amazon/nova-pro-v1": 1259,
-  "mistralai/mistral-small-24b-instruct-2501": 1234,
-  "google/gemma-2-27b-it": 1231,
-  "qwen/qwen-2.5-coder-32b-instruct": 1230,
-  "amazon/nova-lite-v1": 1229,
-  "cohere/command-r-plus-08-2024": 1229,
-  "microsoft/phi-4": 1217,
-  "amazon/nova-micro-v1": 1208,
-  "cohere/command-r-08-2024": 1187,
-  "meta-llama/llama-3.1-8b-instruct": 1187,
-  "mistralai/mixtral-8x22b-instruct": 1162,
-  "meta-llama/llama-3.2-3b-instruct": 1110,
-  "meta-llama/llama-3.2-1b-instruct": 1055,
-};
-// ELO-SCORES-END
-
-// ── Provider name mapping ──
-
-const PROVIDER_NAMES: Record<string, string> = {
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  google: "Google",
-  "meta-llama": "Meta",
-  mistralai: "Mistral",
-  deepseek: "DeepSeek",
-  "x-ai": "xAI",
-  cohere: "Cohere",
-  amazon: "Amazon",
-  microsoft: "Microsoft",
-  alibaba: "Alibaba",
-  nvidia: "Nvidia",
-  ai21: "AI21",
-  perplexity: "Perplexity",
-  moonshotai: "Moonshot",
-  minimax: "MiniMax",
-  qwen: "Alibaba",
-  writer: "Writer",
-  "bytedance-seed": "ByteDance",
-  inflection: "Inflection",
-  stepfun: "StepFun",
-  inception: "Inception",
-  baidu: "Baidu",
-  tencent: "Tencent",
-  xiaomi: "Xiaomi",
-  "z-ai": "Zhipu",
-};
-
-// ── Models to exclude (variants, legacy, niche) ──
-
-const EXCLUDE_PATTERNS = [
-  /:free$/,
-  /:extended$/,
-  /:exacto$/,
-  /:thinking$/,
-  /:batch$/, // batch variants are merged into the parent model, not listed
-  /-fast$/, // "Fast" priority tiers (e.g. claude-opus-5-fast)
-  /^~/, // provider alias entries like ~anthropic/claude-opus-latest
-  /-latest$/, // rolling aliases (gpt-chat-latest, ...)
-  /\d{4}-\d{2}-\d{2}/, // date-stamped variants like gpt-4o-2024-11-20
-  /-preview$/, // preview variants (we keep the canonical)
-  /instruct$/,
-  /turbo-preview$/,
-  /gpt-3\.5/,
-  /gpt-4-0314/,
-  /gpt-4-1106/,
-  /gpt-4$/,
-  /gpt-4o-search/,
-  /gpt-4o-mini-search/,
-  /gpt-4o-audio/, // audio-specific variant
-  /gpt-oss/, // open-source guard models
-  /-deep-research$/,
-  /safeguard/,
-  /roleplay|mancer|sao10k|undi95|thedrummer|gryphe|nousresearch|alpindale|anthracite|cognitivecomputations|neversleep/,
-];
-
-// Models to explicitly include even if they match an exclude pattern
-const FORCE_INCLUDE = [
-  "google/gemini-3.1-pro-preview",
-  "google/gemini-3-pro-preview",
-  "google/gemini-3-flash-preview",
-  "google/gemini-2.5-pro-preview",
-  "google/gemini-2.5-flash-preview",
-  "google/gemini-2.0-flash-001",
-  "qwen/qwen3.5-flash-02-23",
-  "qwen/qwen3.5-plus-02-15",
-];
-
-// Models to explicitly exclude (deduplicates, old versions)
-const FORCE_EXCLUDE = [
-  "openai/gpt-4o-2024-08-06",
-  "openai/gpt-4o-2024-05-13",
-  "openai/gpt-4o-2024-11-20",
-  "openai/gpt-4o-mini-2024-07-18",
-  "openai/gpt-4-turbo-preview",
-  "openai/gpt-3.5-turbo-0613",
-  "openai/gpt-3.5-turbo-16k",
-  "openai/gpt-3.5-turbo-instruct",
-  "anthropic/claude-3.5-sonnet", // older version, keep 3.7
-  "anthropic/claude-opus-4.1", // keep 4 and 4.5+
-];
-
-// ── Known parameter counts (for models where name/description lacks it) ──
-
-const KNOWN_PARAMETERS: Record<string, string> = {
-  // Meta Llama 4 (MoE)
-  "meta-llama/llama-4-maverick": "400B",
-  "meta-llama/llama-4-scout": "109B",
-  // Meta Llama 3
-  "meta-llama/llama-3.3-70b-instruct": "70B",
-  "meta-llama/llama-3.1-405b-instruct": "405B",
-  "meta-llama/llama-3.1-70b-instruct": "70B",
-  "meta-llama/llama-3.1-8b-instruct": "8B",
-  // DeepSeek (MoE)
-  "deepseek/deepseek-r1": "671B",
-  "deepseek/deepseek-v3": "671B",
-  "deepseek/deepseek-v3.2": "685B",
-  // Mistral
-  "mistralai/mistral-large": "675B",
-  "mistralai/mistral-small": "24B",
-  "mistralai/mistral-nemo": "12B",
-  // Alibaba / Qwen
-  "alibaba/qwq-32b": "32B",
-  "alibaba/qwen-2.5-72b-instruct": "72B",
-  "qwen/qwen3.5-397b-a17b": "397B",
-  "qwen/qwen3.5-122b-a10b": "122B",
-  "qwen/qwen3.5-35b-a3b": "35B",
-  "qwen/qwen3.5-27b": "27B",
-  "qwen/qwen3.5-flash-02-23": "MoE",
-  "qwen/qwen3.5-plus-02-15": "MoE",
-  "qwen/qwen3-max-thinking": "685B",
-  "qwen/qwen3-coder-next": "80B",
-  // Google
-  "google/gemma-2-27b-it": "27B",
-  "google/gemma-2-9b-it": "9B",
-  // Cohere
-  "cohere/command-r-plus": "104B",
-  // Microsoft
-  "microsoft/phi-4": "14B",
-  // Moonshot (MoE)
-  "moonshotai/kimi-k2": "1T",
-  "moonshotai/kimi-k2.5": "1T",
-  // Inflection
-  "inflection/inflection-3-pi": "175B",
-  "inflection/inflection-3-productivity": "175B",
-  // Zhipu (GLM) — MoE
-  "z-ai/glm-5": "744B",
-  // MiniMax — MoE
-  "minimax/minimax-m2.5": "230B",
-  "minimax/minimax-m2.5-lightning": "230B",
-};
-
-// ── Known release dates (YYYY-MM) — overrides OpenRouter's `created` timestamp ──
-// OpenRouter's `created` often reflects when *they* added the model, not the
-// actual public release date. This map corrects the most prominent mismatches.
-
-const KNOWN_RELEASE_DATES: Record<string, string> = {
-  // Anthropic — Claude 5 family + Opus 4.7/4.8
-  "anthropic/claude-fable-5": "2026-06",
-  "anthropic/claude-sonnet-5": "2026-06",
-  "anthropic/claude-opus-5": "2026-07",
-  "anthropic/claude-opus-4.7": "2026-04",
-  "anthropic/claude-opus-4.8": "2026-05",
-  // OpenAI — GPT-5.x series
-  "openai/gpt-5.1": "2025-11",
-  "openai/gpt-5.2": "2025-12",
-  "openai/gpt-5.4": "2026-02",
-  "openai/gpt-5.5": "2026-04",
-  "openai/gpt-5.5-pro": "2026-04",
-  "openai/gpt-5.6-luna": "2026-07",
-  "openai/gpt-5.6-terra": "2026-07",
-  "openai/gpt-5.6-sol": "2026-07",
-  // Google — Gemini 3.1+
-  "google/gemini-3.1-pro-preview": "2026-02",
-  "google/gemini-3.1-flash-lite": "2026-05",
-  "google/gemini-3.5-flash": "2026-05",
-  "google/gemini-3.6-flash": "2026-06",
-  "google/gemini-3.7-flash": "2026-07",
-  // DeepSeek V4
-  "deepseek/deepseek-v4-pro": "2026-04",
-  "deepseek/deepseek-v4-flash": "2026-04",
-  // xAI
-  "x-ai/grok-4.20": "2026-04",
-  "x-ai/grok-4.20-multi-agent": "2026-04",
-  "x-ai/grok-4.5": "2026-06",
-  "x-ai/grok-4.6": "2026-07",
-  // Moonshot
-  "moonshotai/kimi-k2.6": "2026-03",
-  "moonshotai/kimi-k2.7-code": "2026-05",
-  "moonshotai/kimi-k3": "2026-06",
-  // MiniMax
-  "minimax/minimax-m2.7": "2026-04",
-  "minimax/minimax-m3": "2026-06",
-  // Zhipu
-  "z-ai/glm-5.1": "2026-04",
-  "z-ai/glm-5.2": "2026-06",
-  // Anthropic
-  "anthropic/claude-opus-4.6": "2026-02",
-  "anthropic/claude-sonnet-4.6": "2026-02",
-  "anthropic/claude-opus-4.5": "2025-09",
-  "anthropic/claude-sonnet-4.5": "2025-09",
-  "anthropic/claude-haiku-4.5": "2025-10",
-  "anthropic/claude-opus-4": "2025-05",
-  "anthropic/claude-sonnet-4": "2025-05",
-  "anthropic/claude-3.7-sonnet": "2025-02",
-  "anthropic/claude-3.5-sonnet": "2024-10",
-  "anthropic/claude-3.5-haiku": "2024-10",
-  "anthropic/claude-3-haiku": "2024-03",
-  // Alibaba / Qwen 3.5 series — released March 2026
-  "qwen/qwen3.5-397b-a17b": "2026-03",
-  "qwen/qwen3.5-122b-a10b": "2026-03",
-  "qwen/qwen3.5-35b-a3b": "2026-03",
-  "qwen/qwen3.5-27b": "2026-03",
-  "qwen/qwen3.5-plus-02-15": "2026-02",
-  "qwen/qwen3.5-flash-02-23": "2026-02",
-  "qwen/qwen3-max-thinking": "2026-02",
-  "qwen/qwen3-coder-next": "2026-03",
-  // xAI
-  "x-ai/grok-4": "2025-08",
-  "x-ai/grok-3": "2025-02",
-  "x-ai/grok-3-mini": "2025-02",
-  // DeepSeek
-  "deepseek/deepseek-v3.2": "2025-10",
-  "deepseek/deepseek-r1": "2025-01",
-  "deepseek/deepseek-v3": "2024-12",
-  // OpenAI
-  "openai/gpt-5": "2025-06",
-  "openai/gpt-5-mini": "2025-09",
-  "openai/o3": "2025-04",
-  "openai/o4-mini": "2025-04",
-  // Google
-  "google/gemini-3-pro-preview": "2025-11",
-  "google/gemini-3-flash-preview": "2025-12",
-  // Moonshot
-  "moonshotai/kimi-k2": "2025-07",
-  "moonshotai/kimi-k2.5": "2025-12",
-  // Zhipu (GLM)
-  "z-ai/glm-5": "2026-02",
-  // MiniMax
-  "minimax/minimax-m2.5": "2026-02",
-  "minimax/minimax-m2.5-lightning": "2026-02",
-};
-
-// ── License mapping ──
-
-/** Per-model licences, checked before the org-wide prefixes below.
- *
- *  The prefix table assumes a lab ships everything under one licence. That is
- *  false for any lab publishing a mix, and it silently freezes a lab that moved
- *  to open weights after the table was written. Prefer an exact-id entry here
- *  over widening a prefix, and say what was checked.
- *
- *  The licence drives the openness axis (see ./openness.ts), so a wrong value
- *  here is not cosmetic: it tells a reader they may or may not self-host a
- *  model. */
-const LICENSE_OVERRIDES: [string, string][] = [
-  // Kimi K2 published its weights under a Modified MIT licence (MIT plus an
-  // attribution requirement above a deployment threshold), so the blanket
-  // moonshotai/ -> Proprietary below was wrong for the entire K2 line.
-  // K3 is deliberately not covered: its terms have not been verified.
-  ["moonshotai/kimi-k2", "Modified MIT"],
-];
-
-const LICENSE_PREFIXES: [string, string][] = [
-  ["openai/", "Proprietary"],
-  ["anthropic/", "Proprietary"],
-  ["google/gemini", "Proprietary"],
-  ["google/gemma", "Gemma"],
-  // Longest-prefix-first: Llama 4 carries its own licence string, which the
-  // site emits and ./openness.ts buckets separately. Leaving these to the
-  // meta-llama/ catch-all would label them "Llama 3.x" here and "Llama 4" on
-  // the site — the exact kind of same-model-two-answers drift this file warns
-  // about at the top.
-  ["meta-llama/llama-4", "Llama 4"],
-  ["meta-llama/llama-guard-4", "Llama 4"],
-  ["meta-llama/", "Llama 3.x"],
-  ["deepseek/", "Apache 2.0"],
-  ["mistralai/mistral-nemo", "Apache 2.0"],
-  ["mistralai/codestral", "Apache 2.0"],
-  ["mistralai/", "Mistral"],
-  ["x-ai/", "Proprietary"],
-  ["alibaba/", "Qwen"],
-  ["qwen/", "Qwen"],
-  ["microsoft/phi", "MIT"],
-  ["nvidia/", "CC-BY-NC-4.0"],
-  ["cohere/", "Proprietary"],
-  ["amazon/", "Proprietary"],
-  ["ai21/", "Proprietary"],
-  ["moonshotai/", "Proprietary"],
-  ["perplexity/", "Proprietary"],
-  ["minimax/", "Proprietary"],
-  ["inflection/", "Proprietary"],
-  ["bytedance-seed/", "Proprietary"],
-  ["stepfun/", "Proprietary"],
-  ["baidu/", "Proprietary"],
-  ["tencent/", "Proprietary"],
-  ["xiaomi/", "Proprietary"],
-  ["z-ai/", "Apache 2.0"],
-  ["inception/", "Apache 2.0"],
-  ["writer/", "Proprietary"],
-];
-
-function inferLicense(modelId: string): string | undefined {
-  for (const [prefix, license] of LICENSE_OVERRIDES) {
-    if (modelId.startsWith(prefix)) return license;
-  }
-  for (const [prefix, license] of LICENSE_PREFIXES) {
-    if (modelId.startsWith(prefix)) return license;
-  }
-  return undefined;
-}
-
-// ── Helpers ──
-
-function shouldInclude(model: OpenRouterModel): boolean {
-  const id = model.id;
-
-  if (FORCE_INCLUDE.includes(id)) return true;
-  if (FORCE_EXCLUDE.includes(id)) return false;
-
-  // Exclude by pattern
-  const idAfterProvider = id.split("/")[1] || "";
-  for (const pattern of EXCLUDE_PATTERNS) {
-    if (pattern.test(id) || pattern.test(idAfterProvider)) return false;
-  }
-
-  // Exclude free models (price = 0 for both) and variable/router pricing, which
-  // OpenRouter encodes as "-1" and which would publish as -$1,000,000 per 1M tokens.
-  const inp = parseFloat(model.pricing.prompt);
-  const out = parseFloat(model.pricing.completion);
-  if (!hasPublishableTokenPricing(inp, out)) return false;
-
-  // Exclude models with no context length
-  if (!model.context_length || model.context_length < 1000) return false;
-
-  return true;
-}
-
-function formatContextWindow(ctx: number): string {
-  if (ctx >= 1_000_000) return `${Math.round(ctx / 1_000_000)}M`;
-  if (ctx >= 1_000) return `${Math.round(ctx / 1_000)}K`;
-  return String(ctx);
-}
-
-function extractParameters(model: OpenRouterModel): string | undefined {
-  // 1. Check static lookup first (most reliable)
-  if (KNOWN_PARAMETERS[model.id]) return KNOWN_PARAMETERS[model.id];
-
-  // 2. Try to extract from name (e.g., "Llama 3.1 70B")
-  const nameMatch = model.name.match(/(\d+(?:\.\d+)?)\s*[Bb]\b/);
-  if (nameMatch) return `${nameMatch[1]}B`;
-
-  // 3. Check HuggingFace ID for parameter count
-  const hfMatch = (model.hugging_face_id || "").match(/(\d+)[Bb]/);
-  if (hfMatch) return `${hfMatch[1]}B`;
-
-  // 4. Check description for "X billion parameters" or "XB parameters"
-  const descMatch = (model.description || "").match(/(\d+(?:\.\d+)?)\s*(?:billion|B)\s*param/i);
-  if (descMatch) return `${descMatch[1]}B`;
-
-  // 5. Check description for standalone "XB" pattern (e.g., "a 70B model")
-  const descLoose = (model.description || "").match(/\b(\d+(?:\.\d+)?)\s*[Bb]\b/);
-  if (descLoose) return `${descLoose[1]}B`;
-
-  return undefined;
-}
-
-/** Exported for tests. */
-export function inferCapabilities(model: OpenRouterModel): LLMCapability[] {
-  const caps: LLMCapability[] = [];
-  const inputMods = model.architecture.input_modalities || [];
-  const outputMods = model.architecture.output_modalities || [];
-  const params = model.supported_parameters || [];
-
-  // Text — virtually all models
-  if (inputMods.includes("text") && outputMods.includes("text")) {
-    caps.push("Text");
-  }
-
-  // Vision — accepts image input
-  if (inputMods.includes("image") || inputMods.includes("video")) {
-    caps.push("Vision");
-  }
-
-  // Audio
-  if (inputMods.includes("audio") || outputMods.includes("audio")) {
-    caps.push("Audio");
-  }
-
-  // Image Gen — produces images
-  if (outputMods.includes("image")) {
-    caps.push("Image Gen");
-  }
-
-  // Reasoning — the model exposes a reasoning control upstream (a thinking
-  // budget or effort setting): OpenRouter lists `reasoning` in its
-  // supported_parameters. The site's rule since 2026-09-21. This tier used to
-  // match names ("-pro", "thinking", "o4", ...), which tagged a vendor called
-  // Thinking Machines and "solar-pro4", and missed every Claude and GPT-5.x
-  // model, so it and the site disagreed on most of the catalogue. Never
-  // reintroduce a name rule here.
-  if (params.includes("reasoning")) {
-    caps.push("Reasoning");
-  }
-
-  // No "Code" capability. It was assigned for a code-like id or an output price
-  // of $0.50 per 1M or more, which tagged 225 of 292 models: a price threshold,
-  // not a capability. The site dropped it on 2026-10-05 (schemaVersion 2.5), and
-  // nothing upstream says which models write code well.
-
-  // Agents — supports tool use
-  if (params.includes("tools") || params.includes("tool_choice")) {
-    caps.push("Agents");
-  }
-
-  // Image-only models (DALL-E, SD, Flux)
-  if (caps.length === 0 && outputMods.includes("image")) {
-    caps.push("Image Gen");
-  }
-
-  return caps;
-}
-
-/** Price tier only. Openness is a separate axis, derived from the licence in
- *  ./openness.ts.
- *
- *  There used to be an "Open Weights" category here, short-circuiting the price
- *  tiers for anything from a known open lab. It made openness and price
- *  mutually exclusive: an open model could be labelled open OR priced, never
- *  both, so 28 open-licensed models sat in Mid-tier and Budget with no way to
- *  find them, and open models were sorted against a different Frontier
- *  threshold ($10) than proprietary ones ($15). Do not reintroduce it: the
- *  question "what does it cost" and the question "whose hardware can run it"
- *  need to be answerable independently. */
-function inferCategory(model: OpenRouterModel): LLMCategory {
-  const outPrice = parseFloat(model.pricing.completion) * 1e6;
-  const inPrice = parseFloat(model.pricing.prompt) * 1e6;
-  const outputMods = model.architecture.output_modalities || [];
-
-  // Image generation models. Matches the "Image Gen" capability rule: any model
-  // that can produce an image belongs here, including hybrids that also emit
-  // text (Nano Banana, GPT Image). Requiring image-only output left those in
-  // the text tiers, where their cost-per-request landed in support-ticket and
-  // coding comparisons they have no business appearing in.
-  if (outputMods.includes("image")) {
-    return "Image";
-  }
-
-  if (outPrice >= 15 || inPrice >= 10) return "Frontier";
-  if (outPrice >= 2) return "Mid-tier";
-  return "Budget";
-}
-
-function formatReleaseDate(created: number): string | undefined {
-  if (!created || created < 1000000000) return undefined;
-  const d = new Date(created * 1000);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  return `${year}-${month}`;
-}
-
-function cleanModelName(model: OpenRouterModel): string {
-  let name = model.name;
-  // Remove provider prefix like "OpenAI: ", "Google: "
-  name = name.replace(/^[^:]+:\s*/, "");
-  // Remove trailing version dates
-  name = name.replace(/\s+\d{2}-\d{2}$/, "");
-  // Remove "Preview" suffix when it's a version marker
-  name = name.replace(/\s+Preview\s+\d{2}-\d{2}$/, "");
-  return name.trim();
-}
-
-// ── Main transform ──
-
-function transformModels(orModels: OpenRouterModel[]): LLMModel[] {
-  // Index `:batch` variants by parent id — they are merged as columns, not listed as rows
-  const batchPricing = new Map<string, { input: number; output: number }>();
-  for (const m of orModels) {
-    if (m.id.endsWith(":batch")) {
-      batchPricing.set(m.id.slice(0, -6), {
-        input: parseFloat(m.pricing.prompt) * 1e6,
-        output: parseFloat(m.pricing.completion) * 1e6,
-      });
-    }
-  }
-
-  return orModels.filter(shouldInclude).map((m) => {
-    const providerSlug = m.id.split("/")[0];
-    const provider = PROVIDER_NAMES[providerSlug] || providerSlug;
-    const inputPrice = parseFloat(m.pricing.prompt) * 1e6;
-    const outputPrice = parseFloat(m.pricing.completion) * 1e6;
-    const batch = batchPricing.get(m.id);
-    const cacheRead = m.pricing.input_cache_read
-      ? parseFloat(m.pricing.input_cache_read) * 1e6
-      : undefined;
-    // Same defensive parse as the read rate, plus an explicit finiteness test
-    // below: `NaN > 0` is false, but `Infinity > 0` is true, and this number
-    // feeds optimizedUseCaseCost().
-    const cacheWrite = m.pricing.input_cache_write
-      ? parseFloat(m.pricing.input_cache_write) * 1e6
-      : undefined;
-
-    return {
-      provider,
-      model: cleanModelName(m),
-      parameters: extractParameters(m),
-      // 4-decimal precision: rounding to cents would misstate sub-cent rates
-      // (e.g. $0.0275/M). Display-side formatting decides what users see.
-      inputPricePer1M: Math.round(inputPrice * 10000) / 10000,
-      outputPricePer1M: Math.round(outputPrice * 10000) / 10000,
-      batchInputPricePer1M: batch ? Math.round(batch.input * 10000) / 10000 : undefined,
-      batchOutputPricePer1M: batch ? Math.round(batch.output * 10000) / 10000 : undefined,
-      cachedInputPricePer1M:
-        cacheRead && cacheRead > 0 ? Math.round(cacheRead * 10000) / 10000 : undefined,
-      cacheWritePricePer1M:
-        cacheWrite !== undefined && Number.isFinite(cacheWrite) && cacheWrite > 0
-          ? Math.round(cacheWrite * 10000) / 10000
-          : undefined,
-      // No outlierListing / promotionalListing on this tier: both are verdicts
-      // the site reaches from its nightly per-host fan-out, which this server
-      // does not hold. Absent means unknown, never "a typical price".
-      contextWindow: formatContextWindow(m.context_length),
-      category: inferCategory(m),
-      capabilities: inferCapabilities(m),
-      releaseDate: KNOWN_RELEASE_DATES[m.id] || formatReleaseDate(m.created),
-      eloScore: ELO_SCORES[m.id],
-      license: inferLicense(m.id),
-    };
-  });
-}
+export type ModelSource = "optimtoken" | "static-fallback";
 
 function sortModels(models: LLMModel[]): LLMModel[] {
   // ELO descending; models without ELO by release date (newest first), then price
@@ -769,25 +58,38 @@ function sortModels(models: LLMModel[]): LLMModel[] {
 /**
  * Smallest catalogue we will serve as live data.
  *
- * `transformModels(data.data || [])` used to turn a 200 response with a missing
- * or renamed `data` array into an empty catalogue that looked perfectly healthy.
- * Anything below this floor is treated as an upstream failure and hands over to
- * the static snapshot. Mirrors ABSOLUTE_MODEL_FLOOR in the web app's pipeline.
+ * A 200 response with a missing, renamed or collapsed `models` array used to
+ * become an empty catalogue that looked perfectly healthy. Anything below this
+ * floor is treated as an upstream failure and hands over to the static
+ * snapshot. Mirrors ABSOLUTE_MODEL_FLOOR in the web app's pipeline.
  */
 const MIN_PLAUSIBLE_CATALOGUE = 80;
 
 /** Upstream must answer within this, well inside the platform's own ceiling. */
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
-/** How long a successful catalogue is reused before we ask upstream again. */
-const CACHE_TTL_MS = 15 * 60 * 1000;
+/** How long the site's catalogue is reused before we ask upstream again. */
+export const CACHE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * How long the snapshot is reused before the SITE is asked again.
+ *
+ * Not the site's 15 minutes: one failed read of the site (a single 502, one
+ * answer past the deadline) must not hold this server on a snapshot for a
+ * quarter of an hour while the site answers again a second later. That is
+ * what happened to the tier that stood here until 0.11.0, reproduced on
+ * 2026-11-12. Not zero either: while the site hangs, each attempt costs its
+ * whole timeout, and a minute's memo keeps that to one caller a minute
+ * instead of every caller.
+ */
+export const FALLBACK_CACHE_TTL_MS = 60 * 1000;
 
 // Best-effort only: this survives just as long as the process does (on Fly.io,
 // until the idle machine stops), and a cold start simply refetches.
-let cache: { result: LLMFetchResult; fetchedAt: number } | null = null;
+let cache: { result: LLMFetchResult; fetchedAt: number; ttlMs: number } | null = null;
 
-/** Drop the memo. Tests drive the tiers by stubbing fetch, so they need to be
- *  able to ask again rather than get the previous tier's answer back. */
+/** Drop the memo. Tests drive the two tiers by stubbing fetch, so they need to
+ *  be able to ask again rather than get the previous answer back. */
 export function resetLLMModelCache(): void {
   cache = null;
 }
@@ -795,21 +97,25 @@ export function resetLLMModelCache(): void {
 /**
  * Where a set of prices came from, and whether anyone has checked them.
  *
- * This is the whole point of preferring the site: OpenRouter intermittently
+ * The site is where correctness lives: OpenRouter, its upstream, intermittently
  * publishes a model at exactly half its vendor's list rate across every price
- * field at once, and the corrections for that live in the site's
- * PRICE_OVERRIDES table, verified against the vendors' own pricing pages. A
- * response that fell back past the site is serving uncorrected figures, and has
- * to say so — a silent downgrade of correctness is worse than an outage,
- * because the caller quotes the number either way.
+ * field at once, and the corrections for that are the site's (PRICE_OVERRIDES,
+ * verified against the vendors' own pricing pages), as are the licences it
+ * verifies model by model. A response that could not be read from the site is
+ * the snapshot of an earlier day, and has to say so and say which day: a
+ * silent downgrade is worse than an outage, because the caller quotes the
+ * number either way.
  */
 export interface LLMProvenance {
-  /** 1 = site API, 2 = direct OpenRouter, 3 = static snapshot. */
-  tier: 1 | 2 | 3;
+  /** 1 = the site, 2 = the static snapshot: the numbering the compute tools
+   *  use. Until 0.11.0 the snapshot was 3, and 2 was direct OpenRouter. */
+  tier: 1 | 2;
   source: ModelSource;
   /** One-line human description of the tier that served. */
   label: string;
-  /** True only on tier 1, where the site's price corrections have been applied. */
+  /** True only on tier 1: the site's corrected prices, as it serves them now.
+   *  False on the snapshot, whose prices were the site's on the day it was
+   *  taken (`dataAsOf`) and may have moved since. */
   pricesVerified: boolean;
   /** When upstream assembled the data it served (site `meta.timestamp`). */
   upstreamTimestamp?: string;
@@ -826,8 +132,8 @@ export interface LLMProvenance {
   hostPricingAsOf?: string;
   /** The day the site last re-read its table of retirement notices against
    *  each model maker's own page (tier 1 only). It dates every `deprecation`
-   *  on a row, and the absence of one. Absent on tiers 2 and 3, which carry no
-   *  notice at all. */
+   *  on a row, and the absence of one. Absent on the snapshot, which carries
+   *  no notice at all. */
   deprecationsVerifiedAt?: string;
   dataAsOf?: string;
   /** Loud warning when the prices are not the site's corrected ones. */
@@ -842,7 +148,7 @@ export interface LLMFetchResult {
    * Kept beside the models rather than on them: every tool spreads a model
    * row into `structuredContent`, whose schemas refuse undeclared properties,
    * so a field added to `LLMModel` reaches all of them at once. Empty on
-   * tiers 2 and 3, which have no host data, and missing a model whose listing
+   * the snapshot, which has no host data, and missing a model whose listing
    * is newer than the site's last read. Absent means unknown, never "one host".
    */
   hostPricing: ReadonlyMap<string, ModelHostPricing>;
@@ -850,7 +156,7 @@ export interface LLMFetchResult {
    * Each model's upstream (OpenRouter) id, keyed by `hostPricingKey()`: what
    * the site's per-model endpoints are asked by. Beside the rows for the same
    * reason as `hostPricing`, and for every model the site gives an id, not
-   * only those with a host summary. Empty on tiers 2 and 3.
+   * only those with a host summary. Empty on the snapshot.
    */
   openRouterIds: ReadonlyMap<string, string>;
   source: ModelSource;
@@ -858,12 +164,6 @@ export interface LLMFetchResult {
   dataAsOf?: string;
   provenance: LLMProvenance;
 }
-
-const UNVERIFIED_PRICING_NOTICE =
-  "UNVERIFIED PRICING: these figures come straight from OpenRouter and have NOT " +
-  "been through optimtoken.optimnow.io's price corrections. OpenRouter " +
-  "intermittently publishes a model at exactly half its vendor's list rate on " +
-  "every field at once. Treat these as unverified upstream figures.";
 
 /** The static snapshot, run through the same pricing guard as live data. */
 function staticFallback(): LLMModel[] {
@@ -992,7 +292,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
 
   // The site's refresh scripts abort unless meta.source says "openrouter";
   // anything else means the site is itself serving its own static fallback, so
-  // it is no more authoritative than our tier 2 and carries no fresh
+  // it is no more authoritative than our own snapshot and carries no fresh
   // corrections. Treat it as a tier-1 failure rather than pass it off as live.
   if (meta.source !== "openrouter") {
     throw new Error(
@@ -1024,10 +324,11 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
   }
 
   reportUnrecognisedLicences(models);
+  noteSiteSchema("/api/llm-models", meta.schemaVersion);
 
-  // The site publishes the ELO vintage it actually used; prefer it over our
-  // local constant, which only describes the tier-2 enrichment table.
-  const eloAsOf = typeof meta.eloAsOf === "string" && meta.eloAsOf ? meta.eloAsOf : ELO_AS_OF;
+  // The site publishes the vintage of the Arena scores on its rows. Should a
+  // deployment not state one, the snapshot's is the latest this server knows.
+  const eloAsOf = typeof meta.eloAsOf === "string" && meta.eloAsOf ? meta.eloAsOf : llmEloAsOf;
 
   return {
     models,
@@ -1055,60 +356,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
   };
 }
 
-// ── Tier 2: direct OpenRouter (kept — a working second tier) ─────────
-
-async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/models", {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenRouter API returned ${response.status}`);
-    }
-
-    const payload = (await response.json()) as { data?: unknown };
-    if (!Array.isArray(payload?.data)) {
-      throw new Error(
-        `OpenRouter payload had no "data" array (saw ${typeof payload?.data}). Refusing to serve an empty catalogue.`,
-      );
-    }
-
-    const upstream = payload.data as OpenRouterModel[];
-    const models = sortModels(transformModels(upstream));
-
-    if (models.length < MIN_PLAUSIBLE_CATALOGUE) {
-      throw new Error(
-        `Only ${models.length} models survived transform (minimum ${MIN_PLAUSIBLE_CATALOGUE}) out of ${upstream.length} upstream entries.`,
-      );
-    }
-
-    return {
-      models,
-      // The host fan-out is the site's nightly job; this tier has none.
-      hostPricing: new Map(),
-      openRouterIds: new Map(),
-      source: "openrouter",
-      eloAsOf: ELO_AS_OF,
-      provenance: {
-        tier: 2,
-        source: "openrouter",
-        label: "openrouter.ai direct — list prices as published, uncorrected",
-        pricesVerified: false,
-        eloAsOf: ELO_AS_OF,
-        notice: `${UNVERIFIED_PRICING_NOTICE} ${NO_DEPRECATION_DATA}`,
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// ── Tier 3: the frozen snapshot ─────────────────────────────────────
+// ── Tier 2: the snapshot of the site ────────────────────────────────
 
 function fetchFromSnapshot(): LLMFetchResult {
   return {
@@ -1116,39 +364,40 @@ function fetchFromSnapshot(): LLMFetchResult {
     hostPricing: new Map(),
     openRouterIds: new Map(),
     source: "static-fallback",
-    eloAsOf: ELO_AS_OF,
+    eloAsOf: llmEloAsOf,
     dataAsOf: dataLastUpdated,
     provenance: {
-      tier: 3,
+      tier: 2,
       source: "static-fallback",
-      label: `static snapshot committed ${dataLastUpdated} — no network`,
+      label: `static snapshot of optimtoken.optimnow.io taken ${dataLastUpdated} — no network`,
       pricesVerified: false,
-      eloAsOf: ELO_AS_OF,
+      eloAsOf: llmEloAsOf,
       dataAsOf: dataLastUpdated,
       notice:
-        `STALE PRICING: both live sources were unreachable, so these figures come from a ` +
-        `snapshot taken on ${dataLastUpdated} and may be out of date. ${NO_DEPRECATION_DATA}`,
+        `STALE PRICING: optimtoken.optimnow.io could not be read, so these figures are the snapshot of it ` +
+        `taken on ${dataLastUpdated}: the prices, licences and Arena scores the site served that day. ` +
+        `Any of them may have moved since, and a model listed since is missing. ${NO_DEPRECATION_DATA}`,
     },
   };
 }
 
 /**
- * Fetch the model catalogue, degrading site -> direct OpenRouter -> snapshot.
+ * Fetch the model catalogue: the site, or the snapshot of it when the site
+ * cannot be read.
  *
- * Every tier reports what it is in `provenance`, and the two lower tiers carry
- * an explicit notice that their prices are unverified. A caller instructed to
- * report prices exactly as returned must be able to tell corrected figures from
- * uncorrected ones.
+ * Each reports what it is in `provenance`, and the snapshot carries an explicit
+ * notice with the day it was taken. A caller instructed to report prices
+ * exactly as returned must be able to tell today's figures from that day's.
  */
 export async function fetchLLMModels(): Promise<LLMFetchResult> {
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
+  if (cache && Date.now() - cache.fetchedAt < cache.ttlMs) {
     return cache.result;
   }
 
   // One fetch shared between concurrent callers. Cheaper here than on the
   // compute side (~200 ms cold rather than ~10 s) but free to do, and it stops
-  // a burst of tool calls on a cold process from walking the whole tier chain
-  // several times over.
+  // a burst of tool calls on a cold process from asking the site several times
+  // over.
   if (inflight) return inflight;
   inflight = (async () => {
     try {
@@ -1163,25 +412,20 @@ export async function fetchLLMModels(): Promise<LLMFetchResult> {
 let inflight: Promise<LLMFetchResult> | null = null;
 
 async function fetchAllTiers(): Promise<LLMFetchResult> {
-
   try {
     const result = await fetchFromSite();
-    cache = { result, fetchedAt: Date.now() };
+    cache = { result, fetchedAt: Date.now(), ttlMs: CACHE_TTL_MS };
     return result;
   } catch (siteError) {
-    console.error("[llm-models] site API failed, falling back to direct OpenRouter:", siteError);
-
-    try {
-      const result = await fetchFromOpenRouter();
-      cache = { result, fetchedAt: Date.now() };
-      return result;
-    } catch (openRouterError) {
-      console.error("[llm-models] OpenRouter fetch failed, serving static snapshot:", openRouterError);
-      // Deliberately not cached: the snapshot is the answer of last resort, and
-      // memoising it would keep serving stale data for the full TTL after the
-      // network recovered.
-      return fetchFromSnapshot();
-    }
+    console.error("[llm-models] site API failed, serving the static snapshot:", siteError);
+    // Remembered for a minute, never for the site's quarter of an hour: see
+    // FALLBACK_CACHE_TTL_MS. Until 0.11.0 the snapshot was not remembered at
+    // all, which was right while a live second tier stood in front of it and
+    // absorbed the wait; without one, every caller would pay the site's whole
+    // timeout for as long as the site hangs.
+    const result = fetchFromSnapshot();
+    cache = { result, fetchedAt: Date.now(), ttlMs: FALLBACK_CACHE_TTL_MS };
+    return result;
   }
 }
 

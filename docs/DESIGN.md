@@ -13,8 +13,7 @@ UI:           none. Eight tools; each answers with text and structuredContent
 Deployment:   Fly.io (app ai-pricing-hub-mcp, region cdg, scale-to-zero)
 Transport:    Streamable HTTP at /mcp, stateless (https://optimtoken-mcp.optimnow.io/mcp)
 Data:         optimtoken.optimnow.io API (source of truth)
-              → direct OpenRouter (LLM only, uncorrected)
-              → static fallback in data/pricing-data.ts
+              → static snapshot of it in data/pricing-data.ts
 ```
 
 ### Why there is no framework and no UI (0.5.0, 2026-11-11)
@@ -61,25 +60,122 @@ The base URL is one constant, `OPTIMTOKEN_BASE_URL` in `lib/optimtoken-api.ts`,
 overridable with the `OPTIMTOKEN_API_BASE_URL` env var. Do not hard-code a
 second host.
 
-| Tool | Tier 1 | Tier 2 | Tier 3 |
-|---|---|---|---|
-| LLM tools | `GET /api/llm-models` | `openrouter.ai` direct | static snapshot |
-| Compute tool | `GET /api/pricing?region=` | — | static snapshot (137 rows) |
-| Every host of a model (`compare-model-hosts`) | `GET /api/model-hosts?id=` | — | — (the summary on the model rows answers instead) |
-| Price changes (`track-llm-price-changes`) | `GET /api/price-changes` | — | — (the tool returns an error, never an empty list) |
+| Tool | Tier 1 | Tier 2 |
+|---|---|---|
+| LLM tools | `GET /api/llm-models` | static snapshot of it |
+| Compute tools | `GET /api/pricing?region=&os=Linux` | static snapshot (137 rows) |
+| Every host of a model (`compare-model-hosts`) | `GET /api/model-hosts?id=` | none (the summary on the model rows answers instead) |
+| Price changes (`track-llm-price-changes`) | `GET /api/price-changes` | none (the tool returns an error, never an empty list) |
 
 The compute tool served the static array alone until optimtoken became the
 source of truth. Its `openWorldHint` was corrected to `true` at that point.
 
-**Tiers 2 and 3 serve uncorrected prices.** That is not a detail: OpenRouter has
-published GPT-5.6 Sol at $2.50/$15 against OpenAI's actual $5/$30, halving every
-derived monthly figure. Every response therefore carries a `provenance` object
-with `pricesVerified`, and the lower tiers set a `notice` that leads the text
-output. A fallback must never silently downgrade correctness.
+**The snapshot serves the site's figures of another day.** Its prices are the
+corrected ones, its licences the verified ones and its Arena scores the site's,
+all as of the day it was taken (`dataAsOf`, and `eloAsOf` for the scores), and
+any of them may have moved since. Every response therefore carries a
+`provenance` object with `pricesVerified`, true on tier 1 only, and the
+snapshot sets a `notice` that leads the text output and states its day. A
+fallback must never silently downgrade correctness. The snapshot carries no
+host prices and no retirement notices, and says so.
+
+**Refresh both snapshots before each release**: `npm run refresh-fallback` and
+`npm run refresh-compute-fallback`. With no second live source (below), the
+snapshot's age is the age of every figure this server serves while the site is
+down.
+
+**Why there is no second live source (0.11.0).** Until 0.11.0 the LLM tools had
+three tiers: the site, then `openrouter.ai` read directly and run through this
+server's own port of the site's transform, then the snapshot. The middle tier
+was removed on the owner's decision, once `check-parity` was made to run both
+transforms over one OpenRouter payload. On 2026-11-12, over 468 upstream rows:
+
+| | |
+|---|---|
+| Models listed | 311 on the site, 288 on that tier (23 missing, most of them `-preview` models the site keeps) |
+| List price differed | 2 of the 288 listed by both (the site's corrections) |
+| Batch price differed | 7 |
+| Parameters differed | 21 |
+| Licence differed | 113 |
+| Openness bucket differed | 84, both ways: 13 models the site records as MIT or Apache 2.0 read Proprietary or Unknown, 24 with no recorded licence read Open source or Open weights |
+| Price tier, capabilities, release date, Arena score, context window | 0 |
+
+Its answers warned about prices, where it was nearly right, and said nothing
+about licences, where it was wrong for more than a quarter of the models. It
+also held no host prices and no retirement notices, and its transform read the
+upstream rows unguarded: one malformed row would have thrown. Against a
+snapshot a few days old it was ahead on price freshness and behind on
+everything else measured. The cause is structural: a port that only runs when
+the site is down is a port nothing exercises, so it drifted for three months
+unseen. What went with it: the transform and its tables (the Arena scores, the
+exclusion rules, the licence prefixes, the release dates: 700 of the file's
+1,300 lines), `ELO_AS_OF`, and the `"openrouter"` value of `source`.
+
+Two things changed for a consumer, both in `provenance`: **`tier` is 1 or 2**,
+the numbering the compute tools use, where the snapshot was 3 and direct
+OpenRouter was 2; and `source` is `optimtoken` or `static-fallback`. Do not
+bring a second live source back without something that holds it to the site on
+every change, as `check-parity` holds the cost logic.
 
 Tier 1 is only accepted when the site reports `meta.source === "openrouter"` —
 anything else means the site is itself serving its own fallback and carries no
 fresh corrections.
+
+**How long each LLM tier is remembered (0.11.0).** The site's catalogue is
+memoised for 15 minutes, the snapshot for one (`FALLBACK_CACHE_TTL_MS` in
+`lib/llm-models.ts`). Until 0.11.0 the fallback in front was direct OpenRouter
+and shared the 15 minutes. Reproduced on 2026-11-12 with the site answering
+HTTP 502 once and 200 a second later: this server stayed on its fallback for 15
+minutes, with no host prices, no retirement notices and no upstream ids for
+`compare-model-hosts` and the price histories, and asked the site once in that
+time. The snapshot itself was not memoised at all then, which was right while a
+live tier stood in front of it and absorbed the wait. Without one, the memo is
+a minute and not zero: while the site hangs, each attempt costs its whole 15 s
+timeout, and a minute keeps that to one caller a minute. The compute snapshot
+is still not memoised (a stale memo answers there first: see Constraints).
+
+**A provider the site could not read live (0.11.0).** `/api/pricing` does not
+fail when a provider API does. It serves that provider from its built-in static
+rows, still under HTTP 200, and says so three ways: `meta.liveProviders`
+(`{ live, expected }`, its schema 1.2), `meta.sources` and an entry in
+`meta.errors` under the provider's name. It also keeps such an answer for 30
+minutes at its edge, or 2 when most providers are missing, where a complete one
+is kept for a day (`cacheControlFor` in its `api/pricing.ts`). Until 0.11.0 this
+server read none of that. Reproduced on 2026-11-12 with the site's own handler
+and every provider API unreachable: 137 static rows arrived, were served as an
+ordinary tier-1 catalogue, memoised for the hour, and "Azure, 64 vCPUs or more"
+answered "0 of 137 compute instances match", where production that day answered
+"476 of 3,555". One provider missing is the likelier case and the worse trap:
+Azure falls from about 1,700 Linux rows to 18, and "the cheapest 16 vCPU
+instance" is then chosen without it. Four things hold it now, all in
+`lib/compute-pricing.ts`:
+
+- **The providers are read from the answer, not from a list kept here.** A
+  provider is degraded when `meta.sources` says its rows are static and
+  `meta.errors` carries an entry under its name (`degradedProvidersOf`). The
+  site writes that entry for every provider whose fetch it did not adopt, and
+  none for Alibaba, which it never reads live. `provenance.degradedProviders`
+  carries each name with the Linux rows it is left with, `liveProviders` is
+  repeated as sent, and `catalogueIsSubset` is set as it is on the snapshot
+  tier. If the errors name no provider while the count says one is missing, the
+  answer says how many and points at `provenance.sources`: no name is guessed.
+- **The text says it, twice.** The notice that leads the answer opens with
+  `INCOMPLETE CATALOGUE`, names the providers and their row counts, and says an
+  instance the answer does not list is not thereby unavailable.
+  `incompleteCatalogueCaveat()` repeats it beside an empty result in
+  `compare-compute-pricing` and beside an instance not found in
+  `estimate-self-hosting-breakeven`, unless the question named a provider that
+  was read live. `compare-compute-pricing` also prints `upstreamErrors`, which
+  existed in `structuredContent` only (decision 1b).
+- **An incomplete catalogue is memoised for 5 minutes** (`DEGRADED_CACHE_TTL_MS`),
+  not for the hour, then refreshed behind the caller like any stale memo. While
+  the site still holds the same answer the refresh is an edge hit.
+- **An incomplete answer does not replace a complete memo.** Compute list
+  prices move on a scale of weeks, so the hours-old live rows of a provider
+  beat the 18 static ones sent in their place. The refresh is retried every 5
+  minutes (`REFRESH_RETRY_MS`, which also spaces the retries after a failed
+  refresh: every call past the TTL used to start one). Past the 12-hour stale
+  window the cold path takes what the site has, and says it is incomplete.
 
 ### Project Structure
 
@@ -109,6 +205,7 @@ ai-pricing-hub-mcp/
 │       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
 │       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
 │       │   ├── server-instructions.ts # What the server tells the calling model when it connects
+│       │   ├── site-schema.ts        # The site's schema versions this server was read against
 │       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, price-changes, public-url, self-hosting, server-instructions
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
@@ -118,6 +215,7 @@ ai-pricing-hub-mcp/
 │   └── chatgpt-app-smoke-tests.md    # The positive / negative cases the portal asks for
 ├── scripts/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
+│   ├── refresh-compute-fallback.mjs  # Re-reads the figures of the 137 static compute rows
 │   ├── check-site-parity.mjs         # Manual: run this server's logic and the site's over the live catalogue
 │   ├── check-connector.mjs           # Manual: call a deployed connector: tools, tier, eight calls at once
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
@@ -356,7 +454,11 @@ The surface that could drift has shrunk, but it has not gone.
 prices now arrive from the site on tier 1 rather than being re-derived here.
 That closes the class of bug that produced a retired `Open Weights` category and
 an unrecognised `Llama 4` licence in this repo — both of which had already
-diverged before the switch.
+diverged before the switch. Since 0.11.0 nothing re-derives them on any tier:
+the OpenRouter transform, the largest port in this repository and the one
+nothing compared, was removed with its tier (see "Why there is no second live
+source"), and the Arena scores are no longer copied from the site: the snapshot
+carries the scores the site served, dated by `llmEloAsOf`.
 
 **Still a manual port, and still able to drift:**
 
@@ -372,9 +474,6 @@ diverged before the switch.
   the next one: `fetchFromSite` logs any licence string the buckets do not know,
   and a test holds the buckets to every licence in the snapshot, so a
   `refresh-fallback` that brings a new string in fails until it is added.
-- `lib/llm-models.ts` tier 2 — the whole OpenRouter transform (ELO table,
-  categories, exclusions, licence prefixes) is a port and only runs when the site
-  is unreachable, so its drift is invisible until the day it matters.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference, applied locally to the site's rows. It is the site's file copied
   whole (only its two imports differ), with `lib/azure-size-name.ts` holding the
@@ -449,12 +548,16 @@ Three things keep the two honest:
   the retirement notice against the site's own table,
   the formatters, the per-host price rules, and the category, processor and
   use cases of every row of the live compute catalogue. It exits 1 on any
-  difference and lists the site's row fields this server does not carry. Outside CI because the site's repository
-  is private. **Run it before each release and after any change to the cost
-  code.** 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
+  difference and lists the site's row fields this server does not carry. Outside this repository's CI because the site's repository
+  is private. The reverse needs no secret, this repository being public: **since
+  2026-11-12 the site runs the script on a schedule** (`.github/workflows/mcp-parity.yml`
+  there) against this repository's `master`, and opens an issue when it exits 1.
+  **Still run it before each release and after any change to the cost code:**
+  the schedule finds a difference a day later, not before the deploy. 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
   scores, 3 badges, 17 openness buckets. After: none.
-- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated` only: the static compute rows have their own date, `computeDataLastUpdated`, because the script never touches them.
-- The tier-2 ELO table in `lib/llm-models.ts` is the site's, copied whole between the `ELO-SCORES-START/END` markers together with `ELO_AS_OF`. The site rewrites every value weekly from one read of Arena's leaderboard; a partial copy would mix two scales. The rest of the tier-2 transform (exclusions, licence prefixes, release dates) was last ported in August 2026 and has not been re-read since.
+- `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated`, and `llmEloAsOf` to the site's `meta.eloAsOf`, the date of the Arena scores on the rows. The static compute rows have their own date, `computeDataLastUpdated`, and their own script.
+- `npm run refresh-compute-fallback` (0.11.0) rewrites the figures of the 137 static compute rows, the ones served when the site cannot be reached at all. Nobody had re-snapshotted them since 2026-03-06: on 2026-11-12, 96 of the 137 differed from what the site itself serves for a provider it cannot read, on-demand rates by up to 69% and savings-plan rates by up to 28%. Each row is read from the live catalogue (`?region=us-east&os=Linux`, the URL this server and the compute page share) when it lists the instance type, 118 rows that day, and otherwise from the site's own static catalogue in its checkout, 19 rows (16 GCP types and 3 DigitalOcean sizes the site only serves while it cannot read the provider). The sample and its section comments are kept: a row is added or removed by hand. The script refuses an answer in which a provider was not read live, because that answer holds the site's static rows in place of today's prices, and a test holds every row to the one layout the script recognises.
+- **`SYNCED_SITE_SCHEMAS` in `lib/site-schema.ts`** (0.11.0) is the schema version of each of the four endpoints this server was last read against: `/api/llm-models` 2.8, `/api/pricing` 1.3, `/api/model-hosts` 1.0, `/api/price-changes` 1.0. The site bumps a version with every field it adds or whose meaning it changes (2.4 changed what `Reasoning` means, 2.5 removed `Code`); this server recorded the version it was served and compared it with nothing, so each bump was followed by hand on the day someone noticed. Now `check-parity` fails when an entry differs from the site's constants (`src/lib/api-schema-versions.ts`) or from what the live endpoints answer, which on the site's schedule turns a bump into an issue, and each reader logs once per process when the versions differ (`noteSiteSchema`). The answer is still served: the coercions refuse what they cannot read, row by row, and a version this server has not seen is not evidence that its prices are wrong. Move an entry only when the change behind the new version has been read and either carried or decided against.
 
 Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.
 
@@ -464,7 +567,7 @@ The values are `LLM_CAPABILITIES` in `data/pricing-data.ts`: Text, Vision,
 Reasoning, Agents, Image Gen, Audio. The site removed `Code` on 2026-10-05 (its
 LLM schemaVersion 2.5): it was assigned to any model whose output cost $0.50 per
 1M tokens or more, 225 of 292 models, so it described a price and not an
-ability. This repo followed the same day. Three things hold it:
+ability. This repo followed the same day. Two things hold it:
 
 - **One list.** The `LLMCapability` type and both tool descriptions
   (`capability`, `requiredCapability`) are built from `LLM_CAPABILITIES`, so a
@@ -472,17 +575,18 @@ ability. This repo followed the same day. Three things hold it:
 - **The site's payload is filtered to that list** (`coerceSiteModel`). A
   deployment a release behind, or rolled back, would otherwise put `Code` back
   on its rows while the descriptions say it does not exist.
-- **The OpenRouter tier no longer assigns it** (`inferCapabilities`).
 
-`lib/capabilities.test.ts` pins all three and the snapshot.
+`lib/capabilities.test.ts` pins both and the snapshot. (A third went in 0.11.0:
+this server's own inference of capabilities, on the OpenRouter tier removed
+then.)
 
 **`Reasoning` means the model exposes a reasoning control upstream**: OpenRouter
 lists `reasoning` in its `supported_parameters` (a thinking budget or effort
 setting). It is not a quality claim. The site moved to that rule on 2026-09-21;
-the OpenRouter tier here kept a name match ("-pro", "thinking", "o4", ...) until
-2026-10-05, so a caller filtering on `Reasoning` got a different set depending on
-which tier answered. Both tiers now use the parameter, and the same test file
-pins that a name alone never fires.
+the OpenRouter tier this server then had kept a name match ("-pro", "thinking",
+"o4", ...) until 2026-10-05, so a caller filtering on `Reasoning` got a
+different set depending on which tier answered. That tier is gone since 0.11.0:
+the tag is the site's on every row this server serves.
 
 ---
 
@@ -490,12 +594,10 @@ pins that a name alone never fires.
 
 ```
 optimtoken /api/llm-models → fetchLLMModels() → enrichModels() → filterModels() → sortEnrichedModels() → structuredContent
-        ↓ (tier 2, uncorrected)                                                                 + provenance
-openrouter.ai/api/v1/models
-        ↓ (tier 3)
-pricing-data.ts (static snapshot)
+        ↓ (tier 2)                                                                              + provenance
+pricing-data.ts llmModels (snapshot of the site)
 
-optimtoken /api/pricing?region= → fetchComputeInstances() → enrichInstances() → filter/sort
+optimtoken /api/pricing?region=&os=Linux → fetchComputeInstances() → enrichInstances() → filter/sort
         ↓ (tier 2)                                                      → structuredContent
 pricing-data.ts computeInstances                                          + provenance
 ```
@@ -878,8 +980,8 @@ Each profile defines typical input/output token counts per request.
 
 - No API keys required — both optimtoken endpoints are public, unauthenticated and CORS-open
 - No database — stateless tool execution
-- `/api/pricing` costs ~0.3s on an edge-cache HIT and 6–11s on a MISS (re-measured 2026-08-18; it was ~50s before upstream PR #57), and every distinct query string is its own cache entry. Always request the canonical `?region=` URL and filter locally: narrowing the URL trades a warm hit for a cold rebuild *and* returns less data. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background.
-- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is **25 s**, guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it.
+- `/api/pricing` costs ~0.3s on an edge-cache HIT and 9–20s on a MISS (re-measured 2026-11-12; 6–11s on 2026-08-18, ~50s before upstream PR #57), and every distinct query string is its own cache entry. **Ask for the compute page's own URL, `?region=<slug>&os=Linux`, and filter the rest locally** (0.11.0). Until then this server asked for the region alone, which had been the page's URL until the site added `?os=`: from that day it held an edge entry of its own, cold whenever it was, and downloaded 1.44 MB to drop the Windows 42%. Every miss is a fan-out to six provider APIs, and three inside a minute drew a 429 from Azure on 2026-11-12, so a second key for the same question is not free for the site either. Narrowing the URL further (`?provider=`) trades a warm hit for a cold rebuild *and* returns less data. `check-parity` asks for the same URL. Results are memoised per region for 60 minutes, then served stale for up to 12 hours while a refresh runs in the background. An answer with a provider the site could not read live is memoised for 5 minutes instead: see "A provider the site could not read live" under Architecture.
+- **The two endpoints need different timeouts, and conflating them is a shipped bug.** Re-measured 2026-08-18 (24 cold samples across all four regions, over three separate runs — the first 8 gave a max of 8.9 s and two later runs both beat it, so the sample had to be widened): `/api/llm-models` is 0.19–0.42 s cold / 31 ms warm; `/api/pricing` is **6.1–10.7 s cold** / 80–350 ms warm, because the site assembles six provider APIs inside a `maxDuration: 60` function. `compare-compute-pricing` shipped with the LLM endpoint's 20 s budget against a cold path that then took 50.5 s — *shorter than the cold path always took* — so a cold edge entry could not reach tier 1 at all and the tool served the static snapshot on every call. `UPSTREAM_TIMEOUT_MS` in `lib/compute-pricing.ts` is guarded by two tests: it must exceed `MEASURED_COLD_REBUILD_MS`, and it must keep `MIN_COLD_PATH_HEADROOM` (2x) over it. It was 25 s against 11 s from 2026-08-18. **Re-measured on 2026-11-12: six complete cold answers between 8.8 and 19.5 s, four of them past 11 s** (the table is above the constant). The measurement went to 20 s and the budget, by the 2x rule, to **40 s**. Six samples is fewer than the rule of this paragraph asks for; they were not extended because the seventh, the third cold request inside a minute, came back with Azure answering 429. Take cold samples one at a time and minutes apart.
   **This paragraph used to say 55 s and "do not tune it down"; that was correct advice against a 50.5 s cold path, and upstream PR #57 (2026-08-18) cut that path by ~6x.** The rule it was protecting has not changed — never size this budget from the LLM endpoint's profile — but the number that satisfies it has. Re-measure before moving it again, and move all four places together (the two constants, the guard tests, and this bullet). Do not restore 55 s just because this paragraph once said so.
 - **A short budget plus a retry does not work here, and this was measured, not assumed.** Aborting at 20 s against a guaranteed-cold cache key and re-probing every 5 s left the key cold at t+236 s (measured 2026-08-17, against the 50.5 s rebuild; not re-run since PR #57, but the mechanism does not depend on the rebuild's duration): an abandoned request leaves no warm entry behind, and each short probe just starts another rebuild it also abandons. One request has to see the rebuild through.
 - **The compute catalogue is enriched once, not per request.** `servableCatalogue()`
@@ -908,15 +1010,15 @@ Each profile defines typical input/output token counts per request.
   every wake, and it still earns its keep for the same reason: the first caller
   of a wake would otherwise fund the fetch. Budget two upstream fetches per
   wake plus two per deploy. That is cheap while the upstream edge cache is warm
-  (measured 205-324 ms per fetch on Alpic, 2026-08-18) and 7-11 s per fetch if
-  it is cold. Not yet re-measured on Fly: when the wake rate is known, decide
+  (measured 205-324 ms per fetch on Alpic, 2026-08-18) and 9-20 s per fetch if
+  it is cold (2026-11-12). Not yet re-measured on Fly: when the wake rate is known, decide
   whether `min_machines_running = 1` (one machine always on, roughly $3 a
   month) buys a memo that is worth more than the stopped machine saves. On a
   per-request runtime the warm-up would be pure waste, so re-check this
   before moving hosts again.
 
   Three rules it must keep:
-  - **Never block start-up.** The upstream can take 11 s; awaiting it turns
+  - **Never block start-up.** The upstream can take 20 s; awaiting it turns
     a slow site into a failed boot.
   - **Never cache a failure.** The fetchers do not cache snapshot fallbacks, so a
     failed warm leaves the cache empty and the first real caller pays what it

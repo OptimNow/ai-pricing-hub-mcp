@@ -9,7 +9,16 @@
 //
 //   npm run check-parity -- <path to the cloud-sparkle-compare checkout>
 //
-// The path defaults to a sibling folder of the repository root, or SITE_CHECKOUT.
+// It also holds the schema version of each endpoint this server reads to the
+// one it was last read against (lib/site-schema.ts).
+//
+// The site runs this script on a schedule (.github/workflows/mcp-parity.yml in
+// its repository, which can clone this public one; the reverse needs a secret)
+// and opens an issue when it exits 1.
+//
+// The path defaults to SITE_CHECKOUT, then to a sibling folder of the repository
+// root under either of the site's names: cloud-sparkle-compare, as the owner's
+// checkout is still called, or ai-pricing-hub, as the repository is now.
 // Exits 1 on any difference. Outside CI on purpose: the site's repository is
 // private, and the check needs the live catalogue.
 //
@@ -25,15 +34,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
+const SIBLING_NAMES = ["cloud-sparkle-compare", "ai-pricing-hub"];
+const siblings = SIBLING_NAMES.map((name) => join(repoRoot, "..", name));
 const sitePath = resolve(
-  process.argv[2] || process.env.SITE_CHECKOUT || join(repoRoot, "..", "cloud-sparkle-compare"),
+  process.argv[2] ||
+    process.env.SITE_CHECKOUT ||
+    siblings.find((path) => existsSync(join(path, "tsconfig.app.json"))) ||
+    siblings[0],
 );
 const siteTsconfig = join(sitePath, "tsconfig.app.json");
 
 if (!existsSync(siteTsconfig)) {
   console.error(
-    `No site checkout at ${sitePath} (looked for tsconfig.app.json).\n` +
-      "Pass its path: npm run check-parity -- <path to cloud-sparkle-compare>",
+    `No site checkout at ${sitePath} (looked for tsconfig.app.json, and for a sibling folder named ` +
+      `${SIBLING_NAMES.join(" or ")}).\n` +
+      "Pass its path: npm run check-parity -- <path to the site's checkout>",
   );
   process.exit(2);
 }
@@ -90,6 +105,36 @@ const report = (label, count, total, detail = []) => {
 if (pairs.length !== rows.length) {
   report("rows accepted by coerceSiteModel", rows.length - pairs.length, rows.length);
 }
+
+// 0. Schema versions. The site bumps one with every field it adds or whose
+//    meaning it changes; this server follows by hand. A difference here is the
+//    site saying "something changed": read its note beside the schemaVersion
+//    in the handler, carry the change or decide against it, then move the
+//    entry in lib/site-schema.ts. Compared with the site's own constants, and
+//    with what the two endpoints this script reads answer live.
+const mcpSchema = await load(join(repoRoot, "server/src/lib/site-schema.ts"));
+const siteSchema = await load(join(sitePath, "src/lib/api-schema-versions.ts"));
+const SITE_SCHEMA_CONSTANTS = {
+  "/api/llm-models": "LLM_SCHEMA_VERSION",
+  "/api/pricing": "COMPUTE_SCHEMA_VERSION",
+  "/api/model-hosts": "MODEL_HOSTS_SCHEMA_VERSION",
+  "/api/price-changes": "PRICE_CHANGES_SCHEMA_VERSION",
+};
+const schemaDiff = [];
+const syncedEndpoints = Object.keys(mcpSchema.SYNCED_SITE_SCHEMAS).sort().join(", ");
+if (syncedEndpoints !== Object.keys(SITE_SCHEMA_CONSTANTS).sort().join(", ")) {
+  schemaDiff.push(`lib/site-schema.ts lists ${syncedEndpoints}: not the four endpoints this script knows`);
+}
+for (const [endpoint, constant] of Object.entries(SITE_SCHEMA_CONSTANTS)) {
+  const here = mcpSchema.SYNCED_SITE_SCHEMAS[endpoint];
+  const there = siteSchema[constant];
+  if (here !== there) schemaDiff.push(`${endpoint}: read against ${here} here, ${there} in the site's checkout (${constant})`);
+}
+const servedSchema = (endpoint, served) => {
+  const here = mcpSchema.SYNCED_SITE_SCHEMAS[endpoint];
+  if (served !== here) schemaDiff.push(`${endpoint}: read against ${here} here, the live site answers ${served}`);
+};
+servedSchema("/api/llm-models", meta.schemaVersion);
 
 // 1. Use-case profiles: the same workloads, or nothing below means anything.
 const profilesDiffer = JSON.stringify(site.USE_CASE_PROFILES) !== JSON.stringify(mcp.USE_CASE_PROFILES);
@@ -215,8 +260,12 @@ report("standard rate behind a promotion", standardDiff.length, promotionCount |
 //    copied whole. On 2026-11-11, before it was copied again, 826 of 3,555
 //    Linux rows in us-east carried another processor here than on the site
 //    (121 of the 211 GPU rows) and 138 another category. Compared over the
-//    live compute catalogue, every operating system.
-const PRICING_URL = process.env.PRICING_API_URL || "https://optimtoken.optimnow.io/api/pricing?region=us-east";
+//    live compute catalogue's Linux rows, by the URL the site's compute page
+//    and this server both ask for: a URL of this script's own would be one
+//    more cold fan-out to six provider APIs on every run, and the three
+//    labels are read off the provider and the instance type, never the OS.
+const PRICING_URL =
+  process.env.PRICING_API_URL || "https://optimtoken.optimnow.io/api/pricing?region=us-east&os=Linux";
 const mcpCompute = await load(join(repoRoot, "server/src/lib/compute-categories.ts"));
 const siteCompute = await load(join(sitePath, "src/lib/compute-categories.ts"));
 const pricingResponse = await fetch(PRICING_URL, { headers: { Accept: "application/json" } });
@@ -224,11 +273,13 @@ if (!pricingResponse.ok) {
   console.error(`${PRICING_URL} returned HTTP ${pricingResponse.status}. The compute check did not run.`);
   process.exit(2);
 }
-const { instances } = await pricingResponse.json();
+const { instances, meta: pricingMeta } = await pricingResponse.json();
 if (!Array.isArray(instances) || instances.length === 0) {
   console.error(`${PRICING_URL} returned no instances. The compute check did not run.`);
   process.exit(2);
 }
+servedSchema("/api/pricing", pricingMeta?.schemaVersion);
+report("site schema versions this server was read against", schemaDiff.length, 4, schemaDiff);
 const computeDiff = [];
 for (const list of ["ALL_CATEGORIES", "ALL_PROCESSORS", "ALL_USE_CASES"]) {
   if (JSON.stringify(mcpCompute[list]) !== JSON.stringify(siteCompute[list])) computeDiff.push(`${list} is not the site's list`);

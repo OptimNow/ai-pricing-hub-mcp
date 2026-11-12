@@ -90,5 +90,5 @@ removed in 0.5.0, deliberately. A ChatGPT submission is now a tools-only
 connector or nothing; decide which before spending time on the blockers above.
 
 The latency section above also predates two changes: the site's cold
-`/api/pricing` rebuild fell from about 50 s to 6 to 11 s in August 2026, and
-this server's budget for it is 25 s.
+`/api/pricing` rebuild fell from about 50 s to 6 to 11 s in August 2026 and
+measured 9 to 20 s on 2026-11-12, and this server's budget for it is 40 s.

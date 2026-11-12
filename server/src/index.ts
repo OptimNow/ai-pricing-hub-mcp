@@ -86,6 +86,7 @@ import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
   fetchComputeInstances,
+  incompleteCatalogueCaveat,
 } from "./lib/compute-pricing.js";
 import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
 import { deprecationLegend, deprecationTag, describeDeprecation } from "./lib/deprecation.js";
@@ -254,12 +255,19 @@ const computeProvenanceSchema = z.object({
   // AWS savingsPlan1yr/3yr columns, which upstream reads weekly.
   awsSavingsPlansAsOf: z.string().optional(),
   upstreamErrors: z.array(z.string()).optional(),
+  // How many of the providers the site reads live answered it on this read, and
+  // the ones that did not, each with the Linux rows it is left with: the site's
+  // static sample, a small part of that provider's catalogue.
+  liveProviders: z.object({ live: z.number(), expected: z.number() }).optional(),
+  degradedProviders: z.array(z.object({ provider: z.string(), rows: z.number() })).optional(),
   // Tier-2 diagnostics. `fallbackReason` says why tier 1 was missed, classified
   // and timed; `unappliedFilters` names the arguments this tier accepted and
   // then could not honour, so a consumer reading only `instances` is not left
   // to infer that from an empty array.
   fallbackReason: z.string().optional(),
   unappliedFilters: z.array(z.string()).optional(),
+  // True on tier 2 (the snapshot) and on a tier-1 answer with a provider in
+  // `degradedProviders`: "no match" is then not "no such instance".
   catalogueIsSubset: z.boolean().optional(),
   servedFromCacheAgeMs: z.number().optional(),
   dataAsOf: z.string().optional(),
@@ -833,9 +841,11 @@ type Recommendation = z.infer<typeof recommendationSchema>;
  * Two wastes were stacked here. `enrichInstances()` ran over all ~6,050 rows on
  * every single request — 60-85% of warm CPU and ~2.6 MB of allocation — even
  * though the catalogue behind it is memoised for an hour and the enrichment is
- * a pure function of it. And ~41% of those rows are Windows, which the filter
+ * a pure function of it. And ~41% of those rows were Windows, which the filter
  * below discarded immediately afterwards, so nearly half the work could never
- * reach a caller.
+ * reach a caller. Since 0.11.0 the Windows rows are no longer downloaded (the
+ * fetch asks the site for Linux); the filter stays, for a site that ignores
+ * the parameter and for the snapshot.
  *
  * Keyed by the catalogue array identity rather than by region or a timestamp:
  * the memo in compute-pricing.ts hands back the same array for the life of an
@@ -1647,7 +1657,7 @@ tool(
       // announced its retirement is set aside here: after the scoring, which
       // stays over the whole catalogue as on the site, and before the picks.
       // It is counted and, where it would have ranked, named: left out is not
-      // the same as hidden. No row carries a notice on tiers 2 and 3, so
+      // the same as hidden. No row carries a notice on the snapshot, so
       // nothing is set aside there and the notice that leads the text says why.
       const evaluatedAll = ranked.map(m => ({ m, constraints: checks(m), shortfall: shortfall(m) }));
       const evaluated = evaluatedAll.filter(e => !e.m.deprecation);
@@ -1854,10 +1864,10 @@ tool(
     const emptyOutput = { instances: [], matchingCount: 0, catalogSize: 0, source: "error" };
 
     try {
-      // The whole regional catalogue, filtered here rather than upstream: the
-      // site caches per query string, so narrowing the URL would trade a warm
-      // edge hit for a cold rebuild — and "the 20 cheapest matches" is only
-      // correct when computed over everything.
+      // The region's whole Linux catalogue, filtered here rather than upstream:
+      // the site caches per query string, so narrowing the URL further would
+      // trade a warm edge hit for a cold rebuild — and "the 20 cheapest
+      // matches" is only correct when computed over everything.
       const { instances: catalogue, source, provenance } = await fetchComputeInstances(
         (region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION,
       );
@@ -1897,12 +1907,19 @@ tool(
       // prose, which a consumer reading `instances` alone never sees — and an
       // empty array is exactly the case where it most needs saying.
       const unapplied = provenance.unappliedFilters ?? [];
+      // Tier 1 has the same trap when the site could not read a provider live:
+      // it serves that provider's few static rows under HTTP 200, and "Azure,
+      // 64 vCPUs or more" then matches nothing out of 18 rows where the live
+      // catalogue holds hundreds.
+      const incomplete = filtered.length === 0 ? incompleteCatalogueCaveat(provenance, provider) : null;
       const subsetCaveat =
         provenance.tier === 2 && filtered.length === 0
           ? `\nNOTE: this is the ${enriched.length}-row static snapshot, not the ~5,800-instance ` +
             `live catalogue, so "no match" here does not mean no such instance exists.` +
             (unapplied.length ? ` Filters accepted but NOT applied: ${unapplied.join(", ")}.` : "")
-          : "";
+          : incomplete
+            ? `\nNOTE: ${incomplete}`
+            : "";
 
       // Build text summary. Every rate the row carries is printed, with its
       // saving against on-demand: the commitment rates used to exist in
@@ -1930,6 +1947,9 @@ tool(
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               (provenance.unavailablePriceColumns.length
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
+                : "") +
+              (provenance.upstreamErrors?.length
+                ? `Reported by the site on this read: ${provenance.upstreamErrors.join("; ")}.\n`
                 : "") +
               `${filtered.length} of ${enriched.length} compute instances match (showing ${results.length}). ` +
               `Linux list prices in USD per hour. Spot and commitment rates show their saving against the ` +
@@ -2489,6 +2509,7 @@ tool(
         const providers = [...new Set(matches.map(inst => inst.provider))];
 
         if (matches.length === 0) {
+          const incomplete = incompleteCatalogueCaveat(computeProvenance, provider);
           const near = catalogue
             .filter(inst => inst.instanceType.toLowerCase().includes(wanted) || wanted.includes(inst.instanceType.toLowerCase()))
             .slice(0, 5)
@@ -2500,9 +2521,10 @@ tool(
             (near.length > 0 ? ` Close names: ${near.join(", ")}.` : "") +
             ` Instance names are matched exactly; list candidates with compare-compute-pricing ` +
             `(category "GPU / Accelerated"), or pass hourlyRate for hardware the catalogue does not carry.` +
-            (computeProvenance.catalogueIsSubset
+            (computeProvenance.tier === 2 && computeProvenance.catalogueIsSubset
               ? ` This is the static snapshot, a subset of the live catalogue, so "no match" does not mean no such instance exists.`
-              : "");
+              : "") +
+            (incomplete ? ` ${incomplete}` : "");
         } else if (providers.length > 1) {
           fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: say which with provider.`;
         } else {
@@ -3268,7 +3290,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.10.0",
+      version: "0.11.0",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.
@@ -3327,7 +3349,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
  * it.
  *
  * Deliberately fire-and-forget: start-up must not wait on an upstream
- * that can take 11 s, or a slow site turns into a failed boot. A failure here
+ * that can take 20 s, or a slow site turns into a failed boot. A failure here
  * is logged and dropped — the fetchers do not cache snapshot fallbacks, so a
  * failed warm leaves the cache empty and the first real caller simply pays what
  * it would have paid anyway.

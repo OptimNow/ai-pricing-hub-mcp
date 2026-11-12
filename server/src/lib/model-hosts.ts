@@ -21,6 +21,7 @@
 import { UpstreamFetchError, fetchOptimtokenJson, optimtokenUrl } from "./optimtoken-api.js";
 import { coerceHostOffer } from "./host-prices.js";
 import type { HostOffer } from "./host-prices.js";
+import { noteSiteSchema } from "./site-schema.js";
 
 /** The site answers 400 beyond this many ids. */
 export const MAX_MODEL_HOST_IDS = 4;
@@ -198,6 +199,8 @@ export async function fetchModelHosts(ids: readonly string[]): Promise<ModelHost
       elapsedMs: Date.now() - startedAt,
     });
   }
+
+  noteSiteSchema("/api/model-hosts", result.meta.schemaVersion);
 
   // A bounded memo: the keys are sets of model ids a caller chose, so the map
   // would otherwise grow with every distinct combination asked for.
