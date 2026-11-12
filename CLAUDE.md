@@ -3,7 +3,7 @@
 **Project:** AI Pricing Hub MCP
 **Stack:** Node and the official MCP SDK (`@modelcontextprotocol/sdk`). No framework, no UI.
 **Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
-**Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp). A push to `master` deploys it once CI passes (`.github/workflows/ci.yml`), so merging a pull request is a production release. The same run then publishes `server.json` to the MCP registry when its version is new there, and a published version can never be edited: a pull request that bumps the version decides what the registry shows for it.
+**Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp). A push to `master` deploys it once CI passes (`.github/workflows/ci.yml`), so merging a pull request is a production release. The same run then publishes `server.json` to the MCP registry when its version is new there, and a published version can never be edited: a pull request that bumps the version decides what the registry shows for it. It also creates the tag and the GitHub release `v<version>` for a version that has none.
 
 ## Commits and pull requests
 

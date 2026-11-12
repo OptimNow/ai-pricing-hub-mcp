@@ -95,3 +95,44 @@ test("after a deploy, a registry that does not answer is a warning and not a fai
   assert.ok(unreadable.indexOf("::warning") < unreadable.indexOf("else"), "the deploy path warns");
   assert.ok(unreadable.indexOf("exit 1") > unreadable.indexOf("else"), "the run by hand fails");
 });
+
+/**
+ * The github-release job of ci.yml creates the tag v<version> and its GitHub
+ * release after a deploy. It holds the one token of this workflow that can
+ * write to the repository, so what bounds it is held here too.
+ */
+test("the GitHub release follows the deploy, and only its job can write to the repository", () => {
+  const job = ciJob("github-release");
+  assert.match(job, /^ {4}needs: deploy$/m);
+  assert.match(job, /^ {6}contents: write/m);
+  assert.equal([...ci.matchAll(/contents: write/g)].length, 1, "no other job of ci.yml can write");
+  assert.match(job, /persist-credentials: false/);
+  // It runs git, gh, jq and curl, and nothing the repository ships.
+  assert.doesNotMatch(job, /\bnpm\b|\bnode\b|\bnpx\b/);
+});
+
+test("a release is created only for a version GitHub has no release of", () => {
+  const job = ciJob("github-release");
+  const create = job.indexOf("gh release create");
+  assert.ok(create > 0, "the job no longer creates a release");
+  // The one release is asked for first; found, or not readable, ends the step before the create.
+  const asked = job.indexOf("/releases/tags/$tag");
+  assert.ok(asked > 0 && asked < create);
+  const before = job.slice(asked, create);
+  assert.match(before, /200\)[\s\S]*?exit 0/);
+  assert.match(before, /\*\)[\s\S]*?::warning[\s\S]*?exit 0/);
+  // The tag is put on the commit that set the version, read from the history.
+  assert.match(job, /fetch-depth: 0/);
+  assert.match(job, /--target "\$target"/);
+});
+
+test("a request that is retried never writes to /dev/null", () => {
+  // With --retry and --output /dev/null, curl 8.5 exits 23 at its first retry:
+  // the retry never happens and a passing 502 reads as no answer at all.
+  for (const [name, text] of [["publish-registry.yml", workflow], ["ci.yml", ci]] as const) {
+    for (const command of text.split(/\n(?=\s*(?:[a-z_]+=\$\()?curl )/)) {
+      const call = command.split(/\n\s*\n/)[0] ?? "";
+      if (call.includes("--retry")) assert.doesNotMatch(call, /\/dev\/null/, `${name}: ${call.slice(0, 80)}`);
+    }
+  }
+});

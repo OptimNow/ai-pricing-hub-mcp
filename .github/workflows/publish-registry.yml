@@ -108,8 +108,12 @@ jobs:
           AFTER_DEPLOY: ${{ inputs.after_deploy }}
         run: |
           set -euo pipefail
+          # The body goes to a file, not to /dev/null: with --retry, curl 8.5
+          # stops with exit 23 at its first retry when it cannot truncate the
+          # output, so a 502 that the retry would have got past read as no
+          # answer at all (seen on 2026-11-12, against a stub).
           status=$(curl --silent --show-error --max-time 30 --retry 2 \
-            --output /dev/null --write-out '%{http_code}' "$ENTRY" || true)
+            --output "${RUNNER_TEMP:-/tmp}/registry-entry.json" --write-out '%{http_code}' "$ENTRY" || true)
           # curl prints 000 when no HTTP answer came back at all.
           [ "$status" != "000" ] || status=""
           echo "$ENTRY -> HTTP ${status:-none, no answer}"
