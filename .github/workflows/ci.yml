@@ -160,10 +160,16 @@ jobs:
   # same forgotten manual step as the registry publish above, on another
   # listing.
   #
-  # The tag goes on the commit that set the version in server.json, not on the
-  # commit of this run: a push that changes only a document under the same
-  # version must not move where "v0.11.0" points. Read from the history, hence
-  # the full fetch.
+  # The tag goes on the commit of this run. For a version bump that is the
+  # commit that set the version. The first form of this job looked up that
+  # commit in the history and tagged it whatever the run's commit was; on
+  # 2026-11-12, catching up on 0.11.0, GitHub refused with HTTP 403 "Resource
+  # not accessible by integration". The likely reason, which the message does
+  # not state: the run's token cannot hold the `workflows` permission, and
+  # GitHub asks for it to create a ref on a commit whose workflow files are
+  # not the branch's (that commit's differed by 332 lines). So when the job
+  # catches up, the tag is on the commit that was live when it ran. Do not
+  # bring the lookup back without a token that can do it.
   #
   # The notes are GitHub's own (the pull requests merged since the previous
   # release). Unlike a registry entry, a release and its tag can be edited or
@@ -183,7 +189,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Create the release of this version if GitHub has none
@@ -217,14 +222,6 @@ jobs:
               ;;
           esac
 
-          # The last commit that changed the version line of server.json. If the
-          # history does not give one whose server.json holds this version,
-          # the commit of this run is the honest fallback.
-          target=$(git log -1 --format=%H -G'^\s*"version":' -- server.json || true)
-          if [ -z "$target" ] || [ "$(git show "$target:server.json" | jq -r .version)" != "$version" ]; then
-            target="$GITHUB_SHA"
-          fi
-          echo "Releasing $tag at $target"
-
-          gh release create "$tag" --target "$target" --title "$tag" --generate-notes --latest
-          echo "Created the release \`$tag\` at \`$target\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Releasing $tag at $GITHUB_SHA"
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes --latest
+          echo "Created the release \`$tag\` at \`$GITHUB_SHA\`." >> "$GITHUB_STEP_SUMMARY"

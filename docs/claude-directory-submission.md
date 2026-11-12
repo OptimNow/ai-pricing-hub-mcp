@@ -2,9 +2,10 @@
 
 Status as of 2026-11-12: **not submitted. The server is ready; the listing
 material is not written.** Production serves 0.11.0, and the five blocking
-checks of "Before you submit" passed that day (each says how it was checked).
-What is left is item 6 there, and the listing copy and example prompts, which
-the owner decided on 2026-11-12 to write on the day of the submission. The
+checks of "Before you submit" passed that day (each says how it was checked),
+and so did item 6 there. What is left is the listing copy and the example
+prompts, which the owner decided on 2026-11-12 to write on the day of the
+submission. The
 portal reads the live server, so run `scripts/check-connector.mjs` again after
 any later deploy.
 
@@ -52,8 +53,8 @@ returns them as `structuredContent` too.
 
 ## Before you submit
 
-In this order. Items 1 to 5 were re-checked on 2026-11-12, against 0.11.0 in
-production; item 6 is open.
+In this order. All six were checked on 2026-11-12, against 0.11.0 in
+production.
 
 1. **Done, last on 2026-11-12: `node scripts/check-connector.mjs` passes against
    the published URL** (0.11.0, after the deploy of that day). Run it again
@@ -97,14 +98,17 @@ production; item 6 is open.
    site's repository runs it every day (`mcp-parity.yml` there) and opens an
    issue on a difference: check that no `mcp-parity` issue is open. See
    "Keeping in sync" in `DESIGN.md`.
-6. **Open: the repository's description on GitHub.** The About box of
-   `OptimNow/ai-pricing-hub-mcp` read "Live data from OpenRouter, AWS, Azure,
-   GCP, OCI, OVH, DigitalOcean" on 2026-11-12. The server reads none of them:
-   since 0.11.0 it calls `optimtoken.optimnow.io` and nothing else, which is
-   also what item 4 and the Data handling step declare. A reviewer who opens
-   the repository reads that line first. It is a setting of the repository,
-   edited on github.com (the gear beside About); nothing in this checkout
-   holds it.
+6. **Done on 2026-11-12: the repository's description on GitHub says what the
+   server reads.** The About box of `OptimNow/ai-pricing-hub-mcp` read "Live
+   data from OpenRouter, AWS, Azure, GCP, OCI, OVH, DigitalOcean" that morning.
+   The server reads none of them: since 0.11.0 it calls
+   `optimtoken.optimnow.io` and nothing else, which is also what item 4 and
+   the Data handling step declare, and a reviewer who opens the repository
+   reads that line first. The owner replaced it the same day; it now names
+   the eight read-only tools and `optimtoken.optimnow.io` as the source. It is
+   a setting of the repository, edited on github.com (the gear beside About):
+   nothing in this checkout holds it, so re-read it after any change to what
+   the server calls.
 
 ## What is already correct
 

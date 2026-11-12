@@ -121,9 +121,9 @@ test("a release is created only for a version GitHub has no release of", () => {
   const before = job.slice(asked, create);
   assert.match(before, /200\)[\s\S]*?exit 0/);
   assert.match(before, /\*\)[\s\S]*?::warning[\s\S]*?exit 0/);
-  // The tag is put on the commit that set the version, read from the history.
-  assert.match(job, /fetch-depth: 0/);
-  assert.match(job, /--target "\$target"/);
+  // The tag is put on the commit of the run. GitHub answered 403 to the run's
+  // token when the job tagged an older commit whose workflow files differed.
+  assert.match(job, /gh release create "\$tag" --target "\$GITHUB_SHA"/);
 });
 
 test("a request that is retried never writes to /dev/null", () => {
