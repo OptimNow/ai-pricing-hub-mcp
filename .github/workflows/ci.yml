@@ -149,3 +149,82 @@ jobs:
     uses: ./.github/workflows/publish-registry.yml
     with:
       after_deploy: true
+
+  # Creates the tag v<version> and its GitHub release once `deploy` has put the
+  # version live, when GitHub has no release of that version yet. On most
+  # pushes it creates nothing.
+  #
+  # WHY. Nothing created releases: v0.3.0 was made by hand on 2026-08-18, and
+  # the Releases box of the repository still showed it as the latest on
+  # 2026-11-12, while production served 0.11.0, ten versions later. It is the
+  # same forgotten manual step as the registry publish above, on another
+  # listing.
+  #
+  # The tag goes on the commit that set the version in server.json, not on the
+  # commit of this run: a push that changes only a document under the same
+  # version must not move where "v0.11.0" points. Read from the history, hence
+  # the full fetch.
+  #
+  # The notes are GitHub's own (the pull requests merged since the previous
+  # release). Unlike a registry entry, a release and its tag can be edited or
+  # deleted afterwards.
+  #
+  # A GitHub API that does not answer is a warning and a green run, as for the
+  # registry: the next deploy asks again.
+  #
+  # `contents: write` is granted to this job alone, and it runs no code from
+  # the repository: git and gh only.
+  github-release:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # creates the tag and the release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create the release of this version if GitHub has none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(jq -er .version server.json)
+          tag="v$version"
+
+          # The address of this one release: 200 or 404. The body goes to a
+          # file: with --retry, curl gives up at its first retry when the
+          # output is /dev/null (see publish-registry.yml).
+          status=$(curl --silent --show-error --max-time 30 --retry 2 \
+            --output "${RUNNER_TEMP:-/tmp}/github-release.json" --write-out '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag" || true)
+          [ "$status" != "000" ] || status=""
+          echo "releases/tags/$tag -> HTTP ${status:-none, no answer}"
+          case "$status" in
+            200)
+              echo "::notice title=Nothing to release::GitHub already has the release $tag."
+              echo "GitHub already has the release \`$tag\`. Nothing was created." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            404) ;;
+            *)
+              echo "::warning title=GitHub release not created::GitHub gave no usable answer (HTTP ${status:-none}), so whether the release $tag exists is not known and nothing was created. The next deploy asks again."
+              exit 0
+              ;;
+          esac
+
+          # The last commit that changed the version line of server.json. If the
+          # history does not give one whose server.json holds this version,
+          # the commit of this run is the honest fallback.
+          target=$(git log -1 --format=%H -G'^\s*"version":' -- server.json || true)
+          if [ -z "$target" ] || [ "$(git show "$target:server.json" | jq -r .version)" != "$version" ]; then
+            target="$GITHUB_SHA"
+          fi
+          echo "Releasing $tag at $target"
+
+          gh release create "$tag" --target "$target" --title "$tag" --generate-notes --latest
+          echo "Created the release \`$tag\` at \`$target\`." >> "$GITHUB_STEP_SUMMARY"

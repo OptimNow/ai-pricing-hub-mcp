@@ -450,6 +450,45 @@ fails if they disagree. Release order:
    still showed 0.4.0 as latest while this endpoint already returned 0.4.1, so
    it can make a successful publish look failed.
 
+#### GitHub releases
+
+The Releases box of the repository is one more place that states a version,
+and nothing kept it: `v0.3.0` was created by hand on 2026-08-18 and was still
+shown as the latest release on 2026-11-12, when production served 0.11.0, ten
+versions later. Since that day the `github-release` job of `ci.yml` follows
+`deploy`: when GitHub has no release `v<version>` for the version in
+`server.json`, it creates the tag and the release, with GitHub's generated
+notes (the pull requests merged since the previous release).
+
+- The tag goes on the commit that set the version in `server.json`, read from
+  the history, not on the commit of the run: a later push under the same
+  version must not move where the tag points.
+- Versions 0.4.0 to 0.10.0 have no tag and no release. The first release the
+  job creates, `v0.11.0`, therefore lists every pull request merged since
+  `v0.3.0`.
+- A release and its tag can be edited or deleted afterwards, which a registry
+  entry cannot.
+- A GitHub API that does not answer is treated as the registry is: a warning,
+  a green run, and the next deploy asks again.
+- `contents: write` is granted to that job alone, and it runs git, gh, jq and
+  curl, nothing from the repository. `publish-workflow.test.ts` holds both.
+
+Where a version shows, and what moves it:
+
+| Where | Moved by |
+|---|---|
+| The live server (`serverInfo.version`) | `deploy`, on every push to `master` that changes more than documentation |
+| The MCP registry | `publish-registry`, after `deploy`, when the registry does not hold the version |
+| GitHub releases | `github-release`, after `deploy`, when the version has no release |
+| The Claude directory listing | nothing in this repository: the portal reads the live server |
+
+Both jobs ask "is this version there" with a retried request. With `--retry`,
+curl 8.5 exits 23 at its first retry when the output is `/dev/null`, so the
+retry never happens and a passing 502 reads as no answer; the first version of
+the registry step, merged on 2026-11-12, had exactly that and was corrected
+the same day. The answer is written to a file, and a test refuses the other
+form.
+
 #### Alpic (retired)
 
 Until 2026-10-07 the connector was `https://ai-pricing-hub-mcp-9604f763.alpic.live/`.
