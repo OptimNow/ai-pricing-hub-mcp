@@ -5,6 +5,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
 import {
+  blendPair,
   buildsOf,
   declaredBuilds,
   describeOffer,
@@ -89,7 +90,17 @@ import {
 import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
 import { deprecationLegend, deprecationTag, describeDeprecation } from "./lib/deprecation.js";
 import type { DeprecationInfo } from "./lib/deprecation.js";
-import { describeUpstreamFailure } from "./lib/optimtoken-api.js";
+import { OPTIMTOKEN_BASE_URL, describeUpstreamFailure } from "./lib/optimtoken-api.js";
+import {
+  describePct,
+  describePriceChangesFailure,
+  fetchPriceChanges,
+  fetchPriceHistory,
+  flagLegend,
+  flagTags,
+  isFlagged,
+} from "./lib/price-changes.js";
+import type { PriceChangesWindow, PriceMove } from "./lib/price-changes.js";
 import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./lib/model-hosts.js";
 import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
@@ -692,6 +703,122 @@ const recommendOutputSchema = {
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
   provenance: llmProvenanceSchema.optional(),
+  error: z.string().optional(),
+};
+
+/** One price of the site's archive, costed for the chosen workload. */
+const archivedPriceSchema = z.object({
+  inputPricePer1M: z.number(),
+  outputPricePer1M: z.number(),
+  // List-price cost of the workload at this price.
+  perRequest: z.number(),
+  monthly: z.number(),
+});
+
+/** A move of the price the site quotes for a model, over the trend window. */
+const priceMoveSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  // The price quoted on the first and on the last day of the window.
+  before: archivedPriceSchema,
+  after: archivedPriceSchema,
+  // Change of the blended price (30% input, 70% output), in percent.
+  blendedPct: z.number(),
+  // Null when the price it starts from is zero.
+  inputPct: z.number().nullable(),
+  outputPct: z.number().nullable(),
+  // What the move does to the workload's monthly bill: after minus before.
+  monthlyDelta: z.number(),
+  // What the site established about the move: "hostSwitch" (the host quoted
+  // changed) or "outlierHost" (an outlier listing). Empty means neither was
+  // established, which is NOT a statement that the model maker repriced.
+  flags: z.array(z.string()),
+  // The price the catalogue quotes today, only when it is not `after`: the
+  // archive is a nightly file and the catalogue is live.
+  quotedNow: z.object({ inputPricePer1M: z.number(), outputPricePer1M: z.number() }).optional(),
+  deprecation: deprecationSchema.optional(),
+});
+
+/** One dated price in a model's history. */
+const priceHistoryPointSchema = z.object({
+  // The day the quoted price changed; it holds from that day on.
+  date: z.string(),
+  inputPricePer1M: z.number(),
+  outputPricePer1M: z.number(),
+  perRequest: z.number(),
+  monthly: z.number(),
+  // Against the price before it. Null on the first price on record.
+  blendedPct: z.number().nullable(),
+  flags: z.array(z.string()),
+});
+
+const priceHistorySchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  // False when no history could be given for this model. `unavailableReason`
+  // then says why. Never read it as "the price never changed".
+  known: z.boolean(),
+  unavailableReason: z.string().optional(),
+  // The first day the model is in the archive.
+  firstSeen: z.string().nullable(),
+  first: priceHistoryPointSchema.nullable(),
+  // Each day the quoted price changed, oldest first. Empty with `known` true:
+  // the quoted price has not changed since `first`.
+  changes: z.array(priceHistoryPointSchema),
+  changeCount: z.number(),
+  flaggedCount: z.number(),
+  // The price in force on the archive's last day: the last change, or `first`.
+  latest: priceHistoryPointSchema.nullable(),
+  // From the first price on record to the latest, on the blended price.
+  netBlendedPct: z.number().nullable(),
+  quotedNow: z.object({ inputPricePer1M: z.number(), outputPricePer1M: z.number() }).optional(),
+  deprecation: deprecationSchema.optional(),
+});
+
+/** The site's price archive: what it covers and how fresh it is. There is no
+ *  fallback tier behind it, so this is present or the answer is an error. */
+const priceChangesProvenanceSchema = z.object({
+  source: z.string(),
+  label: z.string(),
+  upstreamSchemaVersion: z.string().optional(),
+  // The window the moves are measured over: the last 7 days at most.
+  windowStart: z.string().optional(),
+  windowEnd: z.string().optional(),
+  // The first and the newest day of the archive.
+  trackingStart: z.string().optional(),
+  asOf: z.string().optional(),
+});
+
+const priceChangesOutputSchema = {
+  // "window": the moves of the trend window. "history": named models' prices
+  // since tracking began.
+  mode: z.enum(["window", "history"]),
+  // Window mode. The whole window, before any filter: `unflagged` is what the
+  // site's barometer counts as price changes. Null in history mode.
+  summary: z
+    .object({
+      tracked: z.number().nullable(),
+      moved: z.number(),
+      up: z.number(),
+      down: z.number(),
+      flagged: z.number(),
+      unflagged: z.number(),
+    })
+    .nullable(),
+  // The moves no flag was established on, then the flagged ones, each largest
+  // first and cut at `limit`. `matchingCount` is how many matched the filters.
+  priceChanges: z.array(priceMoveSchema),
+  flaggedMoves: z.array(priceMoveSchema),
+  matchingCount: z.number(),
+  // History mode.
+  histories: z.array(priceHistorySchema),
+  resolution: z.array(resolutionSchema),
+  useCaseLabel: z.string(),
+  volume: z.number(),
+  volumeLabel: z.string(),
+  provenance: priceChangesProvenanceSchema.optional(),
+  // The catalogue the names, the retirement notices and `quotedNow` come from.
+  catalogueProvenance: llmProvenanceSchema.optional(),
   error: z.string().optional(),
 };
 
@@ -2644,6 +2771,490 @@ tool(
   },
 );
 
+// ─── Tool 8: Track LLM Price Changes ────────────────────────────────
+
+/** One decimal, the precision the site's own percentages carry. */
+const roundPct = (pct: number): number => Math.round(pct * 10) / 10;
+
+tool(
+  "track-llm-price-changes",
+  {
+    // Anthropic connectors directory requires explicit tool annotations:
+    // all tools here only read public pricing data.
+    title: "Track LLM Price Changes",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      "What moved. Every other tool here quotes today's price; this one says whether it has just changed, " +
+      "from the price archive optimtoken.optimnow.io keeps (its first day is `provenance.trackingStart`). " +
+      "Without `models` it returns the moves of the last 7 days across the catalogue: each model whose " +
+      "quoted price moved by 1% or more, with the price before and after and what the move does to a " +
+      "workload's monthly bill. With `models` (1-4 names) it returns each model's quoted price since " +
+      "tracking began, change by change. Use it for 'did any LLM price change this week', 'which models " +
+      "got cheaper', 'has the price of X moved since the summer', 'is this price stable enough to budget " +
+      "on'. Read the flags: most models are sold by several hosts and one of them is quoted, so a move " +
+      "flagged `hostSwitch` is a change of the host quoted, not a repricing, and `outlierHost` is an " +
+      "outlier listing. The moves with no flag are returned apart, as `priceChanges`; no flag means none " +
+      "was established, which is not proof that the model maker repriced. There is no fallback for this " +
+      "data: when the archive cannot be read the tool returns an error, never an empty list that would " +
+      "read as 'nothing moved'.",
+    inputSchema: {
+      models: z
+        .array(z.string())
+        .min(1)
+        .max(4)
+        .optional()
+        .describe("1-4 model names, for each one's price history since tracking began, e.g. ['Llama 3.3 70B']. Leave out for the week's moves across the catalogue."),
+      direction: z.enum(["up", "down"]).optional().describe("Week's moves only: keep the rises (up) or the falls (down). Not accepted with `models`."),
+      provider: z.string().optional().describe("Week's moves only: keep one provider's models, by exact name (case-insensitive), e.g. OpenAI, Anthropic, Meta. Not accepted with `models`."),
+      includeFlagged: z.boolean().optional().describe("Week's moves only: false leaves out the moves flagged as a change of quoted host or an outlier listing. Default: true, returned apart in `flaggedMoves`. Not accepted with `models`."),
+      limit: z.number().min(1).max(50).optional().describe("Week's moves: max moves returned in each of the two groups, largest first. History: max changes printed per model, the most recent (structuredContent carries all). Default: 15"),
+      useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload the monthly figures are computed for, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600), callSummary (2k / 700), agentWorkflow (6k / 3k). Default: supportTicket"),
+      volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
+    },
+    outputSchema: outputSchema(priceChangesOutputSchema),
+  },
+  async ({ models: requested, direction, provider, includeFlagged, limit, useCasePreset, volumePreset }) => {
+    const vol = (volumePreset || "100k") as VolumePreset;
+    const volumeEntry = VOLUME_PRESETS.find(p => p.key === vol);
+    const volume = volumeEntry?.value ?? 100_000;
+    const volumeLabel = volumeEntry?.label ?? vol;
+    const profile = USE_CASE_PROFILES[useCasePreset || "supportTicket"];
+    const maxShown = limit ?? 15;
+
+    const emptyOutput = {
+      mode: (requested ? "history" : "window") as "window" | "history",
+      summary: null as unknown,
+      priceChanges: [] as unknown[],
+      flaggedMoves: [] as unknown[],
+      matchingCount: 0,
+      histories: [] as unknown[],
+      resolution: [] as ResolutionEntry[],
+      useCaseLabel: profile.label,
+      volume,
+      volumeLabel,
+    };
+
+    // A filter that silently did nothing would let "falls only" be read into
+    // a history that also lists rises.
+    if (requested && (direction !== undefined || provider !== undefined || includeFlagged !== undefined)) {
+      const message =
+        "direction, provider and includeFlagged filter the week's moves across the catalogue. They do not " +
+        "apply to a named model's history: leave them out, or leave `models` out.";
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
+
+    // Raw floats drive the arithmetic; rounding happens once, on the way out.
+    type Pair = { input: number; output: number };
+    const costOf = (pair: Pair): number => useCaseCost(pair.input, pair.output, profile);
+    const priced = (pair: Pair) => {
+      const cost = costOf(pair);
+      return {
+        inputPricePer1M: pair.input,
+        outputPricePer1M: pair.output,
+        perRequest: roundPerRequestCost(cost),
+        monthly: roundMonthlyCost(cost * volume),
+      };
+    };
+    const perMonth = (pair: Pair): string => `${formatMonthlyBudget(costOf(pair) * volume)}/mo`;
+    const pairText = (pair: Pair): string => `$${pair.input} in / $${pair.output} out`;
+    const quotedPairOf = (m: LLMModel): Pair => ({ input: m.inputPricePer1M, output: m.outputPricePer1M });
+    const workloadLine =
+      `Monthly figures: ${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out tokens) at ` +
+      `${volume.toLocaleString()} requests/month, at list price.`;
+    const archiveLabel = `optimtoken.optimnow.io price archive (${OPTIMTOKEN_BASE_URL}/api/price-changes)`;
+    const noArchive = (error: unknown): string =>
+      `Price changes are served by optimtoken.optimnow.io only, and ${describePriceChangesFailure(error)}. ` +
+      `No move is reported: that is not "nothing moved".`;
+
+    try {
+      // ── The week's moves ──
+      if (!requested) {
+        let window: PriceChangesWindow;
+        try {
+          window = await fetchPriceChanges();
+        } catch (error) {
+          console.warn("[track-llm-price-changes] archive unavailable:", describeUpstreamFailure(error).summary);
+          const message = noArchive(error);
+          return {
+            structuredContent: { ...emptyOutput, error: message },
+            content: [{ type: "text", text: message }],
+            isError: true,
+          };
+        }
+
+        // The catalogue adds the retirement notice and today's quoted price to
+        // a move. It is not what was asked for, so the answer never waits on
+        // more than its memo and never fails with it; only tier 1 is used,
+        // because the lower tiers hold neither a notice nor a corrected price.
+        const catalogue = await fetchLLMModels().catch(() => null);
+        const rows =
+          catalogue && catalogue.provenance.tier === 1
+            ? new Map(catalogue.models.map(m => [hostPricingKey(m), m]))
+            : null;
+
+        const wantedProvider = provider?.trim().toLowerCase();
+        const matching = window.changes.filter(
+          move =>
+            (!wantedProvider || move.provider.toLowerCase() === wantedProvider) &&
+            (direction === undefined || (direction === "up" ? move.blendedPct > 0 : move.blendedPct < 0)),
+        );
+        const unflaggedAll = matching.filter(move => !isFlagged(move));
+        const flaggedAll = includeFlagged === false ? [] : matching.filter(isFlagged);
+
+        const annotate = (move: PriceMove) => {
+          const row = rows?.get(hostPricingKey(move));
+          return {
+            move,
+            row,
+            // Only when it is not the archive's last price: the reader has to
+            // know the two disagree, and has nothing to learn when they agree.
+            quotedNow:
+              row && !matchesOffer(quotedPairOf(row), move.after)
+                ? { inputPricePer1M: row.inputPricePer1M, outputPricePer1M: row.outputPricePer1M }
+                : undefined,
+          };
+        };
+        type Annotated = ReturnType<typeof annotate>;
+        const shownChanges = unflaggedAll.slice(0, maxShown).map(annotate);
+        const shownFlagged = flaggedAll.slice(0, maxShown).map(annotate);
+
+        const moveOut = (a: Annotated) => ({
+          provider: a.move.provider,
+          model: a.move.model,
+          before: priced(a.move.before),
+          after: priced(a.move.after),
+          blendedPct: a.move.blendedPct,
+          inputPct: a.move.inputPct,
+          outputPct: a.move.outputPct,
+          monthlyDelta: roundMonthlyCost((costOf(a.move.after) - costOf(a.move.before)) * volume),
+          flags: a.move.flags,
+          quotedNow: a.quotedNow,
+          deprecation: a.row?.deprecation,
+        });
+        const moveLine = (a: Annotated, i: number): string =>
+          `${i + 1}. ${a.move.provider} ${a.move.model}${flagTags(a.move.flags)}${a.row ? deprecationTag(a.row) : ""} — ` +
+          `${pairText(a.move.before)} → ${pairText(a.move.after)} per 1M ` +
+          `(blended ${describePct(a.move.blendedPct)}; input ${describePct(a.move.inputPct)}, ` +
+          `output ${describePct(a.move.outputPct)}); ${perMonth(a.move.before)} → ${perMonth(a.move.after)}` +
+          (a.quotedNow
+            ? `. Quoted today: $${a.quotedNow.inputPricePer1M} in / $${a.quotedNow.outputPricePer1M} out`
+            : "");
+
+        const s = window.summary;
+        const unflaggedTotal = s.moved - s.flagged;
+        const meta = window.meta;
+        const filters = [
+          wantedProvider ? `provider ${provider?.trim()}` : "",
+          direction ? (direction === "up" ? "rises only" : "falls only") : "",
+          includeFlagged === false ? "flagged moves left out" : "",
+        ].filter(Boolean);
+        const section = (title: string, total: number, shown: Annotated[]): string =>
+          total === 0
+            ? `${title}: none${filters.length > 0 ? " with these filters" : ""}.`
+            : `${title} (${shown.length === total ? total : `${shown.length} of ${total}`}), largest first:\n` +
+              shown.map(moveLine).join("\n");
+        const shown = [...shownChanges, ...shownFlagged];
+        const legend = [
+          ...flagLegend(shown.map(a => a.move)),
+          ...deprecationLegend(shown.map(a => a.row ?? {}), catalogue?.provenance.deprecationsVerifiedAt),
+        ];
+
+        return {
+          structuredContent: {
+            ...emptyOutput,
+            summary: {
+              tracked: s.tracked,
+              moved: s.moved,
+              up: s.up,
+              down: s.down,
+              flagged: s.flagged,
+              unflagged: unflaggedTotal,
+            },
+            priceChanges: shownChanges.map(moveOut),
+            flaggedMoves: shownFlagged.map(moveOut),
+            matchingCount: unflaggedAll.length + flaggedAll.length,
+            provenance: {
+              source: "optimtoken",
+              label: archiveLabel,
+              upstreamSchemaVersion: meta.schemaVersion,
+              windowStart: meta.windowStart,
+              windowEnd: meta.windowEnd,
+              trackingStart: meta.trackingStart,
+              asOf: meta.asOf,
+            },
+            catalogueProvenance: catalogue?.provenance,
+          },
+          content: [
+            {
+              type: "text",
+              text:
+                `Data source: ${archiveLabel}` +
+                (meta.asOf ? `, as of ${meta.asOf}` : "") +
+                (meta.trackingStart ? `; prices tracked since ${meta.trackingStart}` : "") + `.\n` +
+                `Window ${meta.windowStart ?? "(start not stated)"} to ${meta.windowEnd ?? "(end not stated)"}: ` +
+                (s.tracked !== null ? `${s.tracked} models compared, ` : "") +
+                (s.moved === 0
+                  ? `none moved by 1% or more on the blended price (30% input, 70% output).`
+                  : `${s.moved} moved by 1% or more on the blended price (30% input, 70% output): ${s.up} up, ` +
+                    `${s.down} down. ${s.flagged} of them ${s.flagged === 1 ? "is" : "are"} flagged as a change ` +
+                    `of what the site quotes, which leaves ${unflaggedTotal} price ` +
+                    `${unflaggedTotal === 1 ? "change" : "changes"}.`) +
+                (filters.length > 0
+                  ? `\nFilters: ${filters.join(", ")}. ${unflaggedAll.length + flaggedAll.length} of the ${s.moved} moves match.`
+                  : "") +
+                `\n${workloadLine}\n\n` +
+                section("Price changes", unflaggedAll.length, shownChanges) +
+                (includeFlagged === false
+                  ? ""
+                  : `\n\n` +
+                    section(
+                      "Flagged moves, where the quoted price moved without an established repricing",
+                      flaggedAll.length,
+                      shownFlagged,
+                    )) +
+                (legend.length > 0 ? `\n\n${legend.join("\n")}` : "") +
+                (shown.length > 0
+                  ? `\n\nThe blended percentage weighs output at 70%. A workload with another mix of input and ` +
+                    `output can move by less, or the other way: the monthly figures on each line are the move ` +
+                    `for this workload.`
+                  : "") +
+                `\n"After" is the price on the window's last day, from a nightly archive. The catalogue's live ` +
+                `price can differ, and is given on the line where it does.` +
+                (rows === null
+                  ? ` The catalogue was not available from optimtoken.optimnow.io, so retirement notices and ` +
+                    `today's prices are not shown.`
+                  : ""),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      // ── Named models: the quoted price since tracking began ──
+      const catalogue = await fetchLLMModels();
+      if (catalogue.models.length === 0) {
+        return {
+          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
+          content: [{ type: "text", text: "Failed to fetch LLM models." }],
+          isError: true,
+        };
+      }
+
+      const { selected, resolution } = resolveNames(catalogue.models, requested);
+      const describe = (r: ResolutionEntry): string => describeResolution(r, "history");
+
+      if (selected.length === 0) {
+        const message = `No requested name matched a model. ${resolution.map(describe).join(" ")}`;
+        return {
+          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      if (catalogue.provenance.tier !== 1) {
+        const message =
+          `A model's price history is asked by its upstream id, which only optimtoken.optimnow.io's catalogue ` +
+          `carries. The catalogue came from a fallback tier, so no history can be read. That is not "the price ` +
+          `never changed".`;
+        return {
+          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      const fetched = await Promise.all(
+        selected.map(async m => {
+          const id = catalogue.openRouterIds.get(hostPricingKey(m));
+          if (!id) {
+            return { m, history: null, failed: false, reason: "the site's catalogue gives no upstream id for this model" };
+          }
+          try {
+            return { m, history: await fetchPriceHistory(id), failed: false, reason: undefined };
+          } catch (error) {
+            console.warn("[track-llm-price-changes] history unavailable:", describeUpstreamFailure(error).summary);
+            return { m, history: null, failed: true, reason: describePriceChangesFailure(error) };
+          }
+        }),
+      );
+
+      // Every read failed: there is no answer to give, and a list of models
+      // with "no history" would look like one.
+      if (fetched.every(f => f.failed)) {
+        const message =
+          `Price history is served by optimtoken.optimnow.io only, and ${fetched[0].reason}. No history is ` +
+          `reported: that is not "the price never changed".`;
+        return {
+          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+
+      const point = (date: string, pair: Pair, blendedPct: number | null, flags: string[]) => ({
+        date,
+        ...priced(pair),
+        blendedPct,
+        flags,
+      });
+      const histories = fetched.map(({ m, history, reason }) => {
+        const first = history && !history.notFound ? history.first : undefined;
+        const changes = history && !history.notFound ? history.changes : undefined;
+        if (!history || !first || !changes) {
+          return {
+            m,
+            known: false as const,
+            why:
+              reason ??
+              (history?.notFound
+                ? "the site's price archive does not list this model"
+                : "the site's price archive does not hold this model yet"),
+          };
+        }
+        const latestRaw = changes.length > 0 ? changes[changes.length - 1] : first;
+        const firstBlend = blendPair(first.input, first.output);
+        return {
+          m,
+          known: true as const,
+          firstSeen: history.firstSeen ?? first.date,
+          first,
+          changes,
+          latestRaw,
+          net:
+            firstBlend > 0
+              ? roundPct((blendPair(latestRaw.input, latestRaw.output) / firstBlend - 1) * 100)
+              : null,
+          quotedNow: !matchesOffer(quotedPairOf(m), latestRaw)
+            ? { inputPricePer1M: m.inputPricePer1M, outputPricePer1M: m.outputPricePer1M }
+            : undefined,
+        };
+      });
+
+      const blocks = histories.map(h => {
+        const head = `${h.m.provider} ${h.m.model}${deprecationTag(h.m)}`;
+        if (!h.known) return `${head} — no price history: ${h.why}. That is not "the price never changed".`;
+
+        const lines = [
+          `${head} — in the archive since ${h.firstSeen}.`,
+          `  First price on record (${h.first.date}): ${pairText(h.first)} per 1M → ${perMonth(h.first)}.`,
+        ];
+        const count = h.changes.length;
+        if (count === 0) {
+          lines.push(`  The quoted price has not changed since.`);
+        } else {
+          const flagged = h.changes.filter(isFlagged).length;
+          lines.push(
+            `  ${count} ${count === 1 ? "change" : "changes"} of the quoted price since, ${flagged} of them flagged.`,
+            `  Latest (since ${h.latestRaw.date}): ${pairText(h.latestRaw)} per 1M → ${perMonth(h.latestRaw)}` +
+              (h.net !== null ? `; blended ${describePct(h.net)} against the first price on record.` : "."),
+          );
+          const shownChanges = h.changes.slice(-maxShown);
+          lines.push(
+            `  Changes, oldest first${shownChanges.length < count ? ` (the last ${shownChanges.length} of ${count})` : ""}:`,
+            ...shownChanges.map(
+              c =>
+                `    ${c.date}: ${pairText(c)} per 1M (blended ${describePct(c.blendedPct)})${flagTags(c.flags)} → ${perMonth(c)}`,
+            ),
+          );
+        }
+        if (h.quotedNow) {
+          lines.push(
+            `  Quoted today by the catalogue: $${h.quotedNow.inputPricePer1M} in / $${h.quotedNow.outputPricePer1M} ` +
+              `out per 1M, which is not the archive's latest price.`,
+          );
+        }
+        return lines.join("\n");
+      });
+
+      const meta = fetched.find(f => f.history)?.history?.meta ?? {};
+      const legend = [
+        ...flagLegend(histories.flatMap(h => (h.known ? h.changes.slice(-maxShown) : []))),
+        ...deprecationLegend(selected, catalogue.provenance.deprecationsVerifiedAt),
+      ];
+
+      return {
+        structuredContent: {
+          ...emptyOutput,
+          histories: histories.map(h =>
+            h.known
+              ? {
+                  provider: h.m.provider,
+                  model: h.m.model,
+                  known: true,
+                  firstSeen: h.firstSeen,
+                  first: point(h.first.date, h.first, null, []),
+                  changes: h.changes.map(c => point(c.date, c, c.blendedPct, c.flags)),
+                  changeCount: h.changes.length,
+                  flaggedCount: h.changes.filter(isFlagged).length,
+                  latest: point(
+                    h.latestRaw.date,
+                    h.latestRaw,
+                    h.changes.length > 0 ? h.changes[h.changes.length - 1].blendedPct : null,
+                    h.changes.length > 0 ? h.changes[h.changes.length - 1].flags : [],
+                  ),
+                  netBlendedPct: h.net,
+                  quotedNow: h.quotedNow,
+                  deprecation: h.m.deprecation,
+                }
+              : {
+                  provider: h.m.provider,
+                  model: h.m.model,
+                  known: false,
+                  unavailableReason: h.why,
+                  firstSeen: null,
+                  first: null,
+                  changes: [],
+                  changeCount: 0,
+                  flaggedCount: 0,
+                  latest: null,
+                  netBlendedPct: null,
+                  deprecation: h.m.deprecation,
+                },
+          ),
+          resolution,
+          provenance: {
+            source: "optimtoken",
+            label: archiveLabel,
+            upstreamSchemaVersion: meta.schemaVersion,
+            trackingStart: meta.trackingStart,
+            asOf: meta.asOf,
+          },
+          catalogueProvenance: catalogue.provenance,
+        },
+        content: [
+          {
+            type: "text",
+            text:
+              `Data source: ${archiveLabel}` +
+              (meta.asOf ? `, as of ${meta.asOf}` : "") +
+              (meta.trackingStart ? `; prices tracked since ${meta.trackingStart}` : "") + `.\n` +
+              `The price quoted for ${selected.length === 1 ? "this model" : `these ${selected.length} models`} ` +
+              `since tracking began. No history goes back before the archive's first day.\n` +
+              `${workloadLine}\n\n` +
+              `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
+              blocks.join("\n\n") +
+              (legend.length > 0 ? `\n\n${legend.join("\n")}` : ""),
+          },
+        ],
+        isError: false,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error("[track-llm-price-changes] failed:", error);
+      return {
+        structuredContent: { ...emptyOutput, error: message },
+        content: [{ type: "text", text: `Error tracking price changes: ${message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // ─── Server ─────────────────────────────────────────────────────────
 
 /**
@@ -2655,7 +3266,7 @@ tool(
 function createServer(): McpServer {
   const server = new McpServer({
     name: "ai-pricing-hub",
-    version: "0.8.0",
+    version: "0.9.0",
   });
   for (const register of tools) register(server);
   return server;

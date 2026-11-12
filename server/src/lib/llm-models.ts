@@ -846,6 +846,13 @@ export interface LLMFetchResult {
    * is newer than the site's last read. Absent means unknown, never "one host".
    */
   hostPricing: ReadonlyMap<string, ModelHostPricing>;
+  /**
+   * Each model's upstream (OpenRouter) id, keyed by `hostPricingKey()`: what
+   * the site's per-model endpoints are asked by. Beside the rows for the same
+   * reason as `hostPricing`, and for every model the site gives an id, not
+   * only those with a host summary. Empty on tiers 2 and 3.
+   */
+  openRouterIds: ReadonlyMap<string, string>;
   source: ModelSource;
   eloAsOf: string;
   dataAsOf?: string;
@@ -997,18 +1004,16 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
   // into a map beside the models, not onto them: see LLMFetchResult.hostPricing.
   const accepted: LLMModel[] = [];
   const hostPricing = new Map<string, ModelHostPricing>();
+  const openRouterIds = new Map<string, string>();
   for (const row of payload.models as unknown[]) {
     const model = coerceSiteModel(row);
     if (model === null) continue;
     accepted.push(model);
     const raw = row as Record<string, unknown>;
+    const openRouterId = typeof raw.openRouterId === "string" && raw.openRouterId ? raw.openRouterId : undefined;
+    if (openRouterId) openRouterIds.set(hostPricingKey(model), openRouterId);
     const summary = coerceHostPricing(raw.hostPricing);
-    if (summary) {
-      hostPricing.set(hostPricingKey(model), {
-        summary,
-        openRouterId: typeof raw.openRouterId === "string" && raw.openRouterId ? raw.openRouterId : undefined,
-      });
-    }
+    if (summary) hostPricing.set(hostPricingKey(model), { summary, openRouterId });
   }
   const models = sortModels(accepted);
 
@@ -1027,6 +1032,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
   return {
     models,
     hostPricing,
+    openRouterIds,
     source: "optimtoken",
     eloAsOf,
     provenance: {
@@ -1085,6 +1091,7 @@ async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
       models,
       // The host fan-out is the site's nightly job; this tier has none.
       hostPricing: new Map(),
+      openRouterIds: new Map(),
       source: "openrouter",
       eloAsOf: ELO_AS_OF,
       provenance: {
@@ -1107,6 +1114,7 @@ function fetchFromSnapshot(): LLMFetchResult {
   return {
     models: staticFallback(),
     hostPricing: new Map(),
+    openRouterIds: new Map(),
     source: "static-fallback",
     eloAsOf: ELO_AS_OF,
     dataAsOf: dataLastUpdated,

@@ -72,8 +72,9 @@ This server replaces recall with a lookup:
 | **`compare-compute-pricing`** | "What should we run it on?" Compute instance rates across AWS, Azure, GCP, OCI, OVH, DigitalOcean and Alibaba, by region and category: on-demand, spot, and 1- and 3-year commitments, each with what it saves against on-demand. |
 | **`compare-model-hosts`** | "Where do we buy it?" For 1 to 4 named models: how many hosts sell each, the cheapest, the dearest, the model maker's own rate, promotional listings, then every host with its rate, the platforms that list the model and its Amazon Bedrock regions, and what your workload costs at each. Says when the cheap host serves a quantized build. |
 | **`estimate-self-hosting-breakeven`** | "API, or our own GPUs?" The monthly volume at which renting an instance costs the same as paying a model's API per token, at every rate the instance lists (on demand, spot, commitments) and against the API at list price, optimized, and at the cheapest host. It assumes no throughput and no staffing cost: give yours, or it states the tokens per second the break-even would require and says the figures are hardware rent only. |
+| **`track-llm-price-changes`** | "Did the price just move?" The models whose quoted price moved by 1% or more over the last 7 days, with the price before and after and what the move does to your monthly bill; or the price history of 1 to 4 named models since tracking began. Sets apart the moves that are a change of the host quoted, not a repricing. |
 
-All seven are read-only and take no credentials. Nothing you send is stored.
+All eight are read-only and take no credentials. Nothing you send is stored.
 
 **End of life is on every answer.** A model whose maker has announced the retirement of
 its API is labelled with the date and the replacement the maker names, wherever it
@@ -96,6 +97,8 @@ server degrades in tiers rather than failing, and says which tier it used.
 |---|---|---|---|
 | LLM tools | `GET /api/llm-models` | OpenRouter direct | embedded snapshot |
 | Compute tool | `GET /api/pricing?region=` | not available | embedded snapshot (137 rows) |
+| Every host of a model | `GET /api/model-hosts?id=` | not available | not available: the summary on the model rows answers |
+| Price changes | `GET /api/price-changes` | not available | not available: the tool says so, never "nothing moved" |
 
 **Tiers 2 and 3 serve uncorrected prices**, and that matters more than it sounds. An
 upstream feed once published a frontier model at half its real list price, which halves
@@ -131,7 +134,7 @@ unrefreshed fallback ages silently.
 
 ```text
 ai-pricing-hub-mcp/
-├─ server/src/index.ts              # the seven tools
+├─ server/src/index.ts              # the eight tools
 ├─ server/src/lib/http.ts           # Streamable HTTP at /mcp, one MCP server per request
 ├─ server/src/lib/optimtoken-api.ts # the one base URL constant, fetch and timeout discipline
 ├─ server/src/lib/                  # ranking, efficiency scoring, provenance, normalisation

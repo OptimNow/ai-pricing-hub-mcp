@@ -5,21 +5,17 @@
 **Repo:** github.com/OptimNow/ai-pricing-hub-mcp (public, MIT)
 **Deployed:** https://optimtoken-mcp.optimnow.io/mcp (Fly.io app ai-pricing-hub-mcp). A push to `master` deploys it once CI passes (`.github/workflows/ci.yml`), so merging a pull request is a production release.
 
----
-
 ## Commits and pull requests
 
 Do not add `Co-Authored-By`, `Claude-Session` or "Generated with Claude Code" lines to commit messages or pull request descriptions.
 
 ## What This Project Does
 
-A remote MCP (Model Context Protocol) server that gives an AI assistant seven read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, cloud compute pricing, and the break-even between paying an API and renting capacity. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
+A remote MCP (Model Context Protocol) server that gives an AI assistant eight read-only tools: LLM model comparison, cost estimation, model recommendation, who sells a model and at what price, cloud compute pricing, the break-even between paying an API and renting capacity, and which prices just moved. It works in any MCP client (Claude, ChatGPT, Claude Code, VS Code, Goose). Each tool answers with a text block the model reads and the same figures as `structuredContent`.
 
 **It is not an MCP App.** The server is tools only, on the owner's decision: the React widgets and the Skybridge framework went in 0.5.0 (see Architecture in `docs/DESIGN.md`). Do not add a UI layer back, a `ui://` resource, or a framework around the SDK, unless that decision is reopened.
 
 **Origin:** Business logic copied from the standalone web app cloud-sparkle-compare, which has since been renamed to [OptimNow/ai-pricing-hub](https://github.com/OptimNow/ai-pricing-hub) (private). The local checkout is still the `cloud-sparkle-compare` folder, and this file uses the old name throughout. It is deployed at `optimtoken.optimnow.io`, which is what this app reads its pricing from. The original app remains untouched.
-
----
 
 ## MCP Tools
 
@@ -55,7 +51,10 @@ A remote MCP (Model Context Protocol) server that gives an AI assistant seven re
 - **Output:** The fleet's monthly cost at every rate the instance lists (on demand, spot, commitments), and for each the volume at which it costs the same as the API at list price, at the optimized price and at the cheapest host known: requests/month, tokens/day, and the output tokens per second that volume asks of the fleet. With a throughput: the fleet's capacity, each break-even as a share of it and whether it is out of reach. Plus the difference at the caller's volume, and whether the model's weights are published at all.
 - **Data Source:** both catalogues (`provenance` for the API prices, `computeProvenance` for the instance rates). The arithmetic is local and has no counterpart on the site.
 
----
+### Tool 8: `track-llm-price-changes`
+- **Input:** nothing for the week's moves, with optional `direction` (up | down), `provider`, `includeFlagged`, `limit`; OR `models` (1-4 free-text names) for each one's price history. Plus `useCasePreset` and `volumePreset` for the monthly figures. A week's filter passed with `models` is an error, not ignored.
+- **Output:** `mode` (window | history). Window: `summary` (tracked, moved, up, down, flagged, unflagged), then the moves with no flag (`priceChanges`) and the flagged ones (`flaggedMoves`), each with the price before and after, the blended, input and output change, and the workload's monthly bill before and after. History: per model the first price on record, every change since, the latest price and the net change, plus a `resolution` entry per name.
+- **Data Source:** `GET /api/price-changes` (the site's nightly price archive, dated by `provenance`). No fallback tier: when it cannot be read the tool returns an error.
 
 ## Key Design Decisions
 
@@ -83,8 +82,7 @@ reads as an answer.
 9c. **A retirement notice is read from the site, never kept here.** `deprecation` arrives on the row (site schema 2.8, dated by `provenance.deprecationsVerifiedAt`), is tagged in every text, refuses the badge and keeps the model out of `recommend-llm-model`'s picks. Absent means no notice on record, never "safe". Do not add a table of retired models and do not record the field in the snapshot: a copy ages in silence, and tiers 2 and 3 say they carry none.
 10. **The cost, score, badge, host-price and instance-categorisation logic is a port of the site's, and `npm run check-parity` is how it is held to it.** It runs both implementations over the live catalogues and must report no difference before a release. `lib/compute-categories.ts` is the site's file copied whole: change the rules there, then copy again. See "Keeping in sync" in `docs/DESIGN.md` for the one rule that is stricter here.
 11. **The break-even assumes nothing it cannot read.** `lib/self-hosting.ts` is the one calculation that is not a port. It never supplies a throughput, an operations cost or a GPU memory: this server holds no measurement of any of them, and a default would be an invented fact in an answer the caller is told to quote. Without a throughput it states the one each break-even requires, and says a comparison at the caller's volume holds only if the fleet can serve it. Do not add default tokens-per-second tables or a default staffing cost.
-
----
+12. **A price move is not a repricing unless nothing says otherwise, and a failed read is not a quiet week.** The site flags the moves it can establish as a change of the host it quotes (`hostSwitch`) or an outlier listing (`outlierHost`); `track-llm-price-changes` repeats the flags, lists the flagged moves apart and never calls an unflagged one a repricing by the maker. The archive has no fallback here: on a failed read the tool errors. Do not return an empty list, and do not build a local price history.
 
 ## Dependencies
 
