@@ -49,6 +49,7 @@ import {
   UpstreamFetchError,
   OPTIMTOKEN_BASE_URL,
 } from "./optimtoken-api.js";
+import { noteSiteSchema } from "./site-schema.js";
 
 /** Regions the site's `?region=` parameter accepts. */
 export const PRICING_REGIONS = ["us-east", "us-west", "europe", "asia-pacific"] as const;
@@ -556,6 +557,7 @@ async function fetchFromSite(region: PricingRegion, timeoutMs: number): Promise<
   }
 
   const meta = payload.meta ?? {};
+  noteSiteSchema("/api/pricing", meta.schemaVersion);
   const { staticPriceColumns, unavailablePriceColumns } = classifyPriceColumns(meta.priceTypes);
 
   const liveProviders = coerceLiveProviders(meta.liveProviders);

@@ -16,6 +16,7 @@ import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
 import { coerceHostPricing } from "./host-prices.js";
 import type { ModelHostPricing } from "./host-prices.js";
 import { NO_DEPRECATION_DATA, coerceDeprecation } from "./deprecation.js";
+import { noteSiteSchema } from "./site-schema.js";
 
 export type { LLMModel, LLMCapability, LLMCategory };
 
@@ -695,7 +696,9 @@ function cleanModelName(model: OpenRouterModel): string {
 
 // ── Main transform ──
 
-function transformModels(orModels: OpenRouterModel[]): LLMModel[] {
+/** Exported for scripts/check-site-parity.mjs, which runs it beside the site's
+ *  transform over one OpenRouter payload and reports where the two differ. */
+export function transformModels(orModels: OpenRouterModel[]): LLMModel[] {
   // Index `:batch` variants by parent id — they are merged as columns, not listed as rows
   const batchPricing = new Map<string, { input: number; output: number }>();
   for (const m of orModels) {
@@ -882,6 +885,23 @@ const UNVERIFIED_PRICING_NOTICE =
   "intermittently publishes a model at exactly half its vendor's list rate on " +
   "every field at once. Treat these as unverified upstream figures.";
 
+/**
+ * What tier 2 says about its licences, beside what it says about its prices.
+ *
+ * The site verifies each open model's licence against its LICENSE file
+ * (`VERIFIED_LICENSES`, 117 entries on 2026-11-12). This tier guesses from the
+ * model id's prefix, with a port of the site's older rules. Measured that day
+ * by `npm run check-parity`, over the 288 models both transforms listed: the
+ * licence string differed on 113 and the openness bucket on 84. It went both
+ * ways: 13 models the site records as MIT or Apache 2.0 read Proprietary or
+ * Unknown here, and 24 it records no licence for read Open source or Open
+ * weights. The notice below was about prices only, where 2 of the 288 differed.
+ */
+const UNVERIFIED_LICENCE_NOTICE =
+  "UNVERIFIED LICENCES: on this source a model's licence, and the openness label derived from it, are " +
+  "guessed from the model's name, not read from the site's verified table, and are often wrong in both " +
+  "directions. Do not answer a self-hosting question, or trust an openness filter, from this answer.";
+
 /** The static snapshot, run through the same pricing guard as live data. */
 function staticFallback(): LLMModel[] {
   return sortModels(
@@ -1041,6 +1061,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
   }
 
   reportUnrecognisedLicences(models);
+  noteSiteSchema("/api/llm-models", meta.schemaVersion);
 
   // The site publishes the ELO vintage it actually used; prefer it over our
   // local constant, which only describes the tier-2 enrichment table.
@@ -1117,7 +1138,7 @@ async function fetchFromOpenRouter(): Promise<LLMFetchResult> {
         label: "openrouter.ai direct — list prices as published, uncorrected",
         pricesVerified: false,
         eloAsOf: ELO_AS_OF,
-        notice: `${UNVERIFIED_PRICING_NOTICE} ${NO_DEPRECATION_DATA}`,
+        notice: `${UNVERIFIED_PRICING_NOTICE} ${UNVERIFIED_LICENCE_NOTICE} ${NO_DEPRECATION_DATA}`,
       },
     };
   } finally {

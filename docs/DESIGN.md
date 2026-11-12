@@ -164,6 +164,7 @@ ai-pricing-hub-mcp/
 │       │   ├── azure-size-name.ts    # How an Azure size name reads; port of the site's parser
 │       │   ├── self-hosting.ts       # Break-even between an API and a rented fleet. Not a port
 │       │   ├── server-instructions.ts # What the server tells the calling model when it connects
+│       │   ├── site-schema.ts        # The site's schema versions this server was read against
 │       │   └── *.test.ts             # capabilities, compute-categories, compute-rates, data-sources, deprecation, host-prices, http, llm-business-metrics, model-hosts, output-schema, price-changes, public-url, self-hosting, server-instructions
 │       └── data/
 │           └── pricing-data.ts       # Static fallback LLM pricing + 137 compute instances
@@ -430,7 +431,23 @@ diverged before the switch.
   `refresh-fallback` that brings a new string in fails until it is added.
 - `lib/llm-models.ts` tier 2 — the whole OpenRouter transform (ELO table,
   categories, exclusions, licence prefixes) is a port and only runs when the site
-  is unreachable, so its drift is invisible until the day it matters.
+  is unreachable, so its drift was invisible until the day it mattered. Since
+  0.10.1 `check-parity` ends with a report on it: both transforms run over one
+  OpenRouter payload. On 2026-11-12, over 468 upstream rows, the site listed 311
+  models and this tier 288 (23 missing, most of them `-preview` models the site
+  keeps). Over the 288 listed by both: list price differed on 2 (the site's
+  corrections), batch price on 7, parameters on 21, **licence on 113 and the
+  openness bucket on 84**; price tier, capabilities, release date, Arena score
+  and context window on none. The licences are the part nobody had said: the
+  site verifies them model by model (`VERIFIED_LICENSES`, 117 entries), this
+  tier guesses from the id's prefix, and it was wrong both ways (13 models the
+  site records as MIT or Apache 2.0 read Proprietary or Unknown, 24 with no
+  recorded licence read Open source or Open weights). The tier's notice now
+  says so (`UNVERIFIED LICENCES`), beside the one about prices. It is a report
+  and not a check because this tier is uncorrected by design: a failing check
+  would ask for a resync nobody has decided to do. **The open question is
+  whether to keep the tier at all**: against a snapshot a few days old it is
+  ahead on price freshness and behind on everything else it was measured on.
 - `lib/compute-categories.ts` — instance categorisation, processor and use-case
   inference, applied locally to the site's rows. It is the site's file copied
   whole (only its two imports differ), with `lib/azure-size-name.ts` holding the
@@ -505,13 +522,18 @@ Three things keep the two honest:
   the retirement notice against the site's own table,
   the formatters, the per-host price rules, and the category, processor and
   use cases of every row of the live compute catalogue. It exits 1 on any
-  difference and lists the site's row fields this server does not carry. Outside CI because the site's repository
-  is private. **Run it before each release and after any change to the cost
-  code.** 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
+  difference and lists the site's row fields this server does not carry. Outside this repository's CI because the site's repository
+  is private. The reverse needs no secret, this repository being public: **since
+  2026-11-12 the site runs the script on a schedule** (`.github/workflows/mcp-parity.yml`
+  there) against this repository's `master`, and opens an issue when it exits 1.
+  **Still run it before each release and after any change to the cost code:**
+  the schedule finds a difference a day later, not before the deploy. 2026-11-11, before the resync: 307 of 2,512 optimized costs apart, 37
   scores, 3 badges, 17 openness buckets. After: none.
 - `npm run refresh-fallback` re-snapshots the static model list from `https://optimtoken.optimnow.io/api/llm-models` into the `LLM-FALLBACK-START/END` markers in `server/src/data/pricing-data.ts`. It refuses to write on a collapsed catalogue, and re-derives the price tier for any row still carrying the retired `Open Weights` category (a deployment on schemaVersion 1.0). It moves `dataLastUpdated` only: the static compute rows have their own date, `computeDataLastUpdated`, and their own script.
 - `npm run refresh-compute-fallback` (0.10.1) rewrites the figures of the 137 static compute rows, the ones served when the site cannot be reached at all. Nobody had re-snapshotted them since 2026-03-06: on 2026-11-12, 96 of the 137 differed from what the site itself serves for a provider it cannot read, on-demand rates by up to 69% and savings-plan rates by up to 28%. Each row is read from the live catalogue (`?region=us-east&os=Linux`, the URL this server and the compute page share) when it lists the instance type, 118 rows that day, and otherwise from the site's own static catalogue in its checkout, 19 rows (16 GCP types and 3 DigitalOcean sizes the site only serves while it cannot read the provider). The sample and its section comments are kept: a row is added or removed by hand. The script refuses an answer in which a provider was not read live, because that answer holds the site's static rows in place of today's prices, and a test holds every row to the one layout the script recognises.
 - The tier-2 ELO table in `lib/llm-models.ts` is the site's, copied whole between the `ELO-SCORES-START/END` markers together with `ELO_AS_OF`. The site rewrites every value weekly from one read of Arena's leaderboard; a partial copy would mix two scales. The rest of the tier-2 transform (exclusions, licence prefixes, release dates) was last ported in August 2026 and has not been re-read since.
+
+- **`SYNCED_SITE_SCHEMAS` in `lib/site-schema.ts`** (0.10.1) is the schema version of each of the four endpoints this server was last read against: `/api/llm-models` 2.8, `/api/pricing` 1.3, `/api/model-hosts` 1.0, `/api/price-changes` 1.0. The site bumps a version with every field it adds or whose meaning it changes (2.4 changed what `Reasoning` means, 2.5 removed `Code`); this server recorded the version it was served and compared it with nothing, so each bump was followed by hand on the day someone noticed. Now `check-parity` fails when an entry differs from the site's constants (`src/lib/api-schema-versions.ts`) or from what the live endpoints answer, which on the site's schedule turns a bump into an issue, and each reader logs once per process when the versions differ (`noteSiteSchema`). The answer is still served: the coercions refuse what they cannot read, row by row, and a version this server has not seen is not evidence that its prices are wrong. Move an entry only when the change behind the new version has been read and either carried or decided against.
 
 Before adding LLM business logic here, check whether `cloud-sparkle-compare` already has it and port rather than reinvent.
 

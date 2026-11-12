@@ -26,6 +26,7 @@
  * move, never an empty list that would read as "nothing moved".
  */
 import { UpstreamFetchError, fetchOptimtokenJson, optimtokenUrl } from "./optimtoken-api.js";
+import { noteSiteSchema } from "./site-schema.js";
 
 /** The archive is a file the site serves from the edge: a slow answer is a
  *  fault, and nothing else in the response waits on it. */
@@ -269,6 +270,7 @@ async function read<T>(params: Record<string, string> | undefined, coerce: (payl
 export async function fetchPriceChanges(): Promise<PriceChangesWindow> {
   if (windowCache && Date.now() - windowCache.fetchedAt < CACHE_TTL_MS) return windowCache.result;
   const result = await read(undefined, coercePriceChanges);
+  noteSiteSchema("/api/price-changes", result.meta.schemaVersion);
   windowCache = { fetchedAt: Date.now(), result };
   return result;
 }
@@ -279,6 +281,7 @@ export async function fetchPriceHistory(id: string): Promise<PriceHistory> {
   const cached = historyCache.get(id);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.result;
   const result = await read({ id }, (payload) => coercePriceHistory(payload, id));
+  noteSiteSchema("/api/price-changes", result.meta.schemaVersion);
   if (historyCache.size >= HISTORY_CACHE_MAX_ENTRIES) {
     const oldest = historyCache.keys().next().value;
     if (oldest !== undefined) historyCache.delete(oldest);

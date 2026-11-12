@@ -282,6 +282,11 @@ test("tier 2 — the site is down, OpenRouter serves, and the prices are flagged
     "a fallback must not silently downgrade correctness",
   );
   assert.match(result.provenance.notice ?? "", /half/i);
+  // And the licences: on this tier they are a guess from the model's name, and
+  // on 2026-11-12 the openness bucket they give differed from the site's for
+  // 84 of the 288 models both listed. The warning was about prices only.
+  assert.match(result.provenance.notice ?? "", /UNVERIFIED LICENCES/);
+  assert.match(result.provenance.notice ?? "", /openness/);
   assert.ok(requested.some(isSite), "the site must be tried before OpenRouter");
 });
 
