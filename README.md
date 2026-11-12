@@ -57,12 +57,18 @@ The 8 workload profiles carry realistic token counts, so you do not have to
 invent them: Support Ticket, Knowledge Q&A, Meeting Summary, Marketing Content,
 Coding Task, Invoice Processing, Call Summary, Agent Workflow.
 
-More questions that work as written:
+More questions that work as written. Plain ones:
+
+- *"Show me the smartest models for the lowest price."*
+- *"How do the best open-weights models compare with the best proprietary ones, on quality and on price?"*
+- *"Which AI model prices changed this week?"*
+- *"What does an 8-vCPU, 32 GB instance cost on AWS in Europe: on demand, on spot and with a 3-year savings plan?"*
+
+And detailed ones:
 
 - *"Who sells Llama 3.3 70B, and what would a coding workload cost at the cheapest host?"*
-- *"Which LLM prices changed this week, and which of those are real price changes rather than a change of host?"*
+- *"Which of this week's price moves are real price changes rather than a change of the host quoted?"*
 - *"At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B?"*
-- *"Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, with what a 3-year commitment saves."*
 
 ---
 

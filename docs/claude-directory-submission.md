@@ -1,13 +1,13 @@
 # Publishing this server in the Claude connectors directory
 
-Status as of 2026-11-12: **not submitted. The server is ready; the listing
-material is not written.** Production serves 0.11.0, and the five blocking
-checks of "Before you submit" passed that day (each says how it was checked),
-and so did item 6 there. What is left is the listing copy and the example
-prompts, which the owner decided on 2026-11-12 to write on the day of the
-submission. The
-portal reads the live server, so run `scripts/check-connector.mjs` again after
-any later deploy.
+Status as of 2026-11-12: **not submitted. The server is ready and the listing
+is drafted.** Production serves 0.11.0, and the six checks of "Before you
+submit" passed that day (each says how it was checked). The texts to paste
+into the portal, the eight example prompts and the test instructions are in
+`claude-directory-listing.md`, written the same day. What is left is the
+owner's reading of those texts, the choice of the URL slug, which is
+permanent, and the re-run of the checks on the day of the submission: the
+portal reads the live server, and model names age.
 
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
@@ -142,43 +142,28 @@ policy asks a server to be "frugal with their use of tokens".
   `OptimNow/cloud-finops-skills`; that listing uploaded a 96 × 96 PNG of the
   same mark). To upload it, or to give the portal an address:
   `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png`.
-- **Listing copy. To write on the day of the submission** (owner's decision,
-  2026-11-12); what follows is a starting point, not the text. Limits: name up
-  to 100 characters, one-liner up to 200, description up to 2,000, one to five
-  categories from the portal's list, and a URL slug that is **permanent once
-  published**. Suggested:
-  - Name: `OptimToken`
-  - Slug: `optimtoken`
-  - One-liner: "Live, verified LLM and cloud compute prices: cost per request, monthly budget, and a ranked model pick for your workload."
-  - Description: start from the "Why this exists" and "Tools" sections of
-    `README.md`. State that it is read-only, needs no account, stores nothing,
-    and that every answer carries a `provenance` block saying which source
-    served it and whether the prices are vendor-verified. Do not claim or
-    imply Anthropic endorsement; the terms forbid it.
-- **Example prompts. To settle on the day of the submission**, for the reason
-  given next. The policy asks for at least three that work. Model
-  names age: on 2026-11-11 "Gemini 3.1 Pro" resolved to a Preview model with an
-  ambiguity note, and GPT-4o is two generations old. Check each still resolves
-  cleanly the day you paste it.
-
-  | Tool | Prompt |
-  |---|---|
-  | `compare-llm-models` | "Show me models under $1 per 1M input tokens with an ELO above 1300." |
-  | `recommend-llm-model` | "Recommend a model for support tickets under $500 a month." |
-  | `compare-models-side-by-side` | "Compare Claude Opus 5.5 and Gemini 4 Argon side by side." |
-  | `estimate-llm-cost` | "About 800 input tokens and 200 output, four million requests a month, 60% of the prompt cached: what does that cost on Claude Opus 5.5?" |
-  | `compare-compute-pricing` | "Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, and what a 3-year commitment saves on each." |
-  | `compare-model-hosts` | "Who sells DeepSeek V4.1 Flash, and what would a coding workload cost at the cheapest host?" |
-  | `estimate-self-hosting-breakeven` | "At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B on support tickets?" |
-  | `track-llm-price-changes` | "Which LLM prices changed this week, and which of those are real price changes rather than a change of host?" |
+- **Listing copy, example prompts and test instructions.** In
+  `claude-directory-listing.md`, field by field, since 2026-11-12: the name,
+  (`AI Economics`), the one-liner, the description, the slug
+  (`optimnow-ai-economics`), twelve example prompts in two groups (plain
+  questions and detailed ones, every tool covered), and the text of the Test
+  & launch step.
+  `listing.test.ts` holds the three length limits and fails when a tool has no
+  prompt. The suggestions that stood here until then are replaced by that
+  file.
 - **URLs.** Documentation `https://optimtoken.optimnow.io/mcp`, privacy
-  `https://optimtoken.optimnow.io/privacy`, support
-  `https://www.optimnow.io/contact`, company `https://optimnow.io`.
+  `https://optimtoken.optimnow.io/privacy`, company `https://optimnow.io`.
+  Support: the repository's issue tracker in the listing's Support field, as
+  the Cloud FinOps listing has it; the privacy page gives
+  `https://www.optimnow.io/contact` as well.
 - **Smoke tests.** Re-run the cases in `chatgpt-app-smoke-tests.md` against
   the published URL. The portal's Test & launch step asks you to confirm every
   tool was run, through MCP Inspector or as a custom connector.
 
 ## The portal, step by step
+
+What each step asks for. The text to paste at each one is in
+`claude-directory-listing.md`, under the same step numbers.
 
 Progress saves in the browser between steps.
 
