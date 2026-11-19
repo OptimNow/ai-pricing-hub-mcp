@@ -7,7 +7,7 @@ automated review approved it as a Community connector, and an email said so
 ("Anthropic MCP Directory Follow-Up", sent through Intercom for Anthropic's
 Platform Operations). The portal then showed "Ready to publish". Publishing
 is the owner's click, not Anthropic's. The listing was published at about
-21:25 CET, once its authentication was corrected (see "After the approval"),
+21:20 CET, once its authentication was corrected (see "After the approval"),
 and the portal says a new listing takes up to an hour to appear at
 <https://claude.ai/directory/connectors/optimnow-ai-economics>. What was
 entered at each step is in `claude-directory-listing.md`.
