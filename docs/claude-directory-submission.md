@@ -1,11 +1,16 @@
 # Publishing this server in the Claude connectors directory
 
-Status as of 2026-11-19: **submitted, in review.** The owner submitted "AI
-Economics" (slug `optimnow-ai-economics`) from the OptimNow organisation that
-day, against 0.11.1, and the portal lists it as "In review". The outcome (a
-Community listing by default, or an escalation to Verified) and any reviewer
-feedback appear in the portal, at <https://claude.ai/directory/manage>. What
-was entered at each step is in `claude-directory-listing.md`.
+Status as of 2026-11-19: **published, as a Community connector.** The owner
+submitted "AI Economics" (slug `optimnow-ai-economics`) from the OptimNow
+organisation that evening, against 0.11.1. About ten minutes later an
+automated review approved it as a Community connector, and an email said so
+("Anthropic MCP Directory Follow-Up", sent through Intercom for Anthropic's
+Platform Operations). The portal then showed "Ready to publish". Publishing
+is the owner's click, not Anthropic's. The listing was published at about
+21:25 CET, once its authentication was corrected (see "After the approval"),
+and the portal says a new listing takes up to an hour to appear at
+<https://claude.ai/directory/connectors/optimnow-ai-economics>. What was
+entered at each step is in `claude-directory-listing.md`.
 
 The listing was drafted on 2026-11-12, when the six checks of "Before you
 submit" passed against 0.11.0 (each says how it was checked).
@@ -197,7 +202,8 @@ draft survives a reload of the tab, not a new tab.
 4. **Use cases.** Three rows at most. Prerequisites: none. Read only.
 5. **Company.** OptimNow, `https://optimnow.io`, and the contact that should
    receive review updates.
-6. **Authentication.** No authentication.
+6. **Authentication.** No authentication. Check what the listing recorded
+   once it is approved: see "After the approval".
 7. **Data handling.** The API is your own (`optimtoken.optimnow.io`), and it is
    the only one the server calls (the OpenRouter fallback went in 0.11.0). No
    health data, no sponsored content.
@@ -214,8 +220,31 @@ draft survives a reload of the tab, not a new tab.
 10. **Review and submit.** Quality warnings such as very short answers are
     shown here and forwarded to the review team.
 
+## After the approval, before publishing
+
+An approved listing is not public until the owner clicks **Publish** on its
+page in the portal. Read its **Settings** tab first.
+
+On 2026-11-19 it read "Users sign in with: OAuth 2.0 with dynamic client
+registration", and the edit page had **Always required** checked. Yet the
+form had "None" at step 6, its draft held `authType: "none"`, and the portal's
+own probe had found no sign-in. The server publishes no OAuth metadata
+(`/.well-known/oauth-protected-resource` answers 404), so a published listing
+asking for an OAuth sign-in risked leaving users unable to connect. Cloud
+FinOps, whose server behaves the same way, read "No sign-in. Anyone can
+connect."
+
+The fix: **Edit listing**, then "Connection & authentication", then **Edit
+authentication** (the radio buttons do nothing until it is clicked), then
+**None**, then **Save**. Before publishing, a change to the authentication
+applies at once and keeps the approval; a change to the URL or the request
+headers withdraws it. Settings then read "No sign-in. Anyone can connect.",
+and the Overview read "Authentication: None".
+
 ## After it is listed
 
+- A new listing takes up to an hour to appear in the directory. Until then
+  its public URL answers "This connector doesn't exist".
 - Changes to the live server need no resubmission; the directory reads the
   server. Listing text is edited in the portal, and an edit is re-reviewed.
   The tool names shown on the listing are part of the listing details. The
