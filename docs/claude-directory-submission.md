@@ -1,13 +1,14 @@
 # Publishing this server in the Claude connectors directory
 
-Status as of 2026-11-12: **not submitted. The server is ready and the listing
-is drafted.** Production serves 0.11.0, and the six checks of "Before you
-submit" passed that day (each says how it was checked). The texts to paste
-into the portal, the eight example prompts and the test instructions are in
-`claude-directory-listing.md`, written the same day. What is left is the
-owner's reading of those texts, the choice of the URL slug, which is
-permanent, and the re-run of the checks on the day of the submission: the
-portal reads the live server, and model names age.
+Status as of 2026-11-19: **submitted, in review.** The owner submitted "AI
+Economics" (slug `optimnow-ai-economics`) from the OptimNow organisation that
+day, against 0.11.1, and the portal lists it as "In review". The outcome (a
+Community listing by default, or an escalation to Verified) and any reviewer
+feedback appear in the portal, at <https://claude.ai/directory/manage>. What
+was entered at each step is in `claude-directory-listing.md`.
+
+The listing was drafted on 2026-11-12, when the six checks of "Before you
+submit" passed against 0.11.0 (each says how it was checked).
 
 Re-run on 2026-11-19, against 0.11.0 still: `check-connector.mjs` passed
 (eight concurrent calls, eight answers), `/mcp` and `/privacy` answered 200
@@ -16,7 +17,10 @@ is open on either repository, and the eight calls of the Test & launch step
 answered, every model name resolving to one model. Anthropic's five pages
 (Sources) read the same as on 2026-11-12, with one difference: the
 submission page says not to put credentials in the portal, and that
-Community listings need no test account.
+Community listings need no test account. At the Tools step the portal then
+flagged every tool "Missing title annotation": 0.11.1 was released the same
+evening to fix it, and the checks passed again against it before the
+submission.
 
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
@@ -174,27 +178,34 @@ policy asks a server to be "frugal with their use of tokens".
 What each step asks for. The text to paste at each one is in
 `claude-directory-listing.md`, under the same step numbers.
 
-Progress saves in the browser between steps.
+Progress saves in the browser tab between steps (its `sessionStorage`): the
+draft survives a reload of the tab, not a new tab.
 
-1. **Connection.** Paste `https://optimtoken-mcp.optimnow.io/mcp`, or pick
-   the custom connector already on the account. Universal URL: every user
-   connects to the same one.
-2. **Tools.** Synced from the server. All eight should land in the read-only
-   group with no "missing title or annotation" flag. If one is flagged, fix
-   the server before continuing; the portal reads the live tool list.
-3. **Listing.** Name, one-liner, description, categories, documentation URL,
-   privacy URL, support contact, icon, slug, from the material above.
-4. **Use cases.** Reads data only. No prerequisite: no account, plan or setup.
+1. **Connection.** Add `https://optimtoken-mcp.optimnow.io/mcp` as a custom
+   connector, or pick the one already on the account. The connector stays in
+   the account's connectors afterwards. Universal URL: every user connects to
+   the same one.
+2. **Tools.** Read from the connector. All eight should land in the
+   read-only group with no "missing title or annotation" flag; the portal
+   reads the title from `annotations.title`. If one is flagged, fix the
+   server, deploy, then refresh the connector's tool list (Customize,
+   Connectors, the connector's ⋯ menu, **Refresh tools list**) and reload the
+   form: the portal does not read the tools again by itself.
+3. **Listing.** Name, slug, one-liner, description, categories, author name
+   and URL, icon, documentation URL, support, privacy URL, from the material
+   above.
+4. **Use cases.** Three rows at most. Prerequisites: none. Read only.
 5. **Company.** OptimNow, `https://optimnow.io`, and the contact that should
    receive review updates.
 6. **Authentication.** No authentication.
 7. **Data handling.** The API is your own (`optimtoken.optimnow.io`), and it is
    the only one the server calls (the OpenRouter fallback went in 0.11.0). No
    health data, no sponsored content.
-8. **Test & launch.** Credentials were a mandatory field on the Cloud FinOps
-   submission (Anthropic's page now says not to put any in the portal). Write that the server
-   is public and unauthenticated, no account exists or is needed, and paste
-   the prompt table above as the walkthrough. Confirm every tool was run.
+8. **Test & launch.** One box: confirm every tool was run, through MCP
+   Inspector or as a custom connector. Run the eight calls of the listing's
+   step 8 against the live deployment first. (On the Cloud FinOps
+   submission this step also had a mandatory credentials field; on
+   2026-11-19 it had none.)
 9. **Compliance.** Seven acknowledgments: directory guidelines, first-party
    API usage, financial transactions, AI media generation, prompt injection,
    conversation data collection, public documentation. All seven apply

@@ -5,11 +5,12 @@ What to paste into the developer portal (<https://claude.ai/directory/manage>,
 `claude-directory-submission.md` holds the procedure and the checks on the
 server; this file holds the texts.
 
-Status: **drafted on 2026-11-12, not submitted.** Written against 0.11.0 in
-production and against Anthropic's pages as they read that day (Sources, at
-the end). The four checks below were run again on 2026-11-19, still against
-0.11.0, and passed; the Test & launch text was corrected that day (it quoted
-an error message the server does not print).
+Status: **submitted on 2026-11-19, in review.** The portal lists "AI
+Economics" as "In review". Drafted on 2026-11-12 against 0.11.0 and
+Anthropic's pages as they read that day (Sources, at the end); submitted
+against 0.11.1, whose one change is the title annotation of step 2. The
+four checks below were run again on the day and passed. Where the form
+differed from this draft, each step says what was entered.
 
 Three things here cannot be corrected afterwards, so read them twice:
 
@@ -50,8 +51,13 @@ On 2026-11-19, against 0.11.0, all eight were in the read-only group, each
 with a suggestion "Missing title annotation. Add annotations.title". The
 portal reads the title from `annotations.title` (MCP 2025-03-26), and the
 server set only the top-level `title` (2025-06-18). 0.11.1 sets both, and
-`check-connector.mjs` now fails a tool without the first. After a deploy,
-reconnect the connector at step 1 so that the portal reads the tools again.
+`check-connector.mjs` now fails a tool without the first.
+
+After a deploy, the portal keeps the tool list it read when the connector was
+added: neither "Change" at step 1 nor a reload of the form reads it again.
+What does: on claude.ai, Customize, Connectors, Yours, the connector, its ⋯
+menu, **Refresh tools list**, then reload the form. The draft then recorded
+`all_have_title: true`, which is sent with the submission.
 
 ## Step 3. Listing
 
@@ -131,14 +137,19 @@ the maintainer set for the Cloud FinOps listing on 2026-11-11:
 
 ### Categories
 
-One to five, from the portal's list. `Data & Analytics` first. The Cloud FinOps
-listing also took `Productivity` and `Other`; take a finance or developer
-category instead if the list offers one.
+One to five, from the portal's list. Entered on 2026-11-19: `Data & Analytics`
+and `Development tools`. The list had no cost or FinOps category, and
+`Financial Services` reads as the finance industry, so it was not taken. The
+list that day: Productivity, Communication, Data & Analytics, Development
+tools, Financial Services, Consumer Health, Health & Life Sciences, Media &
+Entertainment, Commerce & Shopping, Legal, Sales and marketing, Creative,
+Nonprofit, Education, Travel, Other.
 
 ### Works with
 
 Claude (web & mobile), Claude API, Claude Code, Claude Desktop. The same set as
 the Cloud FinOps listing: the server is a plain remote MCP server with no UI.
+The form of 2026-11-19 had no such field.
 
 ### Links and icon
 
@@ -147,8 +158,10 @@ the Cloud FinOps listing: the server is a plain remote MCP server with no UI.
 | Documentation URL | `https://optimtoken.optimnow.io/mcp` |
 | Privacy policy URL | `https://optimtoken.optimnow.io/privacy` |
 | Support | `https://github.com/OptimNow/ai-pricing-hub-mcp/issues` |
-| Icon | `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png` (512 × 512, or upload `assets/icon.png`) |
-| Has an MCP App | Unticked. The server has had no view since 0.5.0. Check the box after every save: on the Cloud FinOps listing it was found ticked again on 2026-11-11 |
+| Author name, author URL | `OptimNow`, `https://optimnow.io`. Shown as "by OptimNow"; left blank, they default to the company of step 5 |
+| Icon | Custom icon URL `https://raw.githubusercontent.com/OptimNow/ai-pricing-hub-mcp/master/assets/icon.png` (512 × 512). Without one the portal shows the favicon of the server's URL, and `optimtoken-mcp.optimnow.io/favicon.ico` answers 404. The custom icon replaces it in the directory listing only |
+| Enterprise managed auth documentation | Left empty: there is no authentication |
+| Has an MCP App | Unticked. The server has had no view since 0.5.0. Check the box after every save: on the Cloud FinOps listing it was found ticked again on 2026-11-11. The form of 2026-11-19 showed no such box |
 
 The support field takes the issue tracker, as the Cloud FinOps listing does
 (the owner's choice, 2026-11-12). The policy asks for "verified contact information and support channels for
@@ -175,7 +188,12 @@ The connector reads data only.
 The block has two columns per row, **Use case** and **Example prompt**, and the
 reviewer reads a row as the two joined. The policy asks for at least three
 working examples. There are twelve here, in two groups, and every tool has at
-least one. If the block takes fewer rows, enter the plain questions first.
+least one.
+
+The block takes three rows (2026-11-19). Entered: A1, A4 and A6, three plain
+questions on three different tools. Prerequisites: "None. No account, plan or
+setup: the server is public and read-only." Read/write: Read only. The other
+nine are for a reviewer who asks for more.
 
 Plain questions, as a decision-maker asks them:
 
@@ -228,6 +246,11 @@ Add the other one when the tool prints the release date and sorts on it.
 OptimNow, `https://optimnow.io`. Primary contact for review updates: the
 address used for the Cloud FinOps listing.
 
+The portal pre-fills the company name from the account's organisation, spelled
+`Optimnow`: it was corrected to `OptimNow`. The contact's name and email are
+pre-filled from the Claude account. Role and Anthropic contact were left
+empty.
+
 ## Step 6. Authentication
 
 **No authentication.** The server serves public, read-only data. Nothing to
@@ -247,10 +270,12 @@ lists) and corrects it. The connector never calls those sources.
 
 ## Step 8. Test & launch
 
-On the Cloud FinOps submission this step had a mandatory credentials field.
-Anthropic's submission page says, as read on 2026-11-19, not to put
-credentials in the portal, and that Community listings need no test account.
-The text below holds none: paste it into whichever field the step shows.
+On 2026-11-19 this step was one box, "I have run every tool via MCP Inspector
+or as a custom connector in Claude", with no credentials field and no field for
+test instructions (the Cloud FinOps submission had a mandatory credentials
+field; Anthropic's submission page now says not to put credentials in the
+portal). The text below is the self-test to run before ticking the box, and
+the answer to a reviewer who asks how to test.
 
 ```text
 No account or credential exists or is needed: the server is public and read-only.
@@ -275,11 +300,12 @@ The same questions in plain words, for a chat with the connector on, are the exa
 
 Change the date in that text to the day the calls are run again. Tick "I have
 run every tool" only after running them on the deployment that is live that
-day.
+day. On 2026-11-19 they were run against 0.11.1, after its deploy.
 
 ## Step 9. Compliance
 
-Seven acknowledgments, all required. How each applies:
+Seven acknowledgments, all required, ticked by the owner on 2026-11-19, and
+an optional Additional notes field, left empty. How each applies:
 
 | Acknowledgment | Here |
 |---|---|
@@ -295,7 +321,7 @@ Seven acknowledgments, all required. How each applies:
 
 Read the whole submission once more. Quality warnings such as "very short
 answer" appear here and are forwarded to the reviewers: fix them before
-submitting.
+submitting. Submitted by the owner on 2026-11-19.
 
 ## Sources
 
