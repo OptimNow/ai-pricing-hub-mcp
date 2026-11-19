@@ -7,7 +7,9 @@ server; this file holds the texts.
 
 Status: **drafted on 2026-11-12, not submitted.** Written against 0.11.0 in
 production and against Anthropic's pages as they read that day (Sources, at
-the end).
+the end). The four checks below were run again on 2026-11-19, still against
+0.11.0, and passed; the Test & launch text was corrected that day (it quoted
+an error message the server does not print).
 
 Three things here cannot be corrected afterwards, so read them twice:
 
@@ -43,6 +45,13 @@ https://optimtoken-mcp.optimnow.io/mcp
 Nothing to type. The portal reads the tools from the live server. All eight
 should land in the read-only group, with no "missing title or annotation"
 flag.
+
+On 2026-11-19, against 0.11.0, all eight were in the read-only group, each
+with a suggestion "Missing title annotation. Add annotations.title". The
+portal reads the title from `annotations.title` (MCP 2025-03-26), and the
+server set only the top-level `title` (2025-06-18). 0.11.1 sets both, and
+`check-connector.mjs` now fails a tool without the first. After a deploy,
+reconnect the connector at step 1 so that the portal reads the tools again.
 
 ## Step 3. Listing
 
@@ -238,12 +247,15 @@ lists) and corrects it. The connector never calls those sources.
 
 ## Step 8. Test & launch
 
-The credentials field is mandatory. Text to paste:
+On the Cloud FinOps submission this step had a mandatory credentials field.
+Anthropic's submission page says, as read on 2026-11-19, not to put
+credentials in the portal, and that Community listings need no test account.
+The text below holds none: paste it into whichever field the step shows.
 
 ```text
 No account or credential exists or is needed: the server is public and read-only.
 
-Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or open it in MCP Inspector, and call each of the 8 tools once. These calls returned content on 2026-11-12:
+Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or open it in MCP Inspector, and call each of the 8 tools once. These calls returned content on 2026-11-19:
 
 1. compare-llm-models {"maxInputPrice":1,"minElo":1300,"limit":10}
 2. recommend-llm-model {"useCasePreset":"supportTicket","maxMonthlyBudget":500}
@@ -256,7 +268,7 @@ Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or o
 
 Each answer is a text block, with the same figures as structured content, and it opens with its data source and date.
 
-A model name that matches nothing is reported by name, for example: "Zzyzx Nonexistent 9" matched no model. An invalid argument returns a validation error that names the field, for example: expected number, received string at limit. Neither is a bare 500.
+A model name that matches nothing is reported by name, for example: No models found matching "Zzyzx Nonexistent 9". An invalid argument returns a validation error that names the field, for example: expected number, received string at limit. Neither is a bare 500.
 
 The same questions in plain words, for a chat with the connector on, are the example prompts of the Use cases step.
 ```

@@ -9,6 +9,15 @@ owner's reading of those texts, the choice of the URL slug, which is
 permanent, and the re-run of the checks on the day of the submission: the
 portal reads the live server, and model names age.
 
+Re-run on 2026-11-19, against 0.11.0 still: `check-connector.mjs` passed
+(eight concurrent calls, eight answers), `/mcp` and `/privacy` answered 200
+with their full text to curl, the docs page names the eight tools, no issue
+is open on either repository, and the eight calls of the Test & launch step
+answered, every model name resolving to one model. Anthropic's five pages
+(Sources) read the same as on 2026-11-12, with one difference: the
+submission page says not to put credentials in the portal, and that
+Community listings need no test account.
+
 The ChatGPT counterpart is `chatgpt-submission.md`. The two directories ask for
 much the same material, so prepare it once.
 
@@ -118,7 +127,7 @@ documentation as it read that day:
 | Requirement | Status |
 |---|---|
 | Remote server, `https://`, Streamable HTTP | `https://optimtoken-mcp.optimnow.io/mcp` on Fly.io |
-| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All eight carry `title`, `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` (`compare-model-hosts` was added in 0.6.0, `estimate-self-hosting-breakeven` in 0.7.0, `track-llm-price-changes` in 0.9.0) |
+| `title` plus `readOnlyHint` or `destructiveHint` on every tool | All eight carry `title`, at the top level and, since 0.11.1, in `annotations.title` too (the portal reads the second and flagged its absence on 2026-11-19), `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true` (`compare-model-hosts` was added in 0.6.0, `estimate-self-hosting-breakeven` in 0.7.0, `track-llm-price-changes` in 0.9.0) |
 | Tool names at most 64 characters | Longest is 31 (`estimate-self-hosting-breakeven`) |
 | Descriptions say what the tool does and when to use it, with no instructions to the model | Reworded in October; the routing between the eight tools stays |
 | Authentication | `none`; allowed for public data, and the portal has a "No authentication" option |
@@ -182,7 +191,8 @@ Progress saves in the browser between steps.
 7. **Data handling.** The API is your own (`optimtoken.optimnow.io`), and it is
    the only one the server calls (the OpenRouter fallback went in 0.11.0). No
    health data, no sponsored content.
-8. **Test & launch.** Credentials are a mandatory field. Write that the server
+8. **Test & launch.** Credentials were a mandatory field on the Cloud FinOps
+   submission (Anthropic's page now says not to put any in the portal). Write that the server
    is public and unauthenticated, no account exists or is needed, and paste
    the prompt table above as the walkthrough. Confirm every tool was run.
 9. **Compliance.** Seven acknowledgments: directory guidelines, first-party
