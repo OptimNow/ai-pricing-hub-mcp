@@ -5,8 +5,9 @@ What to paste into the developer portal (<https://claude.ai/directory/manage>,
 `claude-directory-submission.md` holds the procedure and the checks on the
 server; this file holds the texts.
 
-Status: **submitted on 2026-11-19, in review.** The portal lists "AI
-Economics" as "In review". Drafted on 2026-11-12 against 0.11.0 and
+Status: **published on 2026-11-19, as a Community connector.** Submitted,
+approved by an automated review and published the same evening (the
+sequence is in `claude-directory-submission.md`). Drafted on 2026-11-12 against 0.11.0 and
 Anthropic's pages as they read that day (Sources, at the end); submitted
 against 0.11.1, whose one change is the title annotation of step 2. The
 four checks below were run again on the day and passed. Where the form
@@ -255,6 +256,12 @@ empty.
 
 **No authentication.** The server serves public, read-only data. Nothing to
 configure.
+
+The portal detects it ("no sign-in required") and checks **None**. But on
+2026-11-19 the approved listing recorded "Always required" with OAuth
+dynamic client registration all the same. Read the listing's Settings tab
+before publishing; how to fix it is in `claude-directory-submission.md`,
+"After the approval, before publishing".
 
 ## Step 7. Data handling
 
