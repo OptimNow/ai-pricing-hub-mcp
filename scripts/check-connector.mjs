@@ -10,7 +10,8 @@
  *
  *   1. initialize   -> HTTP 200, serverInfo, and the instructions the server
  *                      sends the calling model (since 0.10.0)
- *   2. tools/list   -> the eight tools, each with a title, readOnlyHint, a
+ *   2. tools/list   -> the eight tools, each with a title (top-level and in
+ *                      annotations), readOnlyHint, a
  *                      2020-12 outputSchema, and no widget template
  *   3. resources    -> none: the server publishes no `ui://` resources since
  *                      0.5.0, and a client must not be offered any
@@ -105,6 +106,9 @@ check(EXPECTED_TOOLS.every(n => toolNames.includes(n)) && toolNames.length === E
 for (const tool of listed) {
   const problems = [
     tool.title ? "" : "no title",
+    // Anthropic's directory portal reads the title from the annotations, not
+    // from the top-level field, and flags a tool without it.
+    tool.annotations?.title === tool.title ? "" : `annotations.title is ${JSON.stringify(tool.annotations?.title)}`,
     tool.annotations?.readOnlyHint === true ? "" : "readOnlyHint is not true",
     tool.outputSchema?.$schema === JSON_SCHEMA_2020_12 ? "" : `outputSchema dialect ${tool.outputSchema?.$schema}`,
     tool._meta && Object.keys(tool._meta).length > 0 ? `carries _meta ${JSON.stringify(tool._meta)}` : "",

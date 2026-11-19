@@ -952,8 +952,14 @@ function tool<
   },
   cb: ToolCallback<InputArgs>,
 ): void {
+  // The title goes in `annotations.title` as well. MCP 2025-06-18 moved a
+  // tool's display name to a top-level `title`, but Anthropic's directory
+  // portal reads it from the annotations (where 2025-03-26 put it) and flagged
+  // all eight tools "Missing title annotation" on 2026-11-19. The spec keeps
+  // both fields, so carrying the one title in both costs nothing.
+  const annotations: ToolAnnotations = { title: config.title, ...config.annotations };
   tools.push(server => {
-    server.registerTool(name, config, cb);
+    server.registerTool(name, { ...config, annotations }, cb);
   });
 }
 
@@ -3290,7 +3296,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.11.0",
+      version: "0.11.1",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.
