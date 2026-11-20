@@ -645,6 +645,18 @@ not be reported as applied. Do not relax it to match the site's text; it is
 pinned by tests on synthetic dear-batch, dear-cache and dear-cache-under-batch
 models, and by two whole-catalogue sweeps.
 
+**What the optimized figure assumes is said beside it, since 0.11.3.** Naming
+the lever was not enough. In a rehearsal on 2026-11-20, Claude reported "with
+prompt caching ~$640" for Claude Sonnet 5.5 and never said that the figure
+reads 60% of input tokens from the cache, because no text said so: the Support
+Ticket preset's `cacheHitRate` reached `structuredContent` only. Every text that
+prints an optimized cost now states the cache share and the batch choice behind
+it (`optimizationAssumption()`), and whose assumption it is: the preset's, or
+the caller's. A custom shape with no assumption keeps `NO_ASSUMPTIONS_NOTE`.
+The same rehearsal asked for "something else if it is better" and Claude called
+only `compare-models-side-by-side`, so its description now sends that request
+to `recommend-llm-model`.
+
 **The retirement gate is applied since 0.8.0.** The site refuses the FinOps
 Friendly badge to a model whose maker has announced its retirement, from a
 table it keeps by hand (`model-lifecycle.ts`, 48 entries). Until its schema 2.8
