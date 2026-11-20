@@ -68,7 +68,7 @@ And detailed ones:
 
 - *"Who sells Llama 3.3 70B, and what would a coding workload cost at the cheapest host?"*
 - *"Which of this week's price moves are real price changes rather than a change of the host quoted?"*
-- *"At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B?"*
+- *"At what monthly volume does renting an AWS g6e.12xlarge cost the same as paying the API for Llama 3.3 70B?"*
 
 ---
 

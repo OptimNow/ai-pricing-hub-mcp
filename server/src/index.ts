@@ -2380,7 +2380,7 @@ tool(
       "hourly rate of your own (hourlyRate). The answer costs the fleet at every rate the catalogue lists " +
       "(on demand, spot, 1- and 3-year commitments) against the API at list price, at the optimized price " +
       "with caching and batch, and at the cheapest host known, and compares them at your volume. Use it " +
-      "for 'at what volume does self-hosting Llama 3.3 70B on a g6e.4xlarge pay off' or 'is our 2M " +
+      "for 'at what volume does self-hosting Llama 3.3 70B on a g6e.12xlarge pay off' or 'is our 2M " +
       "requests a month enough to rent our own GPUs'. " +
       "It assumes neither a throughput nor an operations cost. Without outputTokensPerSecond each " +
       "break-even states the output tokens per second the fleet would have to sustain around the clock; " +
@@ -2391,7 +2391,7 @@ tool(
       "final as returned and dated by `provenance` (API prices) and `computeProvenance` (instance rates).",
     inputSchema: {
       model: z.string().min(1).describe("Model whose API price is the baseline, e.g. 'Llama 3.3 70B'. One name; the best match is used and other matches are reported."),
-      instanceType: z.string().min(1).optional().describe("Instance the model would run on, exactly as the compute catalogue names it, e.g. 'g6e.4xlarge' or 'a2-highgpu-1g'. Find one with compare-compute-pricing (category 'GPU / Accelerated'). Give this OR hourlyRate, not both."),
+      instanceType: z.string().min(1).optional().describe("Instance the model would run on, exactly as the compute catalogue names it, e.g. 'g6e.12xlarge' or 'a2-highgpu-1g'. Find one with compare-compute-pricing (category 'GPU / Accelerated'). Give this OR hourlyRate, not both."),
       provider: z.string().optional().describe("Cloud provider of instanceType, needed only when two providers use the same instance name: AWS, Azure, GCP, DigitalOcean, OCI, OVH, Alibaba."),
       region: z.enum(PRICING_REGIONS).optional().describe(`Pricing region of instanceType: ${PRICING_REGIONS.join(", ")}. Default: ${DEFAULT_PRICING_REGION}`),
       hourlyRate: z.number().positive().max(100_000).optional().describe("USD per hour for ONE instance, for hardware the catalogue does not list: a GPU cloud, a quoted rate, owned hardware amortised per hour. Give this OR instanceType, not both."),
@@ -2462,7 +2462,7 @@ tool(
           ? "Give instanceType (a catalogue instance, costed at every rate it lists) or hourlyRate (a rate of " +
             "your own), not both: they are two different fleets."
           : instanceType === undefined && hourlyRate === undefined
-            ? "Nothing to rent: give instanceType (a catalogue instance, e.g. 'g6e.4xlarge'; find one with " +
+            ? "Nothing to rent: give instanceType (a catalogue instance, e.g. 'g6e.12xlarge'; find one with " +
               "compare-compute-pricing, category 'GPU / Accelerated') or hourlyRate (USD per hour for one instance)."
             : null;
     if (refusal) {
@@ -3296,7 +3296,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.11.1",
+      version: "0.11.2",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.

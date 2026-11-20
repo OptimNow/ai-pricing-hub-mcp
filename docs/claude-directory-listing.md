@@ -216,7 +216,16 @@ Detailed questions, as a FinOps practitioner or an engineer asks them:
 | B3 | Choose where to buy a model | Who sells Llama 3.3 70B, and what would a coding workload cost at the cheapest host? | `compare-model-hosts` |
 | B4 | Tell a price change from a change of host | Which of this week's price moves are real price changes rather than a change of the host quoted? | `track-llm-price-changes` |
 | B5 | Compare compute across providers | Compare cloud instances in Europe with at least 8 vCPUs and 32 GB of memory, cheapest first, with what a 3-year commitment saves on each. | `compare-compute-pricing` |
-| B6 | Decide between the API and rented capacity | At what monthly volume does renting an AWS g6e.4xlarge cost the same as paying the API for Llama 3.3 70B on support tickets? | `estimate-self-hosting-breakeven` |
+| B6 | Decide between the API and rented capacity | At what monthly volume does renting an AWS g6e.12xlarge cost the same as paying the API for Llama 3.3 70B on support tickets? | `estimate-self-hosting-breakeven` |
+
+B6, the tool's description and the README named a g6e.4xlarge until 0.11.2
+(2026-11-20). That instance has one 48 GB GPU, which cannot hold Llama 3.3 70B,
+and the tool does not check the fit. A g6e.12xlarge has four L40S, 192 GB in
+all, and AWS gives it for models up to 72B parameters in FP16
+([instance types](https://aws.amazon.com/ec2/instance-types/accelerated-computing/),
+[G6e announcement](https://aws.amazon.com/blogs/machine-learning/amazon-sagemaker-inference-now-supports-g6e-instances/)).
+An example the tool prints is quoted by the model that reads it: keep each one
+an instance that can run the model it names.
 
 What production answered on 2026-11-12, by the call a model would make:
 
@@ -287,7 +296,7 @@ the answer to a reviewer who asks how to test.
 ```text
 No account or credential exists or is needed: the server is public and read-only.
 
-Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or open it in MCP Inspector, and call each of the 8 tools once. These calls returned content on 2026-11-19:
+Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or open it in MCP Inspector, and call each of the 8 tools once. These calls returned content on 2026-11-20:
 
 1. compare-llm-models {"maxInputPrice":1,"minElo":1300,"limit":10}
 2. recommend-llm-model {"useCasePreset":"supportTicket","maxMonthlyBudget":500}
@@ -296,7 +305,7 @@ Add https://optimtoken-mcp.optimnow.io/mcp as a custom connector in Claude, or o
 5. compare-model-hosts {"models":["Llama 3.3 70B"],"useCasePreset":"codingTask"}
 6. track-llm-price-changes {}
 7. compare-compute-pricing {"region":"europe","minVCPUs":8,"minMemory":32,"sortBy":"price","limit":10}
-8. estimate-self-hosting-breakeven {"model":"Llama 3.3 70B","instanceType":"g6e.4xlarge","provider":"AWS","useCasePreset":"supportTicket"}
+8. estimate-self-hosting-breakeven {"model":"Llama 3.3 70B","instanceType":"g6e.12xlarge","provider":"AWS","useCasePreset":"supportTicket"}
 
 Each answer is a text block, with the same figures as structured content, and it opens with its data source and date.
 
