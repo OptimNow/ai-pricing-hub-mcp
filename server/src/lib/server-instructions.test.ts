@@ -33,6 +33,18 @@ test("they name no tool, so a new tool cannot make them stale", () => {
   for (const name of names) assert.ok(!SERVER_INSTRUCTIONS.includes(name), name);
 });
 
+test("they name the source to cite, and do not let either half of an answer stand for the whole", () => {
+  // Probe battery, 2026-11-20: answers in Claude Code credited the prices to
+  // "OpenRouter data", read from `provenance.upstreamSource`, or named no source.
+  assert.match(SERVER_INSTRUCTIONS, /OptimToken \(optimtoken\.optimnow\.io\)/);
+  assert.match(SERVER_INSTRUCTIONS, /`upstreamSource` there is the feed OptimToken corrects, not a source to cite/);
+  // Claude Code shows the model `structuredContent` only, claude.ai the text:
+  // "the text is the answer" was true of one host.
+  assert.doesNotMatch(SERVER_INSTRUCTIONS, /text of an answer is the answer/);
+  assert.match(SERVER_INSTRUCTIONS, /your host may show you either/);
+  assert.match(index, /^\s+upstreamSource: z\.string\(\)\.optional\(\),/m);
+});
+
 test("every label they quote is one a text prints", () => {
   const quoted = SERVER_INSTRUCTIONS.match(/\[[a-z ]+\]/g) ?? [];
   assert.deepEqual(quoted, ["[promotional price]", "[outlier listing]", "[quoted host changed]"]);

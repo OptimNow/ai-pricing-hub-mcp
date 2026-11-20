@@ -310,6 +310,36 @@ test("every text that prints an optimized cost says what it assumes", () => {
   assert.ok(calls.length >= 5, `optimizationAssumption is called ${calls.length} times in the tools, expected 5`);
 });
 
+test("every structuredContent that carries an optimized cost says what it assumes, too", () => {
+  // Claude Code hands the model `structuredContent` and never the text block
+  // (90 of 90 results in the probe battery of 2026-11-20); claude.ai hands it
+  // the text. 0.11.3 put the assumption in the text only, and in Claude Code
+  // the answer to the demo question said the cached figure "assumes the tool's
+  // preset cache-hit rate, which it doesn't state".
+  const schemaOf = (name: string, close: string): string => {
+    const start = schemaRegion.indexOf(`const ${name} = `);
+    assert.ok(start > -1, `${name} not found`);
+    return schemaRegion.slice(start, schemaRegion.indexOf(close, start));
+  };
+  // compare-llm-models and recommend-llm-model: once for the whole answer.
+  for (const name of ["compareModelsOutputSchema", "recommendOutputSchema"]) {
+    assert.match(
+      schemaOf(name, "\n};"),
+      /^\s+optimizationAssumption:\s*optimizationAssumptionSchema/m,
+      `${name} does not declare what its optimized costs assume`,
+    );
+  }
+  // estimate-llm-cost and compare-models-side-by-side: on every cost cell;
+  // estimate-self-hosting-breakeven: on its workload.
+  assert.match(schemaOf("estimateCostOutputSchema", "\n};"), /^\s+cacheHitRate:\s*z\.number\(\)/m);
+  assert.match(schemaOf("useCaseCostSchema", "\n});"), /^\s+cacheHitRate:\s*z\.number\(\)/m);
+  assert.match(schemaOf("selfHostingOutputSchema", "\n};"), /^\s+cacheHitRate:\s*z\.number\(\)/m);
+  const tools = source.slice(source.indexOf(TOOLS_HEADING));
+  const filled = tools.match(/optimizationAssumption:\s*optimizationAssumptionOf\(/g) ?? [];
+  assert.equal(filled.length, 2, `optimizationAssumption is filled in ${filled.length} answer(s), expected 2`);
+  assert.match(tools, /cacheHitRate:\s*profile\.cacheHitRate/, "the side-by-side cells lost their cache share");
+});
+
 test("the side-by-side comparison sends a request for alternatives to recommend-llm-model", () => {
   // It compares only the names it is given. In the rehearsal of 2026-11-20 the
   // question ended "or something else if it is better", Claude called this

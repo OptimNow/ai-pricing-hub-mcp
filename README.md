@@ -158,6 +158,32 @@ for 84 of 288 models.
 
 ---
 
+## How it is tested
+
+Three checks, from the code to what an assistant does with the answers:
+
+- **Unit tests** (`npm test`, on every pull request): the cost logic, the output
+  schemas, the data sources and the HTTP layer.
+- **Parity with the site** (`npm run check-parity`, before each release): this
+  server's cost, score, badge and instance-category logic and the site's are run
+  over the live catalogues, and must give the same result.
+- **A probe battery, run on a regular cycle:** 29 questions worded as a user would
+  ask them, in English and French, put to Claude with only this connector and web
+  search attached, each in a fresh conversation and twice over. Every answer is
+  scored on three things: the tool Claude chose, the figures it passed (tokens,
+  volume, cache share, batch), and whether the answer kept what the tool said
+  (the labels, the date, the source). It runs on Sonnet before each release that
+  changes what a tool says, on Opus once a month, and by hand in claude.ai, which
+  gives the verdict. A question the connector answered badly becomes a probe and
+  stays. The questions include real ones, so the battery is kept outside this
+  repository.
+
+The probes found that two hosts read different halves of an answer: claude.ai
+gives the model the text, Claude Code gives it the JSON (`structuredContent`).
+Every fact an answer depends on is in both.
+
+---
+
 ## Privacy and hosting
 
 - **Read-only, no credentials.** The 8 tools read public pricing data. None of them
