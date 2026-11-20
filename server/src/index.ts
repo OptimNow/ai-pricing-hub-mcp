@@ -44,6 +44,7 @@ import {
   optimizationLevers,
   savingsPct,
   leverSummary,
+  optimizationAssumption,
   NO_ASSUMPTIONS_NOTE,
 } from "./lib/llm-business-metrics.js";
 import { OPENNESS_VALUES, opennessOf } from "./lib/openness.js";
@@ -1103,7 +1104,8 @@ tool(
               `${filtered.length} of ${allModels.length} models match; showing the first ${results.length}, ` +
               `sorted by ${describeSort(sortedBy, useCaseLabel)}. ` +
               `Use case: ${useCaseLabel}, Volume: ${volumeLabel}/mo. ` +
-              `Optimized costs assume prompt caching and, where the use case allows, the batch API.\n` +
+              `Optimized costs assume ${optimizationAssumption(USE_CASE_PROFILES[ucKey])} (the ${useCaseLabel} preset's ` +
+              `assumption); each discount counts only where the model publishes its rate.\n` +
               `FinOps Friendly today means ELO ≥ ${finopsBadge.minElo ?? "n/a"} and a blended list price ` +
               `≤ $${finopsBadge.maxBlendedPrice?.toFixed(2) ?? "n/a"}/1M, plus a top-30% efficiency score, ` +
               `a stable release, a price that is not an outlier listing and no retirement notice from its maker — ` +
@@ -1297,7 +1299,12 @@ tool(
       const lines = modelCosts.map(({ model: m, costs }) => {
         const costLines = costs.map(c =>
           `  ${c.useCase}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo ` +
-          `(${c.inputTokens} in + ${c.outputTokens} out tokens)
+          `(${c.inputTokens} in + ${c.outputTokens} out tokens` +
+          (c.optimizationBasis === "none-supplied"
+            ? ""
+            : `; optimized assumes ${optimizationAssumption(c)}` +
+              (c.optimizationBasis === "preset" ? ", the preset's assumption" : ", as supplied")) +
+          `)
 ` +
           `    optimized: ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
           (c.savingsPct > 0
@@ -1365,7 +1372,9 @@ tool(
     description:
       "Compare 2-4 named LLM models against all 8 use-case profiles at a chosen monthly volume, " +
       "showing list and optimized cost for each. Use when the user names specific models to weigh " +
-      "against each other, rather than filtering the whole catalogue. If they also supply their own " +
+      "against each other, rather than filtering the whole catalogue. It compares only the names given: " +
+      "when the user also asks whether another model would be better or cheaper, call recommend-llm-model " +
+      "as well, which ranks the whole catalogue for the workload. If they also supply their own " +
       "token counts, or a volume outside 10k/100k/1m, use estimate-llm-cost instead. " +
       "Every name is resolved against the catalogue and the outcome is reported in `resolution` and " +
       "in the text: a name that matched nothing, matched several models, or duplicated an earlier pick " +
@@ -1460,7 +1469,8 @@ tool(
             ` | optimized ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
             (c.savingsPct > 0 ? ` (−${c.savingsPct}%, ${leverSummary(c)})` : ` (no saving: ${leverSummary(c)})`);
         });
-        return `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out):\n${cells.join("\n")}`;
+        return `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out; ` +
+          `optimized assumes ${optimizationAssumption(profile)}):\n${cells.join("\n")}`;
       });
 
       return {
@@ -1777,6 +1787,12 @@ tool(
           `(${ranked.length} ranked of ${allModels.length} catalogue entries), each with the constraint it failed:`
         : `Top ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
           `(${passing.length} of ${evaluated.length} ranked models satisfy all constraints; ${allModels.length} catalogue entries):`;
+      // The saving on each line depends on what the preset assumes about the
+      // workload; said once here rather than on every line.
+      const assumptionLine = nothingRankable
+        ? ""
+        : `\nOptimized costs assume ${optimizationAssumption(USE_CASE_PROFILES[ucKey])} (the ${useCaseLabel} ` +
+          `preset's assumption); each discount counts only where the model publishes its rate.`;
 
       const roiUrl = roiCalculatorUrl({
         useCase: ucKey,
@@ -1809,7 +1825,7 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `${preamble}\n\n${lines.join("\n")}${retiredNote}` +
+              `${preamble}${assumptionLine}\n\n${lines.join("\n")}${retiredNote}` +
               `${listingLegend([...results, ...retiredResults], provenance.deprecationsVerifiedAt)}\n\n` +
               `ROI calculator for this scenario: ${roiUrl}`,
           },
@@ -2607,7 +2623,9 @@ tool(
       const apiLines = [
         `  API list price ($${m.inputPricePer1M} in / $${m.outputPricePer1M} out per 1M${priceTags(m)}): ${money(listCost)}`,
         saving > 0
-          ? `  API optimized: ${money(optimizedCost)} — save ${saving}% with ${leverSummary(levers)}`
+          ? `  API optimized: ${money(optimizedCost)} — save ${saving}% with ${leverSummary(levers)}, assuming ` +
+            `${optimizationAssumption(profile)}` +
+            (basis === "preset" ? ` (the preset's assumption)` : ` (as supplied)`)
           : basis === "none-supplied"
             ? `  API optimized: same as list — ${NO_ASSUMPTIONS_NOTE}`
             : `  API optimized: same as list — no saving available (${leverSummary(levers)})`,
@@ -3296,7 +3314,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.11.2",
+      version: "0.11.3",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.

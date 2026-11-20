@@ -492,6 +492,19 @@ export function leverSummary(l: OptimizationLevers): string {
   return `this model publishes no ${missing.join(" or ")} rate`;
 }
 
+/** What an optimized figure assumes about the workload: the share of input
+ *  tokens read from the prompt cache, and whether the batch API is used. The
+ *  saving beside it depends on both, and "−20%, caching" without the 60% behind
+ *  it cannot be checked against a reader's own workload. Found in a rehearsal
+ *  on 2026-11-20: Claude reported "with prompt caching ~$640" and never said
+ *  what share of the prompt it had assumed was cached, because no text said so. */
+export function optimizationAssumption(p: Pick<UseCaseProfile, "cacheHitRate" | "batchEligible">): string {
+  const cache = p.cacheHitRate > 0
+    ? `${Math.round(p.cacheHitRate * 100)}% of input tokens read from the prompt cache`
+    : "no prompt caching";
+  return `${cache} and ${p.batchEligible ? "the batch API" : "no batch API"}`;
+}
+
 /** Why a custom token shape shows no saving when the caller passed neither a
  *  cache-hit rate nor batch eligibility. Said in these words because the other
  *  reading, "this workload cannot be optimized", is false for any model that

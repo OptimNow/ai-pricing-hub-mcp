@@ -299,3 +299,22 @@ test("rounding is applied where structuredContent is built, not in the cost func
     );
   }
 });
+
+test("every text that prints an optimized cost says what it assumes", () => {
+  // compare-llm-models, estimate-llm-cost, compare-models-side-by-side,
+  // recommend-llm-model and estimate-self-hosting-breakeven each print an
+  // optimized figure. A saving whose cache share is not stated cannot be
+  // checked against the reader's workload (CLAUDE.md, decisions 1b and 3f).
+  const tools = source.slice(source.indexOf(TOOLS_HEADING));
+  const calls = tools.match(/optimizationAssumption\(/g) ?? [];
+  assert.ok(calls.length >= 5, `optimizationAssumption is called ${calls.length} times in the tools, expected 5`);
+});
+
+test("the side-by-side comparison sends a request for alternatives to recommend-llm-model", () => {
+  // It compares only the names it is given. In the rehearsal of 2026-11-20 the
+  // question ended "or something else if it is better", Claude called this
+  // tool alone and never looked at the rest of the catalogue.
+  const at = source.indexOf('"compare-models-side-by-side",');
+  const description = source.slice(at, source.indexOf("inputSchema", at));
+  assert.match(description, /another model would be better or cheaper, call recommend-llm-model/);
+});

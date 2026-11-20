@@ -15,6 +15,7 @@ import {
   enrichModels,
   sortEnrichedModels,
   formatMonthlyBudget,
+  optimizationAssumption,
   optimizationLevers,
   optimizedUseCaseCost,
   roundCost,
@@ -521,4 +522,24 @@ test("a budget is given the unit it rounds into", () => {
   assert.equal(formatMonthlyBudget(450), "$450");
   assert.equal(formatMonthlyBudget(1234.5), "$1.2K");
   assert.equal(formatMonthlyBudget(0.0042), "$0.0042");
+});
+
+test("optimizationAssumption says what share of input the optimized figure reads from cache", () => {
+  // The rehearsal of 2026-11-20 reported "with prompt caching ~$640" with no
+  // word of the 60% it rested on: every preset's assumption is now said.
+  assert.equal(
+    optimizationAssumption(USE_CASE_PROFILES.supportTicket),
+    "60% of input tokens read from the prompt cache and no batch API",
+  );
+  assert.equal(
+    optimizationAssumption(USE_CASE_PROFILES.meetingSummary),
+    "10% of input tokens read from the prompt cache and the batch API",
+  );
+  assert.equal(optimizationAssumption({ cacheHitRate: 0, batchEligible: false }), "no prompt caching and no batch API");
+  assert.equal(optimizationAssumption({ cacheHitRate: 0, batchEligible: true }), "no prompt caching and the batch API");
+  // A caller's rate is rounded to a whole percentage, not printed as 0.333.
+  assert.equal(
+    optimizationAssumption({ cacheHitRate: 1 / 3, batchEligible: false }),
+    "33% of input tokens read from the prompt cache and no batch API",
+  );
 });
