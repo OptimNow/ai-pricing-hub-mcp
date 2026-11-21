@@ -73,11 +73,34 @@ text and a field in `structuredContent`, declared in the output schema
 - `provenance.upstreamSource` is the site's liveness flag, `"openrouter"` when
   its live feed answered. Read from the JSON, it became the source: "API prices
   dated 2026-11-20 via OpenRouter data", "verified against OpenRouter data".
-  The field stays (3d); the server's `instructions`, which reach both hosts,
-  name the source to cite since 0.12.0.
+  The field stays (3d); the server's `instructions` name the source to cite
+  since 0.12.0.
+
+**The server instructions reach Claude Code, and show no sign of reaching
+claude.ai (0.12.1, 2026-11-21).** After 0.12.0, Claude Code named the source in
+12 of 12 runs; on claude.ai the French break-even question named none in 2 of 2,
+though it gave the date. Through the probe harness with the JSON half removed
+and the instructions removed too, the break-even named no source in 6 of 6, in
+English and in French; with the instructions kept, 3 of 3 did. So a rule that
+must hold on claude.ai goes in the tool texts, and the instructions are a second
+copy for the hosts that pass them. Since 0.12.1 every successful answer's text
+closes with the source to name and the date of what was served
+(`lib/citation.ts`, applied once in `tool()`); the same runs then named it 9 of
+9. It is in the text only: `provenance` already carries it in the JSON, where
+the instructions reach the model.
+
+**Changing a tool's definition costs every claude.ai user who chose "Always
+allow" an approval.** 0.12.0 changed three output schemas. On claude.ai the
+next call to `compare-models-side-by-side` asked again: "This tool has changed
+since you chose to always allow it, so it needs your approval again", and kept
+asking on every call until the owner allowed it for good. A tool whose
+definition did not change (`estimate-self-hosting-breakeven`) ran without
+asking. A change to what a tool returns, as in 0.12.1, does not change its
+definition. So a fix that can live in the text should, and changes to
+descriptions or schemas are worth grouping into one release.
 
 Other hosts (ChatGPT, VS Code, Goose) have not been measured. Until they are,
-assume either half.
+assume either half, with or without the instructions.
 
 ### Data sources and the fallback chain
 
@@ -350,11 +373,18 @@ the questions include real ones, anonymised.
   NONE), arguments (the user's tokens, volume, cache share, batch reach the
   tool) and fidelity (labels kept, the price dated and its source named). What a
   pattern cannot judge is read by hand in `answers.md`.
+- **Two halves.** By default the harness tests what Claude Code reads: the
+  JSON half, with the server instructions. `--half text --instructions off`
+  puts a local proxy in front of the server (`text-half.mjs`) that removes
+  every `outputSchema` and `structuredContent` and the instructions, so the
+  model reads the text block alone, as claude.ai's does as far as can be
+  measured (see Architecture). It reproduced the claude.ai misses of 2026-11-21
+  that the default mode did not: the break-even named no source in 6 of 6.
 - **Cadence.** Sonnet, the default model on claude.ai, before every release
-  that changes a tool's description, text or JSON; Opus once a month; then a
-  manual pass in claude.ai, which is the verdict. The harness tests the JSON
-  half of an answer and claude.ai the text half (see Architecture), so neither
-  replaces the other.
+  that changes a tool's description, text or JSON, in both halves; Opus once a
+  month; then a manual pass in claude.ai, which is the verdict. The proxy is an
+  approximation (Claude Code's system prompt and tool loading are not
+  claude.ai's), so it does not replace that pass.
 - **Rules.** A wording is never rewritten: a twin is added. A real question the
   connector answered badly becomes a probe and stays after the fix. A fix for a
   failure names its probe in the pull request.
@@ -364,6 +394,17 @@ run routed to the right tool with the right arguments. The misses were the
 source named as OpenRouter or not at all, and the cache assumption missing from
 the JSON: both fixed in 0.12.0. Opus cost about 1.7 times as much ($3.83
 against $2.20), called more tools per question and checked the web more often.
+
+Second cycle, the first manual one, on claude.ai with production 0.12.0 and
+the owner's account (AI Economics among about ten connectors, web search on):
+4 of 7 runs. The demo question, the break-even in English and the week's price
+moves were clean. The French break-even named no source in 2 of 2, and the
+demo question without token counts skipped `recommend-llm-model` once, naming
+alternatives from memory for a second side-by-side. Both fixed in 0.12.1: the
+closing source line, and a sentence in the side-by-side result itself that
+sends "better or cheaper" to `recommend-llm-model`. Through the harness, the
+same three probes went from 2 of 9 to 9 of 9 with the text half alone and no
+instructions, and stayed 8 of 8 on the JSON half.
 The cycle log is in the battery's README.
 
 ### Deployment
@@ -1190,6 +1231,12 @@ either. And "the source the answer gives (`provenance`)" let a model reading
 the JSON cite `upstreamSource: "openrouter"`: they now name the source,
 OptimToken (optimtoken.optimnow.io), say it in every answer that gives a price,
 and say `upstreamSource` is the feed OptimToken corrects, not a source.
+
+"A host may cut or not show at all" turned out to describe claude.ai: on
+2026-11-21 its answers behaved as if the instructions were absent (see "The
+server instructions reach Claude Code…" under Architecture). The sentence about
+the source is therefore repeated where claude.ai's model reads it, at the end
+of every answer's text, since 0.12.1.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
