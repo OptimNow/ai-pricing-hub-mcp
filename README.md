@@ -179,7 +179,10 @@ Three checks, from the code to what an assistant does with the answers:
   repository.
 
 The probes found that two hosts read different halves of an answer: claude.ai
-gives the model the text, Claude Code gives it the JSON (`structuredContent`).
+gives the model the text, Claude Code gives it the JSON (`structuredContent`)
+and the server's instructions. So the battery runs both ways, the second
+through a proxy that leaves the model the text alone, and every text closes
+with the source to name.
 Every fact an answer depends on is in both.
 
 ---

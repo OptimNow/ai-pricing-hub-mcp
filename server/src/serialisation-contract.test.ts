@@ -347,4 +347,8 @@ test("the side-by-side comparison sends a request for alternatives to recommend-
   const at = source.indexOf('"compare-models-side-by-side",');
   const description = source.slice(at, source.indexOf("inputSchema", at));
   assert.match(description, /another model would be better or cheaper, call recommend-llm-model/);
+  // And in the result, read at the moment the next call is chosen: on
+  // claude.ai on 2026-11-21, Claude once picked its own alternatives instead.
+  const handler = source.slice(at, source.indexOf("// ─── Tool 4", at));
+  assert.match(handler, /is answered by recommend-llm-model, which ranks all \$\{allModels\.length\} models/);
 });

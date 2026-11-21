@@ -105,6 +105,7 @@ import {
 import type { PriceChangesWindow, PriceMove } from "./lib/price-changes.js";
 import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./lib/model-hosts.js";
 import { SERVER_INSTRUCTIONS } from "./lib/server-instructions.js";
+import { closeWithSource } from "./lib/citation.js";
 import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
@@ -985,8 +986,12 @@ function tool<
   // all eight tools "Missing title annotation" on 2026-11-19. The spec keeps
   // both fields, so carrying the one title in both costs nothing.
   const annotations: ToolAnnotations = { title: config.title, ...config.annotations };
+  // Every successful answer closes with the source to name (lib/citation.ts):
+  // one place, so a ninth tool gets it without anyone remembering.
+  const handler = ((...args: unknown[]) =>
+    Promise.resolve((cb as (...a: unknown[]) => unknown)(...args)).then(closeWithSource)) as unknown as ToolCallback<InputArgs>;
   tools.push(server => {
-    server.registerTool(name, { ...config, annotations }, cb);
+    server.registerTool(name, { ...config, annotations }, handler);
   });
 }
 
@@ -1530,7 +1535,14 @@ tool(
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n` +
               `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
-              `${header.join("\n")}${listingLegend(withCosts, provenance.deprecationsVerifiedAt)}\n\n${rows.join("\n\n")}`,
+              `${header.join("\n")}${listingLegend(withCosts, provenance.deprecationsVerifiedAt)}\n\n${rows.join("\n\n")}\n\n` +
+              // In the result as well as the description: on claude.ai on
+              // 2026-11-21, asked for "something else if it is better", Claude
+              // once picked alternatives from memory for a second comparison
+              // and missed the catalogue's best value for the workload.
+              `Only the models named are compared here. Whether another model would be better or cheaper for ` +
+              `the workload is answered by recommend-llm-model, which ranks all ${allModels.length} models of ` +
+              `the catalogue; alternatives named from memory are not a ranking.`,
           },
         ],
         isError: false,
@@ -3343,7 +3355,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.12.0",
+      version: "0.12.1",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.
