@@ -47,6 +47,38 @@ The HTTP surface is three things: `POST /mcp` (and `/mcp/`), `GET /healthz`
 are 405, as the transport specifies for a server with no SSE stream and no
 sessions. Request bodies over 1 MB are refused with 413.
 
+### Which half of an answer the model reads (0.12.0, 2026-11-20)
+
+Every tool answers twice: a text block written for a reader, and the same
+figures as `structuredContent`. Until 0.12.0 this file and `CLAUDE.md` held
+that "the text block is what the model reads", and every caveat went into the
+text first. That is true of one host only.
+
+- **claude.ai hands the model the text block.** In the rehearsal of the
+  LinkedIn demo on 2026-11-20, Claude quoted the text's sentences and missed a
+  fact that was in the JSON alone (the preset's cache share).
+- **Claude Code hands the model `structuredContent` and never the text.**
+  Measured the same day in the first run of the probe battery (headless Claude
+  Code 2.1.293, Sonnet 5.5, production 0.11.3): in 90 of 90 connector results,
+  the `tool_result` the model received was the JSON. "Data source: …",
+  "optimized assumes 60% …" and every legend line never reached it.
+
+So a fact a FinOps answer depends on goes in both halves: a sentence in the
+text and a field in `structuredContent`, declared in the output schema
+(decision 3d). Writing it once is losing it on one host. What showed it:
+
+- 0.11.3 put the cache assumption in the text only; in Claude Code the answer
+  said the tool "doesn't state" it. 0.12.0 added the fields (see the optimized
+  cost rule under "Keeping in sync").
+- `provenance.upstreamSource` is the site's liveness flag, `"openrouter"` when
+  its live feed answered. Read from the JSON, it became the source: "API prices
+  dated 2026-11-20 via OpenRouter data", "verified against OpenRouter data".
+  The field stays (3d); the server's `instructions`, which reach both hosts,
+  name the source to cite since 0.12.0.
+
+Other hosts (ChatGPT, VS Code, Goose) have not been measured. Until they are,
+assume either half.
+
 ### Data sources and the fallback chain
 
 `https://optimtoken.optimnow.io` is the single source of truth for both LLM and
@@ -294,6 +326,45 @@ by mistake.
 
 `scripts/check-serialisation-precision.mjs` is deliberately outside CI: it needs a
 running server and the live catalogue. Run it by hand after touching cost code.
+
+### Probe battery (since 2026-11-20)
+
+The tests, `check-parity` and `check-connector` hold what the server returns.
+The probe battery holds what Claude does with it: which tool it picks, which
+arguments it passes, and whether its answer keeps what the tool said. It is
+modelled on the one cloud-finops-skills runs, and like that one it is kept out
+of git, in `pipeline/probes/` of the owner's checkout (`.git/info/exclude`):
+the questions include real ones, anonymised.
+
+- **29 probes**, each a question in a user's words: one per tool, naive twins
+  without this server's vocabulary, questions carrying the user's own figures,
+  the labels (promotional, retirement, outlier, static rate, a Bedrock region
+  not listed), the questions of the demo rehearsal, questions a web search
+  competes for, and French ones.
+- **Run through headless Claude Code** (`node run.mjs`), one fresh context per
+  run, with only this connector, web search and web fetch, and Claude Code's
+  own skills turned off (in the pilot Sonnet reached for the built-in
+  `claude-api` skill on a model-choice question). Two runs per probe: routing
+  is stochastic.
+- **Scored on three levels** (`node score.mjs`): routing (ROUTED, PARTIAL, WEB,
+  NONE), arguments (the user's tokens, volume, cache share, batch reach the
+  tool) and fidelity (labels kept, the price dated and its source named). What a
+  pattern cannot judge is read by hand in `answers.md`.
+- **Cadence.** Sonnet, the default model on claude.ai, before every release
+  that changes a tool's description, text or JSON; Opus once a month; then a
+  manual pass in claude.ai, which is the verdict. The harness tests the JSON
+  half of an answer and claude.ai the text half (see Architecture), so neither
+  replaces the other.
+- **Rules.** A wording is never rewritten: a twin is added. A real question the
+  connector answered badly becomes a probe and stays after the fix. A fix for a
+  failure names its probe in the pull request.
+
+First cycle, on production 0.11.3: Sonnet 53 of 58 runs, Opus 57 of 58, every
+run routed to the right tool with the right arguments. The misses were the
+source named as OpenRouter or not at all, and the cache assumption missing from
+the JSON: both fixed in 0.12.0. Opus cost about 1.7 times as much ($3.83
+against $2.20), called more tools per question and checked the web more often.
+The cycle log is in the battery's README.
 
 ### Deployment
 
@@ -656,6 +727,17 @@ the caller's. A custom shape with no assumption keeps `NO_ASSUMPTIONS_NOTE`.
 The same rehearsal asked for "something else if it is better" and Claude called
 only `compare-models-side-by-side`, so its description now sends that request
 to `recommend-llm-model`.
+
+**And in `structuredContent`, since 0.12.0.** The sentence of 0.11.3 reached
+claude.ai and not Claude Code, which hands the model the JSON alone (see "Which
+half of an answer the model reads", under Architecture). Asked the demo
+question there, Claude said the cached figure "assumes the tool's preset
+cache-hit rate, which it doesn't state". The cost cells of
+`compare-models-side-by-side` now carry `cacheHitRate` beside `batchEligible`,
+as `estimate-llm-cost`'s already did; `compare-llm-models` and
+`recommend-llm-model` carry `optimizationAssumption` (`cacheHitRate`,
+`batchEligible` and the sentence) once for the answer;
+`estimate-self-hosting-breakeven` had it in `workload`.
 
 **The retirement gate is applied since 0.8.0.** The site refuses the FinOps
 Friendly badge to a model whose maker has announced its retirement, from a
@@ -1100,6 +1182,14 @@ Three choices:
 `index.ts` listens on import, so no unit test connects to it. The test reads
 the source for `instructions: SERVER_INSTRUCTIONS`, and
 `scripts/check-connector.mjs` asks a running server.
+
+Two sentences changed in 0.12.0, after the first run of the probe battery.
+"The text of an answer is the answer" was true of claude.ai only: they now say
+each answer comes as text and as `structuredContent`, and the host may show
+either. And "the source the answer gives (`provenance`)" let a model reading
+the JSON cite `upstreamSource: "openrouter"`: they now name the source,
+OptimToken (optimtoken.optimnow.io), say it in every answer that gives a price,
+and say `upstreamSource` is the feed OptimToken corrects, not a source.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

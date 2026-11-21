@@ -206,6 +206,25 @@ const enrichedModelSchema = z.object({
   cacheApplied: z.boolean(),
 });
 
+/** What every optimized figure of an answer assumes about the workload: the
+ *  use case's cache share and batch eligibility, and the sentence the text
+ *  prints for them. Carried in the JSON as well as the text because a host may
+ *  hand the model only one of the two: Claude Code passes `structuredContent`
+ *  and never the text (measured 2026-11-20), claude.ai passes the text. */
+const optimizationAssumptionSchema = z.object({
+  cacheHitRate: z.number(),
+  batchEligible: z.boolean(),
+  summary: z.string(),
+});
+
+function optimizationAssumptionOf(profile: UseCaseProfile): z.infer<typeof optimizationAssumptionSchema> {
+  return {
+    cacheHitRate: profile.cacheHitRate,
+    batchEligible: profile.batchEligible,
+    summary: `Optimized costs assume ${optimizationAssumption(profile)}; each discount counts only where the model publishes its rate.`,
+  };
+}
+
 /**
  * Where the figures came from and whether anyone has checked them.
  *
@@ -284,6 +303,7 @@ const compareModelsOutputSchema = {
   catalogSize: z.number(),
   // The order `models` is in, and so what "the first N" of a longer match means.
   sortedBy: z.enum(LLM_SORT_KEYS),
+  optimizationAssumption: optimizationAssumptionSchema.optional(),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
   // What the badge's percentile gates land on for this catalogue, so "top 40%"
@@ -395,6 +415,10 @@ const useCaseCostSchema = z.object({
   cacheEligible: z.boolean(),
   batchApplied: z.boolean(),
   cacheApplied: z.boolean(),
+  // The profile's cache assumption behind `perRequestOptimized`, as in
+  // estimate-llm-cost; `batchEligible` above is its batch twin. In the JSON
+  // because a host may hand the model this and not the text (Claude Code does).
+  cacheHitRate: z.number(),
 });
 
 const sideBySideOutputSchema = {
@@ -709,6 +733,8 @@ const recommendOutputSchema = {
   rankedCount: z.number(),
   catalogSize: z.number(),
   roiCalculatorUrl: z.string(),
+  // Absent when nothing could be ranked, as the text's line is.
+  optimizationAssumption: optimizationAssumptionSchema.optional(),
   source: z.string(),
   eloAsOf: z.string(),
   dataAsOf: z.string().optional(),
@@ -1082,6 +1108,7 @@ tool(
           matchingCount: filtered.length,
           catalogSize: allModels.length,
           sortedBy,
+          optimizationAssumption: optimizationAssumptionOf(USE_CASE_PROFILES[ucKey]),
           eloAsOf,
           dataAsOf,
           provenance,
@@ -1450,6 +1477,7 @@ tool(
             monthlyOptimized: optimized * volume,
             savingsPct: savingsPct(cost, optimized),
             ...optimizationLevers(m, profile),
+            cacheHitRate: profile.cacheHitRate,
           };
         }),
       }));
@@ -1812,6 +1840,7 @@ tool(
           rankedCount: ranked.length,
           catalogSize: allModels.length,
           roiCalculatorUrl: roiUrl,
+          ...(nothingRankable ? {} : { optimizationAssumption: optimizationAssumptionOf(USE_CASE_PROFILES[ucKey]) }),
           source,
           eloAsOf,
           dataAsOf,
@@ -3314,7 +3343,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.11.3",
+      version: "0.12.0",
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.
