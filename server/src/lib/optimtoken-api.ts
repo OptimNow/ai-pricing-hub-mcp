@@ -11,7 +11,14 @@
  * This app can build none of that: it has no archive to diff against. So it
  * asks the site rather than re-deriving, and when it cannot reach the site it
  * says so in the response instead of quietly serving uncorrected figures.
+ *
+ * Every request names this server (`USER_AGENT`), follows a redirect only on
+ * the site's own origin, and reads at most `MAX_BODY_BYTES`. The listing says
+ * this server calls optimtoken.optimnow.io and nothing else: a redirect to
+ * another host would make that untrue, so it is a failed read.
  */
+
+import { SERVER_VERSION } from "./version.js";
 
 /**
  * Base URL for the site API, overridable for local development or for pointing
@@ -23,6 +30,27 @@
 export const OPTIMTOKEN_BASE_URL = (
   process.env.OPTIMTOKEN_API_BASE_URL || "https://optimtoken.optimnow.io"
 ).replace(/\/+$/, "");
+
+/** The one host this server reads from. A redirect is followed only to it. */
+const OPTIMTOKEN_ORIGIN = new URL(OPTIMTOKEN_BASE_URL).origin;
+
+/**
+ * How this server names itself to the site. Node's fetch sends "node", which
+ * the site's logs cannot tell from any other script; this tells MCP traffic
+ * apart, and says which release made a request.
+ */
+export const USER_AGENT = `ai-pricing-hub-mcp/${SERVER_VERSION} (+https://github.com/OptimNow/ai-pricing-hub-mcp)`;
+
+/**
+ * The largest body this server reads. The biggest endpoint sent 439 KB on
+ * 2026-11-22 (one region of the compute catalogue); 16 MiB is about 36 times
+ * that. A body past it is a failed read, not a cut one: it is refused before
+ * it is parsed, so a pathological answer cannot fill the machine's 512 MB.
+ */
+export const MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+/** Redirects followed on the site's own origin before giving up. */
+const MAX_REDIRECTS = 3;
 
 /** Shape shared by both endpoints' `meta` block. Fields beyond these exist and
  *  are endpoint-specific; they are typed at each call site. */
@@ -49,6 +77,10 @@ export type UpstreamFailureKind =
   | "transport"
   /** An HTTP response arrived, but not a 2xx. */
   | "http-status"
+  /** A redirect to another origin, or more redirects than MAX_REDIRECTS. */
+  | "redirect"
+  /** A body larger than MAX_BODY_BYTES. */
+  | "too-large"
   /** 2xx, but the body was not parseable JSON. */
   | "parse"
   /** Parseable JSON, but not a JSON object. */
@@ -116,6 +148,31 @@ export function optimtokenUrl(path: string, params?: Record<string, QueryValue>)
   return url.toString();
 }
 
+/** A 3xx that names where to go. A 304, or a 3xx without a Location, is not
+ *  followed: it is a status like any other, and not a 2xx. */
+function isRedirect(response: Response): boolean {
+  return response.status >= 300 && response.status < 400 && response.status !== 304 && response.headers.has("location");
+}
+
+/** The body as text, refused past MAX_BODY_BYTES without reading the rest. */
+async function readCapped(response: Response, tooLarge: () => Error): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /**
  * GET a JSON document from the site, under a hard deadline, with the timer
  * cleared on every exit so a slow response cannot leave a handle behind.
@@ -139,11 +196,13 @@ export async function fetchOptimtokenJson<T>(
 
   const elapsed = () => Date.now() - startedAt;
 
-  try {
-    let response: Response;
+  /** One GET, with a timeout or a connection failure classified. */
+  const get = async (target: string): Promise<Response> => {
     try {
-      response = await fetch(url, {
-        headers: { Accept: "application/json" },
+      return await fetch(target, {
+        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+        // Redirects are followed below, and only on the site's own origin.
+        redirect: "manual",
         signal: controller.signal,
       });
     } catch (error) {
@@ -163,6 +222,35 @@ export async function fetchOptimtokenJson<T>(
         { url, elapsedMs: elapsed() },
       );
     }
+  };
+
+  try {
+    let response = await get(url);
+    for (let hops = 0; isRedirect(response); hops++) {
+      const location = response.headers.get("location") ?? "";
+      await response.body?.cancel().catch(() => {});
+      let next: URL | undefined;
+      try {
+        next = new URL(location, response.url || url);
+      } catch {
+        next = undefined;
+      }
+      if (!next || next.origin !== OPTIMTOKEN_ORIGIN) {
+        throw new UpstreamFetchError(
+          "redirect",
+          `${url} redirected to ${next ? next.origin : JSON.stringify(location.slice(0, 80))}, which is not ${OPTIMTOKEN_ORIGIN}`,
+          { url, elapsedMs: elapsed(), status: response.status },
+        );
+      }
+      if (hops >= MAX_REDIRECTS) {
+        throw new UpstreamFetchError("redirect", `${url} redirected more than ${MAX_REDIRECTS} times`, {
+          url,
+          elapsedMs: elapsed(),
+          status: response.status,
+        });
+      }
+      response = await get(next.toString());
+    }
 
     if (!response.ok) {
       throw new UpstreamFetchError("http-status", `${url} returned HTTP ${response.status}`, {
@@ -172,12 +260,25 @@ export async function fetchOptimtokenJson<T>(
       });
     }
 
-    let payload: unknown;
+    const tooLarge = (): UpstreamFetchError =>
+      new UpstreamFetchError("too-large", `${url} sent a body larger than ${MAX_BODY_BYTES} bytes`, {
+        url,
+        elapsedMs: elapsed(),
+        status: response.status,
+      });
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      throw tooLarge();
+    }
+
+    let body: string;
     try {
-      payload = (await response.json()) as unknown;
+      body = await readCapped(response, tooLarge);
     } catch (error) {
-      // The body can also time out mid-stream — this endpoint ships ~1.4 MB, so
-      // headers arriving is not the same as the response being in hand.
+      if (error instanceof UpstreamFetchError) throw error;
+      // The body can also time out mid-stream: headers arriving is not the
+      // same as the response being in hand.
       if (timedOut) {
         throw new UpstreamFetchError(
           "timeout",
@@ -185,6 +286,17 @@ export async function fetchOptimtokenJson<T>(
           { url, elapsedMs: elapsed(), timeoutMs: options.timeoutMs, status: response.status },
         );
       }
+      throw new UpstreamFetchError(
+        "transport",
+        `${url} returned HTTP ${response.status} and the connection failed while its body was read: ${error instanceof Error ? error.message : String(error)}`,
+        { url, elapsedMs: elapsed(), status: response.status },
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body) as unknown;
+    } catch (error) {
       throw new UpstreamFetchError(
         "parse",
         `${url} returned HTTP ${response.status} with a body that is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,

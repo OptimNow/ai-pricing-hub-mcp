@@ -21,6 +21,7 @@ import type { LLMModel, LLMCapability, LLMCategory } from "../data/pricing-data.
 import { hasPublishableTokenPricing } from "./pricing-normalize.js";
 import { isRecognisedLicence, opennessOf } from "./openness.js";
 import { OPTIMTOKEN_BASE_URL, fetchOptimtokenJson } from "./optimtoken-api.js";
+import { isSiteLabel } from "./site-text.js";
 import { coerceHostPricing } from "./host-prices.js";
 import type { ModelHostPricing } from "./host-prices.js";
 import { NO_DEPRECATION_DATA, coerceDeprecation } from "./deprecation.js";
@@ -201,8 +202,10 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
   if (row === null || typeof row !== "object") return null;
   const m = row as Record<string, unknown>;
 
-  if (typeof m.provider !== "string" || !m.provider) return null;
-  if (typeof m.model !== "string" || !m.model) return null;
+  // The names reach the site from OpenRouter, and from here a model's context:
+  // a name that is not a label drops the row (lib/site-text.ts).
+  if (!isSiteLabel(m.provider)) return null;
+  if (!isSiteLabel(m.model)) return null;
   if (typeof m.inputPricePer1M !== "number" || typeof m.outputPricePer1M !== "number") return null;
   if (!hasPublishableTokenPricing(m.inputPricePer1M, m.outputPricePer1M)) return null;
 
@@ -218,7 +221,7 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
   return {
     provider: m.provider,
     model: m.model,
-    parameters: typeof m.parameters === "string" ? m.parameters : undefined,
+    parameters: isSiteLabel(m.parameters) ? m.parameters : undefined,
     inputPricePer1M: m.inputPricePer1M,
     outputPricePer1M: m.outputPricePer1M,
     batchInputPricePer1M: optionalNumber(m.batchInputPricePer1M),
@@ -228,13 +231,13 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
     // every cache read without charging the write that made it possible, which
     // understated the figure for 37 models until this field was carried.
     cacheWritePricePer1M: cacheWrite !== undefined && cacheWrite > 0 ? cacheWrite : undefined,
-    contextWindow: typeof m.contextWindow === "string" ? m.contextWindow : "",
+    contextWindow: isSiteLabel(m.contextWindow) ? m.contextWindow : "",
     // The site owns the taxonomy: its `category` is the price tier
     // (Frontier | Mid-tier | Budget | Image) and its `license` drives our
     // openness axis. Neither is re-derived here — deriving it locally is what
     // put a retired "Open Weights" category and an unrecognised "Llama 4"
     // licence into this repo in the first place.
-    category: (typeof m.category === "string" ? m.category : "Budget") as LLMCategory,
+    category: (isSiteLabel(m.category) ? m.category : "Budget") as LLMCategory,
     // Only the values this server declares. A site deployment a release behind
     // (or rolled back) can still send "Code", and a filter on a value the tool
     // descriptions say does not exist must not quietly match.
@@ -243,9 +246,9 @@ export function coerceSiteModel(row: unknown): LLMModel | null {
           (LLM_CAPABILITIES as readonly unknown[]).includes(c),
         )
       : [],
-    releaseDate: typeof m.releaseDate === "string" ? m.releaseDate : undefined,
+    releaseDate: isSiteLabel(m.releaseDate) ? m.releaseDate : undefined,
     eloScore: optionalNumber(m.eloScore),
-    license: typeof m.license === "string" ? m.license : undefined,
+    license: isSiteLabel(m.license) ? m.license : undefined,
     // Schema 2.6 and 2.7: what kind of price this row quotes. The site decides
     // both from its per-host fan-out; this server only repeats the verdict.
     outlierListing: flag(m.outlierListing),
@@ -310,7 +313,7 @@ async function fetchFromSite(): Promise<LLMFetchResult> {
     if (model === null) continue;
     accepted.push(model);
     const raw = row as Record<string, unknown>;
-    const openRouterId = typeof raw.openRouterId === "string" && raw.openRouterId ? raw.openRouterId : undefined;
+    const openRouterId = isSiteLabel(raw.openRouterId) ? raw.openRouterId : undefined;
     if (openRouterId) openRouterIds.set(hostPricingKey(model), openRouterId);
     const summary = coerceHostPricing(raw.hostPricing);
     if (summary) hostPricing.set(hostPricingKey(model), { summary, openRouterId });
@@ -457,18 +460,96 @@ export function filterModels<T extends LLMModel>(
   });
 }
 
+/**
+ * A model name as it is matched: lower case, words split where a letter meets a
+ * digit, and every separator but the version dot read as one space. So
+ * "GPT-5.5", "gpt 5.5" and "GPT5.5" are one name, and so are "Llama 3.3 70B"
+ * and "Llama-3.3-70B". Before 0.13.0 the second spelling of each matched
+ * nothing: names were compared as typed, and users and models type both.
+ */
+export function normaliseModelName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/(\p{L})(\d)/gu, "$1 $2")
+    .replace(/(\d)(\p{L})/gu, "$1 $2")
+    .replace(/[^\p{L}\d.]+/gu, " ")
+    .trim();
+}
+
 /** Substring match on model or provider name, shared by every tool that takes a
- *  free-text model name. An exact model-name hit is promoted to the front so
- *  "GPT-4o" resolves to GPT-4o and not to GPT-4o-mini. */
+ *  free-text model name, on the names as `normaliseModelName` reads them. An
+ *  exact model-name hit is promoted to the front so "GPT-4o" resolves to GPT-4o
+ *  and not to GPT-4o-mini. */
 export function matchModels<T extends LLMModel>(models: T[], query: string, limit = 5): T[] {
-  const search = query.trim().toLowerCase();
+  const search = normaliseModelName(query);
   if (!search) return [];
   const matches = models.filter(
-    (m) => m.model.toLowerCase().includes(search) || m.provider.toLowerCase().includes(search),
+    (m) => normaliseModelName(m.model).includes(search) || normaliseModelName(m.provider).includes(search),
   );
-  const exact = matches.filter((m) => m.model.toLowerCase() === search);
+  const isExact = (m: T) => normaliseModelName(m.model) === search;
+  const exact = matches.filter(isExact);
   if (exact.length === 0) return matches.slice(0, limit);
-  return [...exact, ...matches.filter((m) => m.model.toLowerCase() !== search)].slice(0, limit);
+  return [...exact, ...matches.filter((m) => !isExact(m))].slice(0, limit);
+}
+
+/** Character pairs of a string, for the Sørensen-Dice similarity below. */
+function bigrams(text: string): Map<string, number> {
+  const pairs = new Map<string, number>();
+  for (let i = 0; i < text.length - 1; i++) {
+    const pair = text.slice(i, i + 2);
+    pairs.set(pair, (pairs.get(pair) ?? 0) + 1);
+  }
+  return pairs;
+}
+
+function dice(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const left = bigrams(a);
+  const right = bigrams(b);
+  let shared = 0;
+  for (const [pair, count] of left) shared += Math.min(count, right.get(pair) ?? 0);
+  return (2 * shared) / (a.length - 1 + (b.length - 1));
+}
+
+/** How close a query is to a name: the best match of the query against any run
+ *  of as many words in the name, so "sonet" is weighed against "sonnet" and not
+ *  against the whole of "claude sonnet 5.5". */
+function nameSimilarity(query: string, name: string): number {
+  const words = name.split(" ");
+  const span = Math.min(query.split(" ").length, words.length);
+  let best = 0;
+  for (let i = 0; i + span <= words.length; i++) best = Math.max(best, dice(query, words.slice(i, i + span).join(" ")));
+  return best;
+}
+
+/** How alike a close name must be, as a Sørensen-Dice score from 0 to 1. On
+ *  the snapshot, "claud sonet 5.5" puts Claude Sonnet 5.5 first and "gemni 4
+ *  argn" finds Gemini 4 Argon alone; "zzqx 9000" finds nothing. */
+const CLOSE_NAME_THRESHOLD = 0.6;
+
+/**
+ * The catalogue names nearest to a query that matched none, best first: what
+ * the caller may have meant, never a pick made for it. The Cloud FinOps
+ * connector answers a miss the same way, so the model can retry with an exact
+ * name instead of answering without the tool. Empty when nothing is close.
+ */
+export function closeModelNames<T extends LLMModel>(models: T[], query: string, limit = 3): string[] {
+  const search = normaliseModelName(query);
+  if (!search) return [];
+  return models
+    .map((m, index) => ({
+      label: `${m.provider} ${m.model}`,
+      score: Math.max(
+        nameSimilarity(search, normaliseModelName(m.model)),
+        nameSimilarity(search, normaliseModelName(`${m.provider} ${m.model}`)),
+      ),
+      index,
+    }))
+    .filter((c) => c.score >= CLOSE_NAME_THRESHOLD)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, limit)
+    .map((c) => c.label);
 }
 
 export type ResolutionStatus = "exact" | "unique" | "ambiguous" | "not-found" | "duplicate";
@@ -478,7 +559,9 @@ export interface ModelResolution<T> {
   status: ResolutionStatus;
   matched?: T;
   /** The other rows the query also hit, so an ambiguous pick can be reported
-   *  rather than silently made. Capped — see `totalMatches` for the real count. */
+   *  rather than silently made. Capped — see `totalMatches` for the real count.
+   *  On a miss (`not-found`, `totalMatches` 0), the closest catalogue names
+   *  instead: none of them matched, and none was used. */
   alternatives: string[];
   /** How many rows the query hit in total, before `alternatives` was capped.
    *  Reporting `alternatives.length + 1` as the total told the caller six models
@@ -493,13 +576,15 @@ const MAX_ALTERNATIVES = 5;
 /** Resolve one free-text name to a single row, recording how confident that was. */
 export function resolveModel<T extends LLMModel>(models: T[], query: string): ModelResolution<T> {
   const all = matchModels(models, query, Number.POSITIVE_INFINITY);
-  if (all.length === 0) return { query, status: "not-found", alternatives: [], totalMatches: 0 };
+  if (all.length === 0) {
+    return { query, status: "not-found", alternatives: closeModelNames(models, query), totalMatches: 0 };
+  }
 
-  const search = query.trim().toLowerCase();
+  const search = normaliseModelName(query);
   // Exact hits are promoted to the front by matchModels, so counting them here
   // tells us whether "exact" is actually unambiguous. Two providers shipping the
   // same model name is a real case, and picking the first silently is the bug.
-  const exactCount = all.filter((m) => m.model.toLowerCase() === search).length;
+  const exactCount = all.filter((m) => normaliseModelName(m.model) === search).length;
 
   const status: ResolutionStatus =
     exactCount === 1 ? "exact" : all.length > 1 ? "ambiguous" : "unique";

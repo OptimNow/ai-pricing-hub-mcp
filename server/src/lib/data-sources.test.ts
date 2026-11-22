@@ -185,15 +185,10 @@ function stubFetch(responder: Responder) {
       });
     }
 
+    // A real Response: the client reads its headers and streams its body.
     const status = r.status ?? 200;
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      json: async () => {
-        if (r.badJson) throw new SyntaxError("Unexpected token < in JSON at position 0");
-        return r.body;
-      },
-    };
+    const text = r.badJson ? "<!doctype html><title>Not JSON</title>" : JSON.stringify(r.body ?? null);
+    return new Response(text, { status, headers: { "content-type": "application/json" } });
   }) as unknown as typeof fetch;
 }
 

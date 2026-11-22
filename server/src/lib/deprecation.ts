@@ -15,6 +15,7 @@
  * - No notice is "none on record", not "safe": nobody may have checked.
  */
 import type { DeprecationInfo } from "../data/pricing-data.js";
+import { siteLabel } from "./site-text.js";
 
 export type { DeprecationInfo };
 
@@ -33,7 +34,9 @@ export function coerceDeprecation(value: unknown): DeprecationInfo | undefined {
   const raw = value as Record<string, unknown>;
   const notice: DeprecationInfo = {};
   if (typeof raw.shutdown === "string" && ISO_DATE.test(raw.shutdown)) notice.shutdown = raw.shutdown;
-  if (typeof raw.replacement === "string" && raw.replacement.trim()) notice.replacement = raw.replacement.trim();
+  // A replacement that is not a label is left out: the notice stands without it.
+  const replacement = siteLabel(raw.replacement);
+  if (replacement) notice.replacement = replacement;
   return notice;
 }
 

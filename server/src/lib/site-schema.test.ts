@@ -82,7 +82,7 @@ test("a catalogue read from the site reports the version it came under, and is s
   globalThis.fetch = (async (input: unknown) => {
     assert.ok(String(input).startsWith(OPTIMTOKEN_BASE_URL));
     const body = { models, meta: { schemaVersion: "9.9", source: "openrouter", timestamp: "2026-11-12T00:00:00.000Z" } };
-    return { ok: true, status: 200, json: async () => body };
+    return new Response(JSON.stringify(body), { status: 200 });
   }) as unknown as typeof fetch;
 
   const result = await fetchLLMModels();

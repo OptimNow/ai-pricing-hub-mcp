@@ -339,6 +339,41 @@ Read the whole submission once more. Quality warnings such as "very short
 answer" appear here and are forwarded to the reviewers: fix them before
 submitting. Submitted by the owner on 2026-11-19.
 
+## Keeping the listing current
+
+The public listing shows the eight tools by name only, so a description change
+shows nowhere on it. The review is another matter. The Software Directory
+Policy (3.H) asks a listed connector to report "material changes to their
+Software's functionality, tool or capability descriptions, data practices, or
+connected endpoints", which "may be subject to re-review". Adding a tool,
+rewording a description, changing a schema or what a tool sends, or calling a
+new endpoint all qualify. And the reviewers work from the tool list the portal
+captured, not from the live server: the Cloud FinOps review of 2026-11-06
+quoted wording its server had dropped five weeks before, from an older capture.
+
+The order of a pass, as the Cloud FinOps connector runs it
+(`docs/directory-submission.md`, section 4, in `OptimNow/cloud-finops-skills`):
+
+1. The release is merged and the `deploy` job of CI is green: it has checked
+   what the live server serves.
+2. On claude.ai, Customize, Connectors, Yours, the connector, ⋯, **Refresh
+   tools list** (step 2 above), so the account holds the new tools.
+3. In the portal, the listing's full editor: make every edit at once, read
+   **Has an MCP App** (it must stay unticked; on the Cloud FinOps listing it
+   was found ticked again on 2026-11-11), and under **Tools & prompts** choose
+   this account's connector, so that a fresh capture is attached. Save once.
+4. Check that the Tools tab shows the new date.
+5. Email `mcp-review@anthropic.com` what changed on the server since the
+   previous capture, release by release. The owner sends it.
+
+Where it stands on 2026-11-22: the listing was approved on the capture of
+0.11.1 (2026-11-19). Since then 0.11.2 to 0.12.1 changed tool descriptions,
+output schemas (0.12.0) and the text every answer closes with (0.12.1), and no
+pass has been made. 0.13.0 changes no tool definition: its `tools/list` and
+`instructions` are byte-identical to 0.12.1's. Its answers differ (close names
+on a miss) and its requests to the site carry a User-Agent and are held to one
+origin. The next pass should cover all of them in one email.
+
 ## Sources
 
 Read on 2026-11-12.

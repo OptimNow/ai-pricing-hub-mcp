@@ -206,7 +206,7 @@ function stubFetch(responder: (url: string) => { status?: number; body?: unknown
     const r = responder(url);
     if (r.throws) throw new Error("network down");
     const status = r.status ?? 200;
-    return { ok: status >= 200 && status < 300, status, json: async () => r.body };
+    return new Response(JSON.stringify(r.body ?? null), { status });
   }) as unknown as typeof fetch;
 }
 
