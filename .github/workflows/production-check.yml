@@ -17,9 +17,12 @@
 # WHAT IT DOES WITH THE RESULT, by the script's exit code:
 #   0  all passed. An open issue this workflow opened is closed.
 #   1  the server is wrong. One issue labelled `connector-check` is opened or
-#      updated with the report, and the run fails, so it shows red.
+#      updated with the report, and the run fails, so it shows red. A server
+#      that answers from its snapshot while the site answers the script is
+#      wrong too: it cannot read what the site serves.
 #   2  the server passed and optimtoken.optimnow.io could not be read (answers
-#      from the snapshot, the price archive unreadable). A warning and a green
+#      from the snapshot, the price archive unreadable), and did not answer
+#      the script either. A warning and a green
 #      run, and the issue is left as it is: an outage of the site is not a
 #      defect of this connector, and a red run for one teaches everyone to
 #      ignore this job. The site has its own monitoring.

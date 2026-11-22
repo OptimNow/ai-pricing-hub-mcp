@@ -342,9 +342,10 @@ ai-pricing-hub-mcp/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   ├── refresh-compute-fallback.mjs  # Re-reads the figures of the 137 static compute rows
 │   ├── check-site-parity.mjs         # Manual: run this server's logic and the site's over the live catalogue
-│   ├── check-connector.mjs           # Call a deployed connector: version, tools, each tool once, eight calls at once (CI, daily, by hand)
+│   ├── check-connector.mjs           # Call a connector: version, tools, each tool once, eight calls at once (every PR's build, each deploy, daily, by hand)
+│   ├── tools-fingerprint.json        # A hash of each tool's definition; the PR check fails when one changes
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
-├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly and checks it
+├── .github/workflows/ci.yml          # typecheck + test + build, then starts the build and calls it, on every PR; deploys master to Fly and checks it
 ├── .github/workflows/publish-registry.yml  # After a deploy: the version to the MCP registry, once
 ├── .github/workflows/deploy-tag.yml  # By hand: deploy an earlier release tag, or only check one
 ├── .github/workflows/production-check.yml  # Daily: call the published connector, issue on a defect
@@ -568,14 +569,108 @@ curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
 **Verify by calling, not by reading.** `node scripts/check-connector.mjs`
 checks the published URL (or a URL you pass) as listed above, and says which
 check failed. Options: `--expect-version` (default: `server.json`),
-`--attempts` and `--delay`, `--output` for a Markdown report. It runs in the
-`deploy` job, in `production-check.yml` and in `deploy-tag.yml`; run it by
-hand before touching the registry entry or the directory listing. Against
+`--attempts` and `--delay`, `--output` for a Markdown report,
+`--tools-fingerprint` and `--write-tools-fingerprint` (below), `--site` and
+`--recheck-delay`. It runs in the `check` job on a build of every pull request,
+in the `deploy` job, in `production-check.yml` and in `deploy-tag.yml`; run it
+by hand before touching the registry entry or the directory listing. Against
 0.4.2 in production it fails on purpose: the widget resources are still
 listed, and the eight concurrent calls are not all answered. For a tag before
 0.12.1, which closed no answer with a source line, it does not ask for one;
 from 0.14.0 it also asks every tool for `idempotentHint` and an input schema
 that refuses undeclared arguments, and not before.
+
+#### The build of a pull request is started and called (2026-11-22)
+
+Until then the `check` job type-checked, ran the tests and built. Nothing ran
+the server before production: `index.ts` listens as soon as it is imported, so
+no test imports it. A build that failed at start-up, or answered a tool
+wrongly, was found by the `deploy` job, with the previous image already
+replaced. The Cloud FinOps connector runs its real tools before a merge
+(`test_conformance.py`, `test_e2e_http.py`, `mcp-install-smoke.yml`); a review
+of 2026-11-22 found this the first gap against its release chain.
+
+The last step of `check` now starts `dist/server/src/index.js` on the runner,
+waits for `/healthz`, and runs `check-connector.mjs` against
+`http://localhost:3000/mcp`. A server that does not come up fails the job and
+prints its log. The step holds no secret and no write permission: it runs the
+code of any pull request, and the server reads the site as production does.
+
+- **Exit 1** fails the pull request.
+- **Exit 2** (the build passed, the site did not answer the script either) is
+  a warning and a green check. An outage of optimtoken.optimnow.io must not
+  hold every pull request, and the structural checks do not depend on the
+  site: they ran, and passed.
+
+**The tool definitions are pinned.** `scripts/tools-fingerprint.json` holds a
+SHA-256 of each tool's definition as `tools/list` returns it (name, title,
+description, both schemas, annotations; JSON with sorted keys), and the step
+passes `--tools-fingerprint`. A definition that changes makes claude.ai ask
+every user who chose "Always allow" to approve that tool again (decision 1b),
+and until now nothing in CI said that a pull request did so: 0.14.1 was
+checked by hand, `tools/list` against production's. A difference fails the
+job and names the tools, which are the ones users will be asked about. To
+change a definition on purpose, group the changes in one release, then rewrite
+the file from a local build:
+
+```bash
+npm run build && npm run start      # in one terminal
+node scripts/check-connector.mjs http://localhost:3000/mcp --write-tools-fingerprint scripts/tools-fingerprint.json
+```
+
+One hash per tool, not the definitions themselves: the diff of the file says
+which tools changed, and the diff of `index.ts` says how. A dependency bump
+that changes what the SDK or Zod emits for a schema fails the same way, which
+is wanted: it resets the same approvals. Only the `check` job passes the flag.
+`deploy-tag.yml` puts back tags whose definitions are not this checkout's, and
+the daily check must not turn red between a merge and its deploy
+(`workflows.test.ts` holds both). On 2026-11-22 a build on Windows, the build
+Fly made on Linux and production gave the same eight hashes.
+
+#### A fallback is the site's fault only when the site says so (2026-11-22)
+
+A server that answers from its snapshot (tier 2), or says the price archive
+could not be read, says the same thing whether the site is down or its own
+parser has stopped reading what the site serves. `check-connector.mjs` took
+the server's word: any tier other than 1, and any error matching "could not be
+read", was exit 2. So a release that broke a parser passed as an outage: a
+green run, the registry published, no issue from the daily check. The same
+review found this the second gap.
+
+The script now asks the site itself, for the document the server reads, at the
+address the server asks for (so the two share one entry at the site's edge)
+and within the time the server allows:
+
+| Check | Site read | Budget | An answer the server is expected to read |
+|---|---|---|---|
+| `compare-llm-models` is tier 1 | `/api/llm-models` | 15 s | at least 80 rows, `meta.source` "openrouter" |
+| `compare-compute-pricing` is tier 1 (new check) | `/api/pricing?region=us-east&os=Linux` | 40 s | at least 100 rows |
+| `track-llm-price-changes` answers | `/api/price-changes` | 10 s | a `changes` array, empty or not |
+
+- **The site does not answer** (no response, a status other than 200, a body
+  that is not the document, fewer rows than the server's floor, or its own
+  fallback, which the server refuses by design): an outage. Exit 2, as before.
+- **The site answers.** The server is asked once more after `--recheck-delay`
+  (65 s, longer than the minute it remembers a fallback,
+  `FALLBACK_CACHE_TTL_MS`). A second read that passes was a passing failure of
+  the site, and the check passes. A second failure beside a second answer from
+  the site is the server's: exit 1, the release is not published, the daily
+  check opens its issue. It is not tried again by `--attempts`: another
+  attempt would find the same.
+
+The four rules the table repeats (address, budget, floor, the refused
+fallback) are the server's own, and `check-connector.test.ts` holds each copy
+to its constant in `lib/`. The same file runs the script itself against a
+stand-in connector and a stand-in site on localhost, one test per verdict, so
+exit 1 and exit 2 are held by what the script does. Shown on a real build the
+same day: started with `OPTIMTOKEN_API_BASE_URL` set to an address nothing
+listens on, the script exits 1 against the real site (three checks, each
+"twice and 65 s apart, while the site answered both times"), and 2 when
+`--site` names the same dead address.
+
+Not covered: `/api/model-hosts`. `compare-model-hosts` answers from the
+summary on the rows when that read fails and says the hosts in between are
+not shown; the script does not look at `hostList.available`.
 
 #### Going back to an earlier release (0.13.0)
 
@@ -598,7 +693,8 @@ every version deployed since 0.11.0 (`github-release`).
 `production-check.yml` runs `check-connector.mjs` against the published URL
 every day at 06:15 UTC, expecting the version `master` declares. Exit 1 opens
 one issue labelled `connector-check`, or updates it, and fails the run; the
-next run that passes closes it. Exit 2 (the site not read) is a warning and a
+next run that passes closes it. Exit 2 (the site not read, which the script
+establishes by asking the site itself, see above) is a warning and a
 green run, and touches no issue: an outage of the site is not a defect here,
 and a red run for one teaches everyone to ignore the job. Before it, nothing
 called the connector between two merges: a server that had stopped answering
