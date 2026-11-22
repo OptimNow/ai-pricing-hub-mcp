@@ -461,35 +461,92 @@ export function filterModels<T extends LLMModel>(
 }
 
 /**
+ * The longest name a tool looks up. The longest label in the catalogue is under
+ * 60 characters, so nothing a person types comes near it. A name that matches
+ * nothing is weighed against every row for the close names, at a cost that
+ * grows with its length, and the server is one process: the ceiling bounds
+ * what one lookup can cost (0.14.2). The schemas do not carry the limit,
+ * because changing a tool's definition makes claude.ai ask its users to
+ * approve the tool again; the handlers refuse such a name with
+ * `overlongModelName`, and the two lookups below answer nothing for one
+ * whoever calls them.
+ */
+export const MAX_MODEL_NAME_LENGTH = 200;
+
+/**
+ * What a tool answers to a name longer than it looks up, or null when every
+ * name is within the limit. Checked before anything is fetched, and the whole
+ * call is refused: no model name is that long, so there is no partial answer
+ * worth giving. The message quotes the start of the name only, so the answer
+ * does not carry the name back.
+ */
+export function overlongModelName(names: readonly (string | undefined)[]): string | null {
+  const overlong = names.find((name): name is string => name !== undefined && name.length > MAX_MODEL_NAME_LENGTH);
+  if (overlong === undefined) return null;
+  const start = overlong.slice(0, 40).replace(/\s+/g, " ").trim();
+  return (
+    `A model name is at most ${MAX_MODEL_NAME_LENGTH} characters, and the one starting "${start}" has ` +
+    `${overlong.length.toLocaleString("en-US")}. No model was looked up.`
+  );
+}
+
+/**
  * A model name as it is matched: lower case, words split where a letter meets a
- * digit, and every separator but the version dot read as one space. So
- * "GPT-5.5", "gpt 5.5" and "GPT5.5" are one name, and so are "Llama 3.3 70B"
- * and "Llama-3.3-70B". Before 0.13.0 the second spelling of each matched
- * nothing: names were compared as typed, and users and models type both.
+ * digit, "+" read as the word "plus", and every other separator but the version
+ * dot read as one space. So "GPT-5.5", "gpt 5.5" and "GPT5.5" are one name, and
+ * so are "Llama 3.3 70B" and "Llama-3.3-70B". Before 0.13.0 the second spelling
+ * of each matched nothing: names were compared as typed, and users and models
+ * type both.
+ *
+ * "+" was a separator like any other until 0.14.2, so "Command A+" and
+ * "Command A" were one name and the first could not be asked for: it answered
+ * as Command A, a different model at eight times the price. Read as "plus", it
+ * also matches the way the makers spell it in an API id ("command-r-plus").
  */
 export function normaliseModelName(name: string): string {
   return name
     .toLowerCase()
+    .replace(/\+/g, " plus ")
     .replace(/(\p{L})(\d)/gu, "$1 $2")
     .replace(/(\d)(\p{L})/gu, "$1 $2")
     .replace(/[^\p{L}\d.]+/gu, " ")
     .trim();
 }
 
-/** Substring match on model or provider name, shared by every tool that takes a
- *  free-text model name, on the names as `normaliseModelName` reads them. An
- *  exact model-name hit is promoted to the front so "GPT-4o" resolves to GPT-4o
- *  and not to GPT-4o-mini. */
+/** A row's two names as they are matched: the model alone, and the label every
+ *  answer prints for it, provider first. */
+function matchedNames(m: LLMModel): { model: string; label: string } {
+  return { model: normaliseModelName(m.model), label: normaliseModelName(`${m.provider} ${m.model}`) };
+}
+
+/** Whether a row carries exactly this name, with or without its provider. */
+function isExactName(m: LLMModel, search: string): boolean {
+  const names = matchedNames(m);
+  return names.model === search || names.label === search;
+}
+
+/**
+ * The rows a free-text name matches, shared by every tool that takes one, on
+ * the names as `normaliseModelName` reads them. A name matches a row when it
+ * reads in the row's label ("OpenAI GPT-5.5") from the start of a word: so the
+ * model name, the provider, or both together, complete or cut short ("claude
+ * son"). An exact hit is promoted to the front so "GPT-4o" resolves to GPT-4o
+ * and not to GPT-4o-mini.
+ *
+ * Two rules date from 0.14.2. The label is matched as a whole: before, the
+ * provider and the model were tried apart, so "OpenAI GPT-5.5", the label this
+ * server prints, matched no row. And a match starts at the start of a word:
+ * before, it could start anywhere, so "o4" answered as Solar Pro 4 ("pr-o 4")
+ * with the status `unique`, and "mini" matched every Gemini.
+ */
 export function matchModels<T extends LLMModel>(models: T[], query: string, limit = 5): T[] {
+  if (query.length > MAX_MODEL_NAME_LENGTH) return [];
   const search = normaliseModelName(query);
   if (!search) return [];
-  const matches = models.filter(
-    (m) => normaliseModelName(m.model).includes(search) || normaliseModelName(m.provider).includes(search),
-  );
-  const isExact = (m: T) => normaliseModelName(m.model) === search;
-  const exact = matches.filter(isExact);
+  const matches = models.filter((m) => ` ${matchedNames(m).label}`.includes(` ${search}`));
+  const exact = matches.filter((m) => isExactName(m, search));
   if (exact.length === 0) return matches.slice(0, limit);
-  return [...exact, ...matches.filter((m) => !isExact(m))].slice(0, limit);
+  return [...exact, ...matches.filter((m) => !isExactName(m, search))].slice(0, limit);
 }
 
 /** Character pairs of a string, for the Sørensen-Dice similarity below. */
@@ -535,6 +592,7 @@ const CLOSE_NAME_THRESHOLD = 0.6;
  * name instead of answering without the tool. Empty when nothing is close.
  */
 export function closeModelNames<T extends LLMModel>(models: T[], query: string, limit = 3): string[] {
+  if (query.length > MAX_MODEL_NAME_LENGTH) return [];
   const search = normaliseModelName(query);
   if (!search) return [];
   return models
@@ -584,7 +642,7 @@ export function resolveModel<T extends LLMModel>(models: T[], query: string): Mo
   // Exact hits are promoted to the front by matchModels, so counting them here
   // tells us whether "exact" is actually unambiguous. Two providers shipping the
   // same model name is a real case, and picking the first silently is the bug.
-  const exactCount = all.filter((m) => normaliseModelName(m.model) === search).length;
+  const exactCount = all.filter((m) => isExactName(m, search)).length;
 
   const status: ResolutionStatus =
     exactCount === 1 ? "exact" : all.length > 1 ? "ambiguous" : "unique";

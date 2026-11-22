@@ -411,6 +411,10 @@ The server changes since then, release by release:
   declares idempotentHint.
 - 0.14.1: recommend-llm-model's answer text no longer links our ROI calculator
   (another OptimNow product). No definition change.
+- 0.14.2: no definition change. Corrections to how a model name is matched
+  (a name given with its provider, a "+" in a name, a short name matching
+  inside a word), and a model name over 200 characters is refused. The compute
+  answers say which place each provider's prices are from.
 
 The tools remain read-only, take no account and call one host, which OptimNow
 owns. Happy to adjust anything.

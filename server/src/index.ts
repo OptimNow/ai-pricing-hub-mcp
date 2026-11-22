@@ -3,7 +3,15 @@ import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { closeModelNames, fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
+import {
+  closeModelNames,
+  fetchLLMModels,
+  filterModels,
+  hostPricingKey,
+  matchModels,
+  overlongModelName,
+  resolveModel,
+} from "./lib/llm-models.js";
 import {
   blendPair,
   buildsOf,
@@ -44,6 +52,7 @@ import {
   optimizationLevers,
   savingsPct,
   leverSummary,
+  anyLeverApplied,
   optimizationAssumption,
   NO_ASSUMPTIONS_NOTE,
 } from "./lib/llm-business-metrics.js";
@@ -60,7 +69,7 @@ import { roiCalculatorUrl } from "./lib/roi-link.js";
 import { ALL_PROCESSORS, enrichInstances } from "./lib/compute-categories.js";
 import type { EnrichedComputeInstance } from "./lib/compute-categories.js";
 import { outputSchema } from "./lib/output-schema.js";
-import { describeRates, rateSavings, ratesLegend } from "./lib/compute-rates.js";
+import { describeRates, describeSourceRegions, rateSavings, ratesLegend } from "./lib/compute-rates.js";
 import {
   API_BASES,
   API_BASIS_LABELS,
@@ -90,7 +99,7 @@ import {
   incompleteCatalogueCaveat,
 } from "./lib/compute-pricing.js";
 import type { ComputeProvenance, PricingRegion } from "./lib/compute-pricing.js";
-import { deprecationLegend, deprecationTag, describeDeprecation } from "./lib/deprecation.js";
+import { deprecationLegend, deprecationTag, describeDeprecation, retiredThatWouldHaveRanked } from "./lib/deprecation.js";
 import type { DeprecationInfo } from "./lib/deprecation.js";
 import { OPTIMTOKEN_BASE_URL, describeUpstreamFailure } from "./lib/optimtoken-api.js";
 import {
@@ -1236,6 +1245,15 @@ tool(
       };
     }
 
+    const overlong = overlongModelName([modelName]);
+    if (overlong) {
+      return {
+        structuredContent: { ...emptyOutput, error: overlong },
+        content: [{ type: "text", text: overlong }],
+        isError: true,
+      };
+    }
+
     try {
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
@@ -1367,6 +1385,8 @@ tool(
             ? ` — save ${c.savingsPct}% with ${leverSummary(c)}${notApplied(c)}`
             : c.optimizationBasis === "none-supplied"
             ? ` — ${NO_ASSUMPTIONS_NOTE}`
+            : anyLeverApplied(c)
+            ? ` — under 1% saved with ${leverSummary(c)}${notApplied(c)}`
             : ` — no saving available (${leverSummary(c)})`)
         );
         return `${m.provider} ${m.model} (Input: $${m.inputPricePer1M}/1M, Output: $${m.outputPricePer1M}/1M)${listingTags(m)}\n${costLines.join("\n")}`;
@@ -1463,6 +1483,15 @@ tool(
       error: undefined as string | undefined,
     };
 
+    const overlong = overlongModelName(requested);
+    if (overlong) {
+      return {
+        structuredContent: { ...emptyOutput, error: overlong },
+        content: [{ type: "text", text: overlong }],
+        isError: true,
+      };
+    }
+
     try {
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
@@ -1524,7 +1553,11 @@ tool(
           const c = m.useCaseCosts[i];
           return `  ${m.provider} ${m.model}: ${formatMicroCost(c.perRequest)}/req → ${formatMonthlyBudget(c.monthly)}/mo` +
             ` | optimized ${formatMicroCost(c.perRequestOptimized)}/req → ${formatMonthlyBudget(c.monthlyOptimized)}/mo` +
-            (c.savingsPct > 0 ? ` (−${c.savingsPct}%, ${leverSummary(c)})` : ` (no saving: ${leverSummary(c)})`);
+            (c.savingsPct > 0
+              ? ` (−${c.savingsPct}%, ${leverSummary(c)})`
+              : anyLeverApplied(c)
+                ? ` (under 1% saved, ${leverSummary(c)})`
+                : ` (no saving: ${leverSummary(c)})`);
         });
         return `${profile.label} (${profile.inputTokens} in + ${profile.outputTokens} out; ` +
           `optimized assumes ${optimizationAssumption(profile)}):\n${cells.join("\n")}`;
@@ -1801,18 +1834,12 @@ tool(
       const useCaseLabel = USE_CASE_PROFILES[ucKey].label;
       const volumeLabel = volumeEntry?.label ?? vol;
 
-      // The retired models that met every constraint and sat above the last
-      // pick: the ones a reader could wonder about. With fewer than three
-      // picks, any of them would have made the list.
+      // The retired models that met every constraint and would have been
+      // picked: the ones a reader could wonder about (the rule, and the case
+      // it missed until 0.14.2, are in lib/deprecation.ts).
       const rankOf = (e: (typeof evaluatedAll)[number]): number =>
         efficiencyRank.get(modelKey(e.m)) ?? Number.POSITIVE_INFINITY;
-      const lastPickRank = shortlist.length === 3 ? rankOf(shortlist[2]) : Number.POSITIVE_INFINITY;
-      const retiredResults = overConstrained
-        ? []
-        : retired
-            .filter(e => e.constraints.every(c => c.satisfied) && rankOf(e) < lastPickRank)
-            .slice(0, 3)
-            .map(build);
+      const retiredResults = retiredThatWouldHaveRanked(retired, shortlist, rankOf, overConstrained).map(build);
       const retiredNote =
         retired.length === 0
           ? ""
@@ -1821,7 +1848,9 @@ tool(
             (provenance.deprecationsVerifiedAt ? ` (notices last verified on ${provenance.deprecationsVerifiedAt})` : "") +
             `. A recommendation is a model to start on.` +
             (retiredResults.length > 0
-              ? ` Would have ranked here otherwise:\n` +
+              ? (overConstrained
+                  ? ` ${retiredResults.length === 1 ? "This one meets" : "These meet"} every constraint and would have been recommended otherwise:\n`
+                  : ` Would have ranked here otherwise:\n`) +
                 retiredResults
                   .map(r =>
                     `  - ${r.provider} ${r.model}${listingTags(r)} — efficiency ${r.efficiencyScore ?? "n/a"} ` +
@@ -1847,7 +1876,11 @@ tool(
           `score and none of the ${allModels.length} catalogue entries carries one. That is a data problem, ` +
           `not an over-constrained query${constraintsSet ? " — relaxing the constraints will not help" : ""}.`
         : overConstrained
-        ? `No model satisfies every constraint. Closest ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
+        ? (retiredResults.length > 0
+            ? `No model satisfies every constraint, apart from ${retiredResults.length === 1 ? "one" : "some"} whose maker ` +
+              `has announced ${retiredResults.length === 1 ? "its" : "their"} retirement (under "Left out" below). `
+            : `No model satisfies every constraint. `) +
+          `Closest ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
           `(${ranked.length} ranked of ${allModels.length} catalogue entries), each with the constraint it failed:`
         : `Top ${results.length} models for ${useCaseLabel} at ${volumeLabel} requests/month ` +
           `(${passing.length} of ${evaluated.length} ranked models satisfy all constraints; ${allModels.length} catalogue entries):`;
@@ -2037,6 +2070,9 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+              // The region asked for is a group, not a place: which place each
+              // provider's figures describe was in the JSON alone until 0.14.2.
+              describeSourceRegions(results.map(inst => inst.provider), provenance.sourceRegions) +
               (provenance.unavailablePriceColumns.length
                 ? `Unavailable upstream (reported as null): ${provenance.unavailablePriceColumns.join(", ")}.\n`
                 : "") +
@@ -2127,6 +2163,15 @@ tool(
       source: "error",
       eloAsOf: "",
     };
+
+    const overlong = overlongModelName(requested);
+    if (overlong) {
+      return {
+        structuredContent: { ...emptyOutput, error: overlong },
+        content: [{ type: "text", text: overlong }],
+        isError: true,
+      };
+    }
 
     try {
       const { models: allModels, hostPricing, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
@@ -2550,7 +2595,7 @@ tool(
           : instanceType === undefined && hourlyRate === undefined
             ? "Nothing to rent: give instanceType (a catalogue instance, e.g. 'g6e.12xlarge'; find one with " +
               "compare-compute-pricing, category 'GPU / Accelerated') or hourlyRate (USD per hour for one instance)."
-            : null;
+            : overlongModelName([modelName]);
     if (refusal) {
       const message = refusal;
       return {
@@ -2698,7 +2743,11 @@ tool(
             (basis === "preset" ? ` (the preset's assumption)` : ` (as supplied)`)
           : basis === "none-supplied"
             ? `  API optimized: same as list — ${NO_ASSUMPTIONS_NOTE}`
-            : `  API optimized: same as list — no saving available (${leverSummary(levers)})`,
+            : anyLeverApplied(levers)
+              ? `  API optimized: ${money(optimizedCost)} — under 1% saved with ${leverSummary(levers)}, assuming ` +
+                `${optimizationAssumption(profile)}` +
+                (basis === "preset" ? ` (the preset's assumption)` : ` (as supplied)`)
+              : `  API optimized: same as list — no saving available (${leverSummary(levers)})`,
         cheaperHost
           ? `  Cheapest host — ${describeOffer(cheaperHost.offer)}: ${money(cheaperHost.cost)}` +
             (provenance.hostPricingAsOf ? ` (read ${provenance.hostPricingAsOf})` : "")
@@ -2862,6 +2911,7 @@ tool(
             text: (notices ? `${notices}\n\n` : "") +
               `Data source: ${dated(provenance.label, provenance.upstreamTimestamp)}.` +
               (computeProvenance ? ` Instance rates: ${dated(computeProvenance.label, computeProvenance.upstreamTimestamp)}.` : "") + `\n` +
+              describeSourceRegions(instance ? [instance.provider] : [], computeProvenance?.sourceRegions) +
               `Name resolution: ${resolution.map(describe).join(" ")}\n\n` +
               `API or own capacity — ${m.provider} ${m.model} for ${profile.label} (${profile.inputTokens} in + ` +
               `${profile.outputTokens} out tokens) at ${volume.toLocaleString()} requests/month.\n` +
@@ -2960,6 +3010,15 @@ tool(
       return {
         structuredContent: { ...emptyOutput, error: message },
         content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
+
+    const overlong = overlongModelName(requested ?? []);
+    if (overlong) {
+      return {
+        structuredContent: { ...emptyOutput, error: overlong },
+        content: [{ type: "text", text: overlong }],
         isError: true,
       };
     }

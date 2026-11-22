@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { llmModels } from "../data/pricing-data.js";
 import type { LLMModel } from "../data/pricing-data.js";
 
@@ -10,11 +12,13 @@ import {
   MONTHLY_DECIMALS,
   PER_REQUEST_DECIMALS,
   USE_CASE_PROFILES,
+  anyLeverApplied,
   computeScoreComponents,
   describeSort,
   enrichModels,
   sortEnrichedModels,
   formatMonthlyBudget,
+  leverSummary,
   optimizationAssumption,
   optimizationLevers,
   optimizedUseCaseCost,
@@ -23,6 +27,7 @@ import {
   roundPerRequestCost,
   roundPricePer1M,
   roundPricePer1MOrNull,
+  savingsPct,
   useCaseCost,
 } from "./llm-business-metrics.js";
 
@@ -542,4 +547,59 @@ test("optimizationAssumption says what share of input the optimized figure reads
     optimizationAssumption({ cacheHitRate: 1 / 3, batchEligible: false }),
     "33% of input tokens read from the prompt cache and no batch API",
   );
+});
+
+// ── The reason beside a saving of 0% (0.14.2) ──
+
+test("a lever left alone is not blamed on a rate the model publishes", () => {
+  // A cache read at more than the input price: published, and it does not pay.
+  // Until 0.14.2 the text read "this model publishes no cache-read rate".
+  const dearCache = model({ cachedInputPricePer1M: 6 });
+  const levers = optimizationLevers(dearCache, USE_CASE_PROFILES.supportTicket);
+  assert.equal(levers.cacheEligible, true);
+  assert.equal(levers.cacheApplied, false);
+  assert.equal(leverSummary(levers), "this model publishes no cache-read rate that lowers the cost");
+  // The same words hold for a model that publishes none.
+  assert.equal(
+    leverSummary(optimizationLevers(model({}), USE_CASE_PROFILES.meetingSummary)),
+    "this model publishes no cache-read or batch rate that lowers the cost",
+  );
+  // Nothing to apply is still its own reason, and an applied lever is still named.
+  assert.equal(
+    leverSummary({ batchEligible: false, cacheEligible: false, batchApplied: false, cacheApplied: false }),
+    "this workload has no cacheable prefix and is not batch-eligible",
+  );
+  assert.equal(
+    leverSummary({ batchEligible: true, cacheEligible: true, batchApplied: true, cacheApplied: true }),
+    "caching + batch API",
+  );
+});
+
+test("a saving that rounds to 0% with a lever applied is told apart from no saving", () => {
+  // A cache read a shade under the input price: the lever is pulled, and the
+  // gain is under half a percent. The texts printed "no saving available
+  // (caching)" for it; they read `anyLeverApplied` to say "under 1%" instead.
+  const thinCache = model({ cachedInputPricePer1M: 3.95 });
+  const profile = USE_CASE_PROFILES.supportTicket;
+  const levers = optimizationLevers(thinCache, profile);
+  const list = useCaseCost(thinCache.inputPricePer1M, thinCache.outputPricePer1M, profile);
+  const optimized = optimizedUseCaseCost(thinCache, profile);
+  assert.equal(levers.cacheApplied, true);
+  assert.ok(optimized < list, "the lever lowers the cost");
+  assert.equal(savingsPct(list, optimized), 0);
+  assert.equal(anyLeverApplied(levers), true);
+  assert.equal(leverSummary(levers), "caching");
+
+  assert.equal(anyLeverApplied(optimizationLevers(model({}), profile)), false);
+  assert.equal(anyLeverApplied({ batchApplied: true, cacheApplied: false }), true);
+});
+
+test("each text that prints a 0% saving checks whether a lever was applied first", () => {
+  // index.ts listens on import, so it is read as source. Three texts print
+  // the reason for no saving; each is preceded by the "under 1%" branch.
+  const index = readFileSync(fileURLToPath(new URL("../index.ts", import.meta.url)), "utf8");
+  const reasons = [...index.matchAll(/no saving(?: available \(|: )\$\{leverSummary\(/g)].length;
+  const guarded = [...index.matchAll(/anyLeverApplied\((?:c|levers)\)\s*\?\s*`[^`]*under 1% saved/g)].length;
+  assert.equal(reasons, 3);
+  assert.equal(guarded, reasons);
 });

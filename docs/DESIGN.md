@@ -1016,6 +1016,79 @@ give up or guess. Two changes, neither in a tool's definition:
   and the others used to send `alternatives: []` on a miss; the field is
   declared, so its schema is unchanged.
 
+### Model names: four defects of 0.14.1 (0.14.2)
+
+A review of production 0.14.1 on 2026-11-22 found four ways a name went wrong.
+Each was confirmed on production except the third, measured on a local build.
+None of the fixes touches a tool's definition: `tools/list`
+and the instructions of the 0.14.2 build are byte-identical to 0.14.1's.
+
+- **The label an answer prints did not resolve.** Every answer names a model
+  provider first ("OpenAI GPT-5.5"), and `matchModels()` tried the provider and
+  the model apart, so that string matched no row and the close name offered for
+  it was itself: 316 labels of 316. A name is now matched against the whole
+  label, so the model name, the provider, or both together resolve, and an
+  exact name is exact with or without its provider. The id spelling resolves
+  too ("openai/gpt-5.5").
+- **A "+" was a separator.** "Command A+" ($0.30 / $1.50) and "Command A"
+  ($2.50 / $10) were one name, and no spelling reached the first: it answered
+  as the second. `normaliseModelName()` now reads "+" as the word "plus", which
+  is also how a maker's API id spells it ("command-r-plus").
+- **A name had no maximum length.** A miss is weighed against every row for the
+  close names, at a cost that grows with the name, and the server is one
+  process. `MAX_MODEL_NAME_LENGTH` is 200 (the longest label is 55 characters):
+  `overlongModelName()` refuses the whole call before anything is fetched, in
+  each of the five tools that take a name, quoting the first 40 characters
+  only, and `matchModels()` and `closeModelNames()` answer nothing for such a
+  name whoever calls them. The limit is not in the input schemas, on purpose: a
+  `maxLength` there is a definition change (decision 1b). A test counts the
+  lookups in `index.ts` against the refusals in front of them. Measured after:
+  a miss on a 200-character name costs about 12 ms, and a longer name is
+  refused in under a millisecond.
+- **A match could start inside a word.** "o4" answered as Solar Pro 4 with the
+  status `unique` ("pr-o 4"), "o1" as Nova Pro 1.0, and "mini" matched every
+  Gemini. A match now starts at the start of a word. It may still end inside
+  one, so a name cut short ("claude son", "llama 3") matches as before.
+
+Measured on the live catalogue of that day, 3,260 queries (every name, label,
+id spelling, word and run of two or three words) before and after: every model
+resolves to itself as `exact` by its name, its label and its hyphenated
+spelling (948 of 948, against 316 failures of 632 before); 839 queries that
+matched nothing now match; three matched something and no longer do, "o4",
+"o1" and "C++", which is the fix. What it does not change: among several
+matches with none exact, the first in catalogue order is used and the answer
+says "matched N models".
+
+Four texts were corrected in the same release, none with a new field:
+
+- **`recommend-llm-model` named no retired model when nothing else met the
+  constraints.** `retiredNotRecommended` was emptied whenever the query was
+  over-constrained, so a query only a retired model satisfied read "No model
+  satisfies every constraint" over three near misses. The rule is now
+  `retiredThatWouldHaveRanked()` in `lib/deprecation.ts`: with a full list, a
+  retired model above the last pick; with a shorter one, or none, any retired
+  model that met every constraint. The text says "apart from one whose maker
+  has announced its retirement".
+- **The compute text did not say where a price was from.** The region asked for
+  is a group of four, and `provenance.sourceRegions` (us-central1 for GCP under
+  us-east, one worldwide list price for DigitalOcean, OCI and OVH, "estimated:
+  US East x1.2" for Azure under europe) was in the JSON alone. One line now
+  names the place for each provider among the rows shown
+  (`describeSourceRegions()`), in `compare-compute-pricing` and in the
+  break-even. The values are the site's free text and pass `siteLabel()`.
+- **"No saving available (caching)."** A saving is a whole percentage, so a
+  lever that gains under half a percent printed as no saving with the lever
+  named. The three texts that print it now say "under 1% saved" there.
+- **"This model publishes no cache-read rate"** for a model that publishes one
+  that does not pay (decision 3f). The reason now ends "that lowers the cost",
+  which is true of both cases.
+
+Left for a release that changes definitions, because each needs a new or a
+changed field: the break-even's `fleetMinusApiMonthly`, a required number, is
+still returned when `fleet.canServeVolume` is false and the text has dropped
+the comparison; the terms of a commitment rate are in the text only; and "no
+cheaper host" and "no host prices for this model" give the same JSON.
+
 ### Table order in `compare-llm-models` (0.6.0)
 
 The catalogue arrives in Arena ELO order (`sortModels` in `llm-models.ts`: ELO

@@ -8,6 +8,7 @@ import {
   describeDeprecation,
   isPastShutdown,
   isoDay,
+  retiredThatWouldHaveRanked,
 } from "./deprecation.js";
 
 /**
@@ -97,4 +98,42 @@ test("the legend appears only with a retired model, and dates the notices", () =
 test("a tier without notices says that silence is not an all-clear", () => {
   assert.match(NO_DEPRECATION_DATA, /optimtoken\.optimnow\.io only/);
   assert.match(NO_DEPRECATION_DATA, /says nothing about whether its maker has announced its retirement/);
+});
+
+// ── Which retired models a recommendation names (0.14.2) ──
+
+const entry = (rank: number, ...satisfied: boolean[]) => ({ rank, constraints: satisfied.map((s) => ({ satisfied: s })) });
+const rankOf = (e: { rank: number }) => e.rank;
+
+test("a retired model is named when it would have displaced a pick", () => {
+  const picks = [entry(2, true), entry(5, true), entry(9, true)];
+  const retired = [entry(1, true), entry(4, false), entry(7, true), entry(12, true)];
+  // Rank 4 missed a constraint, rank 12 sits below the last pick.
+  assert.deepEqual(retiredThatWouldHaveRanked(retired, picks, rankOf, false).map(rankOf), [1, 7]);
+});
+
+test("with fewer picks than the list holds, any retired model that met the constraints would have made it", () => {
+  const picks = [entry(2, true)];
+  const retired = [entry(40, true), entry(55, false), entry(80, true)];
+  assert.deepEqual(retiredThatWouldHaveRanked(retired, picks, rankOf, false).map(rankOf), [40, 80]);
+});
+
+test("when no model met the constraints, the retired ones that did are named", () => {
+  // Measured on 0.14.1, 2026-11-22: supportTicket, ELO 1320 or more, $27.50 a
+  // month at most, proprietary. One model met all three and carried a
+  // retirement notice. The answer said no model satisfied every constraint,
+  // listed three near misses, and named it nowhere.
+  const nearMisses = [entry(3, true, false), entry(8, false, true), entry(11, true, false)];
+  const retired = [entry(6, true, true), entry(20, true, false)];
+  assert.deepEqual(retiredThatWouldHaveRanked(retired, nearMisses, rankOf, true).map(rankOf), [6]);
+  // The near misses are not picks: their ranks do not bound anything.
+  assert.deepEqual(retiredThatWouldHaveRanked([entry(99, true, true)], nearMisses, rankOf, true).map(rankOf), [99]);
+});
+
+test("the list of retired models is as short as the list of picks", () => {
+  const retired = [1, 2, 3, 4, 5].map((rank) => entry(rank, true));
+  assert.equal(retiredThatWouldHaveRanked(retired, [], rankOf, true).length, 3);
+  assert.deepEqual(retiredThatWouldHaveRanked([], [], rankOf, true), []);
+  // No constraint set: every model meets "all of them".
+  assert.deepEqual(retiredThatWouldHaveRanked([entry(1)], [entry(2), entry(3), entry(4)], rankOf, false).map(rankOf), [1]);
 });
