@@ -481,7 +481,13 @@ export function formatMicroCost(cost: number): string {
 }
 
 /** Name the levers behind a saving — or the reason there isn't one. A 0% figure
- *  on its own reads like a bug; "not batch-eligible" reads like an answer. */
+ *  on its own reads like a bug; "not batch-eligible" reads like an answer.
+ *
+ *  The last reason says "no rate that lowers the cost", not "no rate": a lever
+ *  is also left alone when the model publishes its rate and the rate does not
+ *  pay (a cache read that costs more than it saves once the write is charged,
+ *  decision 3f). Until 0.14.2 that case read "publishes no cache-read rate"
+ *  for a model that publishes one: 38 model and preset pairs on 2026-11-22. */
 export function leverSummary(l: OptimizationLevers): string {
   const applied = [l.cacheApplied ? "caching" : "", l.batchApplied ? "batch API" : ""].filter(Boolean);
   if (applied.length > 0) return applied.join(" + ");
@@ -489,7 +495,15 @@ export function leverSummary(l: OptimizationLevers): string {
     return "this workload has no cacheable prefix and is not batch-eligible";
   }
   const missing = [l.cacheEligible ? "cache-read" : "", l.batchEligible ? "batch" : ""].filter(Boolean);
-  return `this model publishes no ${missing.join(" or ")} rate`;
+  return `this model publishes no ${missing.join(" or ")} rate that lowers the cost`;
+}
+
+/** Whether a discount was counted at all. A saving is printed as a whole
+ *  percentage, so one under half a percent prints as 0% with a lever applied:
+ *  $900 a month became $896 under "no saving available (caching)" until
+ *  0.14.2. The texts say "under 1%" for it, and name the lever. */
+export function anyLeverApplied(l: Pick<OptimizationLevers, "batchApplied" | "cacheApplied">): boolean {
+  return l.batchApplied || l.cacheApplied;
 }
 
 /** What an optimized figure assumes about the workload: the share of input

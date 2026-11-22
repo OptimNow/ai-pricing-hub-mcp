@@ -19,6 +19,7 @@
  *    notice at the top: a reader quoting one row must not need the header.
  */
 import type { ComputeInstance } from "../data/pricing-data.js";
+import { siteLabel } from "./site-text.js";
 
 /** `provenance.priceTypes`: per provider, per column, "live" | "static" | "unavailable". */
 export type PriceTypes = Record<string, Record<string, string>> | undefined;
@@ -185,4 +186,34 @@ export function ratesLegend(
   }
 
   return lines.length > 0 ? `\n\n${lines.join("\n")}` : "";
+}
+
+/**
+ * One line saying which place each provider's figures describe, for the
+ * providers among the rows shown: `provenance.sourceRegions`, which was in
+ * `structuredContent` only until 0.14.2. The region a caller asks for is one of
+ * four groups (us-east, europe), not a place: under europe the site reads
+ * Ireland for AWS and Belgium for GCP, serves one worldwide list price for
+ * DigitalOcean, OCI and OVH, and says where a provider's figures are an estimate
+ * scaled from its US East rate. A host that hands the model the text alone
+ * (claude.ai, decision 1b) saw none of it, and an answer said us-east for a
+ * price read in Iowa.
+ *
+ * Each value is the site's free text, so it is a label or it is left out
+ * (decision 13): a provider with no usable value is not named, which reads as
+ * not known. Providers come in the order the rows show them. Empty when there
+ * is nothing to say; otherwise one line, ending with a line break.
+ */
+export function describeSourceRegions(
+  providers: readonly string[],
+  sourceRegions: Record<string, string> | undefined,
+): string {
+  if (!sourceRegions || providers.length === 0) return "";
+  // The snapshot has one entry for every provider, under this key.
+  const names = ["All providers", ...new Set(providers)];
+  const parts = names.flatMap(name => {
+    const place = Object.hasOwn(sourceRegions, name) ? siteLabel(sourceRegions[name]) : undefined;
+    return place ? [`${name}: ${place}`] : [];
+  });
+  return parts.length > 0 ? `Where each provider's prices are from: ${parts.join("; ")}.\n` : "";
 }

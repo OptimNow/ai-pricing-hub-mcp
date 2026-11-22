@@ -4,4 +4,4 @@
  * (`User-Agent`). One of the four places that state the version, with
  * package.json, its lockfile and server.json: version.test.ts holds them equal.
  */
-export const SERVER_VERSION = "0.14.1";
+export const SERVER_VERSION = "0.14.2";

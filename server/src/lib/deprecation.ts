@@ -95,3 +95,29 @@ export function deprecationLegend(
 export const NO_DEPRECATION_DATA =
   "Retirement notices are served by optimtoken.optimnow.io only: on this source no model carries one, " +
   "which says nothing about whether its maker has announced its retirement.";
+
+/**
+ * The retired models a reader of a recommendation could wonder about: those
+ * that met every constraint and would have been picked, had their maker not
+ * announced their retirement. `retired` comes best first, as the ranking has it.
+ *
+ * With a full list of picks, that is a retired model ranked above the last of
+ * them. With a shorter list, any retired model that met the constraints would
+ * have made it. And when no model met them at all, the same holds: until
+ * 0.14.2 that last case named none, so a query only a retired model satisfied
+ * was answered "no model satisfies every constraint" and its near misses,
+ * with the one model that did satisfy it nowhere in the answer.
+ */
+export function retiredThatWouldHaveRanked<E extends { constraints: readonly { satisfied: boolean }[] }>(
+  retired: readonly E[],
+  picks: readonly E[],
+  rankOf: (entry: E) => number,
+  overConstrained: boolean,
+  limit = 3,
+): E[] {
+  const lastPickRank =
+    !overConstrained && picks.length >= limit ? rankOf(picks[limit - 1]) : Number.POSITIVE_INFINITY;
+  return retired
+    .filter(entry => entry.constraints.every(c => c.satisfied) && rankOf(entry) < lastPickRank)
+    .slice(0, limit);
+}
