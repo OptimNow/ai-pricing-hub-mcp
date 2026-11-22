@@ -148,7 +148,9 @@ jobs:
         with:
           node-version: "24"
 
-      # Exit 2: the server passed and the site could not be read. A warning.
+      # Exit 2: the server passed and the site did not answer the script either.
+      # A warning. The tag's tool definitions are not compared with a pinned
+      # fingerprint: the file is this ref's, the definitions are the tag's.
       - name: Check the live connector serves the tag
         env:
           VERSION: ${{ steps.release.outputs.version }}

@@ -36,6 +36,36 @@ test("flyctl is one pinned version wherever it deploys", () => {
   assert.equal(versions[1], versions[0], "deploy-tag.yml and ci.yml deploy with different flyctl versions");
 });
 
+test("the build of every pull request is started and called before it can be merged", () => {
+  // Until this step nothing ran the server before production: index.ts
+  // listens on import, so no test imports it, and the job only compiled it.
+  const ci = read("ci.yml");
+  const check = ci.slice(ci.indexOf("\n  check:"), ci.indexOf("\n  deploy:"));
+  const step = check.slice(check.indexOf("Start the built server and check what it serves"));
+  assert.ok(step.length > 0, "the check job no longer starts the server");
+  assert.ok(check.indexOf("npm run build") < check.indexOf("Start the built server"), "the server is started before it is built");
+  assert.match(step, /node dist\/server\/src\/index\.js/);
+  // Waits for the server, and says so when it never comes up.
+  assert.match(step, /\/healthz[\s\S]*The built server did not start[\s\S]*exit 1/);
+  assert.match(step, /node scripts\/check-connector\.mjs "http:\/\/localhost:\$PORT\/mcp"/);
+  // A tool definition that changed shows in the pull request that changes it.
+  assert.match(step, /--tools-fingerprint scripts\/tools-fingerprint\.json/);
+  // Exit 2 (the site did not answer) is a warning; anything else but 0 fails.
+  assert.match(step, /2\) echo "::warning[\s\S]*\*\) exit 1/);
+  // The job runs the code of any pull request: no secret, no write permission.
+  assert.doesNotMatch(check, /secrets\.|permissions:|id-token|contents: write/);
+});
+
+test("only the pull request check holds a server to the pinned tool definitions", () => {
+  // deploy-tag.yml puts back tags whose definitions are not this checkout's,
+  // and the daily check must not turn red between a merge and its deploy.
+  const ci = read("ci.yml");
+  const deploy = ci.slice(ci.indexOf("\n  deploy:"));
+  for (const text of [deploy, read("deploy-tag.yml"), read("production-check.yml")]) {
+    assert.doesNotMatch(text, /--tools-fingerprint/);
+  }
+});
+
 test("a deploy is checked on what it serves before anything is published", () => {
   const ci = read("ci.yml");
   const deploy = ci.slice(ci.indexOf("\n  deploy:"), ci.indexOf("\n  publish-registry:"));

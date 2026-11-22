@@ -1,0 +1,13 @@
+{
+  "about": "SHA-256 of each tool's definition as tools/list returns it (name, title, description, input and output schema, annotations), as JSON with sorted keys. The check job of ci.yml compares a build of every pull request with this file. A hash that differs is a definition that changed, and claude.ai then asks every user who chose \"Always allow\" to approve that tool again (CLAUDE.md, decision 1b). To change a definition on purpose, group the changes in one release, then rewrite this file from a local build: npm run build, npm run start, node scripts/check-connector.mjs http://localhost:3000/mcp --write-tools-fingerprint scripts/tools-fingerprint.json",
+  "tools": {
+    "compare-compute-pricing": "eb9905fb0a52b557b0367b7998dcb8eee3c0a6a1331fb6199fc17ed94b06ae4b",
+    "compare-llm-models": "a64952fdc2d8aace883411a1f5fa42857ceefdc4bb7873ec0bee4cd316a334d8",
+    "compare-model-hosts": "522da4ed833b7624d7c962ecc0fe896101a7cd60019a78670575d79d39b54021",
+    "compare-models-side-by-side": "5641fd0eef6f2539048d46909282e4bed37f4c983c9526f71fc0e18a5ab37a9e",
+    "estimate-llm-cost": "7bdeeb73d5f9247d440a8eed5f4703730a71a518512a15b00ce369312e870d71",
+    "estimate-self-hosting-breakeven": "c1077708fe383316a4586011b282373eca3973a18f83ff82da96462ff3444906",
+    "recommend-llm-model": "57cdeabc0c48208f7870527af61c7a3724467d6693a9f063830514d29d6cde4f",
+    "track-llm-price-changes": "85661c41f616a35dd997f422fa50319a5718ae16b0b80bb2a1bff47a5cc929f1"
+  }
+}

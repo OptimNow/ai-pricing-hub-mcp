@@ -34,10 +34,65 @@ jobs:
       # tests are excluded from the build config so they stay out of dist.
       - run: npm run typecheck
 
-      # Offline and deterministic: no network, no server to boot.
+      # Offline and deterministic: nothing beyond localhost, where the tests of
+      # check-connector.mjs start a stand-in connector and a stand-in site.
       - run: npm test
 
       - run: npm run build
+
+      # The real server, before production. Everything above reads the source
+      # or calls functions; nothing started the server, because index.ts
+      # listens as soon as it is imported and so no test imports it. A build
+      # that failed at start-up, or answered a tool wrongly, was found by the
+      # `deploy` job, with the previous image already replaced. The Cloud
+      # FinOps connector runs its real tools before a merge; this is the same
+      # step here: start the build, wait for /healthz, and call it as a client
+      # would (scripts/check-connector.mjs, which says what each check holds).
+      #
+      # --tools-fingerprint compares each tool's definition with the hash
+      # pinned in scripts/tools-fingerprint.json. A definition that changes
+      # makes claude.ai ask every user who chose "Always allow" to approve the
+      # tool again, so a pull request that changes one says so in that file.
+      #
+      # The server reads optimtoken.optimnow.io, as in production. Exit 2 means
+      # the build passed and the site did not answer the script either: a
+      # warning, because an outage of the site must not hold every pull
+      # request. A site that answers while the build cannot read it is exit 1.
+      #
+      # No secret reaches this step: it runs the code of any pull request.
+      - name: Start the built server and check what it serves
+        env:
+          PORT: "3000"
+        run: |
+          set -euo pipefail
+          node dist/server/src/index.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          up=false
+          for _ in $(seq 1 30); do
+            if curl --silent --fail --max-time 2 --output /dev/null "http://localhost:$PORT/healthz"; then up=true; break; fi
+            kill -0 "$server" 2>/dev/null || break
+            sleep 1
+          done
+          if [ "$up" != true ]; then
+            echo "::error title=The built server did not start::No answer from /healthz. Its log follows."
+            cat "$RUNNER_TEMP/server.log"
+            exit 1
+          fi
+          set +e
+          node scripts/check-connector.mjs "http://localhost:$PORT/mcp" \
+            --tools-fingerprint scripts/tools-fingerprint.json \
+            --attempts 2 --delay 10 --output "$RUNNER_TEMP/connector-check.md"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/connector-check.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo "── server log"
+          tail -n 40 "$RUNNER_TEMP/server.log" || true
+          case "$code" in
+            0) ;;
+            2) echo "::warning title=Site not read::The build passed; optimtoken.optimnow.io did not answer during the check." ;;
+            *) exit 1 ;;
+          esac
 
   # Deploys master to Fly.io once `check` has passed, so a merge that breaks the
   # typecheck, the tests or the build never reaches the live connector. Before
@@ -159,6 +214,8 @@ jobs:
       # means the server passed and optimtoken.optimnow.io could not be read
       # (answers from the snapshot): a warning, not a reason to hold a release
       # that is live and correct. The daily production-check.yml keeps asking.
+      # The script asks the site itself before it says so: a server that falls
+      # back while the site answers is exit 1, and nothing is published.
       - name: Check the live connector
         run: |
           set +e
