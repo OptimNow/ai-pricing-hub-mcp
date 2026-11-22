@@ -63,7 +63,7 @@ requirements. They no longer apply:
 | Widgets follow Claude's theme through host tokens (a "must" in the design guidelines; ours followed the OS) | No UI to theme |
 | No horizontal scroll from 320 px, 44 pt tap targets, WCAG AA | No UI |
 | `_meta.ui.domain` equal to a hash of the pasted URL, so the URL had to be pasted exactly | Gone. `/mcp` and `/mcp/` both answer |
-| Allowed link URIs for `ui/open-link` | No widget opens a link. The ROI calculator URL is plain text in the answer |
+| Allowed link URIs for `ui/open-link` | No widget opens a link. Since 0.14.1 no answer's text links the ROI calculator; the URL is a field of `recommend-llm-model`'s `structuredContent` only |
 
 What it costs: the listing has no visual carousel, and an answer is the
 assistant's text rather than a card. The figures are the same; each tool still

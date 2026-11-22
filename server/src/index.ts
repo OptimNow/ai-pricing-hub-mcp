@@ -1891,8 +1891,13 @@ tool(
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
               `${preamble}${assumptionLine}\n\n${lines.join("\n")}${retiredNote}` +
-              `${listingLegend([...results, ...retiredResults], provenance.deprecationsVerifiedAt)}\n\n` +
-              `ROI calculator for this scenario: ${roiUrl}`,
+              // No link to the ROI calculator in the text since 0.14.1, on the
+              // owner's decision of 2026-11-22: a link to another OptimNow
+              // product in an answer reads as promotion (the directory
+              // criteria). `roiCalculatorUrl` stays in structuredContent: it is
+              // a declared, required field (decision 3d), and dropping it would
+              // change the output schema.
+              `${listingLegend([...results, ...retiredResults], provenance.deprecationsVerifiedAt)}`,
           },
         ],
         isError: false,
