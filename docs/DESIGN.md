@@ -1450,6 +1450,17 @@ the tools again:
 - **`idempotentHint: true`** on every tool, as the Cloud FinOps connector
   declares its own: each only reads.
 
+**No link to another OptimNow product in an answer's text (0.14.1).** Until
+0.14.0 `recommend-llm-model` closed its text with "ROI calculator for this
+scenario:" and a deep link into the AI ROI Calculator. The review criteria
+reject descriptions that promote products, and the Cloud FinOps connector
+dropped its widgets' footer links for the same reason. On the owner's decision
+of 2026-11-22 the line left the text; `roiCalculatorUrl` stays in
+`structuredContent`, because it is a declared, required field (decision 3d)
+and dropping it would change the output schema, which makes claude.ai ask
+"Always allow" users to approve the tool again. The definitions of 0.14.1 are
+byte-identical to 0.14.0's. `conformance.test.ts` holds both halves of that.
+
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
 - codingTask, invoiceProcessing, callSummary, agentWorkflow

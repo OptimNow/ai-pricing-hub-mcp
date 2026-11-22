@@ -409,6 +409,8 @@ The server changes since then, release by release:
   in 1 to 4 of 6 to 9 without it. Two descriptions no longer link
   optimnow.io. Every tool now refuses an argument it does not declare, and
   declares idempotentHint.
+- 0.14.1: recommend-llm-model's answer text no longer links our ROI calculator
+  (another OptimNow product). No definition change.
 
 The tools remain read-only, take no account and call one host, which OptimNow
 owns. Happy to adjust anything.

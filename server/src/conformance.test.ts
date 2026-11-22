@@ -130,6 +130,19 @@ test("every tool refuses an argument it does not declare, and says it only reads
   }
 });
 
+test("no answer's text links another OptimNow product", () => {
+  // The ROI calculator link left the recommend-llm-model text in 0.14.1 (the
+  // owner's decision of 2026-11-22). The JSON keeps `roiCalculatorUrl`, a
+  // declared field (decision 3d), so the schema is unchanged.
+  for (const [file, text] of payloadLiterals()) {
+    assert.doesNotMatch(text, /ROI calculator/i, `${file}: ${text.slice(0, 100)}`);
+    // The address is built in one file, for the JSON field alone.
+    if (file !== "lib/roi-link.ts") assert.doesNotMatch(text, /airoicalculator/i, `${file}: ${text.slice(0, 100)}`);
+  }
+  assert.doesNotMatch(index, /\$\{roiUrl\}/, "the recommend text prints the ROI link");
+  assert.match(index, /^\s+roiCalculatorUrl: z\.string\(\),$/m);
+});
+
 test("the source rule is the only exception, and lives where it is measured", () => {
   for (const [file, text] of SOURCE_RULE) {
     const where = [["index.ts", index] as const, ...libFiles].filter(([, source]) => source.includes(text)).map(([name]) => name);
