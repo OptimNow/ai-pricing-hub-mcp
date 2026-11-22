@@ -89,6 +89,37 @@ test("no title, description or parameter description orders the model", () => {
   }
 });
 
+/**
+ * A clause that opens by telling the model what to do with an answer. The
+ * markers and phrases above let three through until 0.14.3: "Read the caveats
+ * it returns:" and "Read the flags:" in two descriptions, and "read the ELO
+ * beside each row" in a parameter. They are the form the directory review
+ * refused ("say which day it is from"), in other words; a review of 0.14.1
+ * found the first two on 2026-11-22, and a scan of every clause the third.
+ *
+ * Not in the list, on purpose: the verbs that say what a tool does, when it
+ * applies or what an argument takes ("Compare", "Filter by", "Use it for",
+ * "Give this OR hourlyRate, not both", "Leave out for the week's moves"). That
+ * is what a description and a parameter description are for.
+ */
+const ANSWER_ORDERS = [
+  "read", "check", "note", "remember", "tell", "say", "quote", "cite", "report", "state", "mention", "repeat",
+  "keep", "warn", "explain", "treat", "flag", "show", "look", "see", "consider", "assume", "trust", "verify",
+  "confirm", "make sure", "ensure", "do not", "don't", "never", "always", "avoid", "prefer",
+];
+
+test("no definition opens a clause by telling the model what to do with an answer", () => {
+  const opener = new RegExp(`^(?:${ANSWER_ORDERS.join("|")})\\b`, "i");
+  const hits: string[] = [];
+  for (const [kind, text] of definitionTexts()) {
+    // A clause opens the text, or follows a full stop, a colon or a semicolon.
+    for (const clause of text.split(/(?<=[.;:!?])\s+/)) {
+      if (opener.test(clause.trim())) hits.push(`${kind}: ${clause.trim().slice(0, 100)}`);
+    }
+  }
+  assert.deepEqual(hits, []);
+});
+
 test("no title or description links an optimnow.io address", () => {
   // The source a tool reads is named (OptimToken), as the Cloud FinOps
   // connector names it in get_live_figures; the address is carried by the
