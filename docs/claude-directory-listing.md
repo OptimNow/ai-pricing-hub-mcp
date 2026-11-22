@@ -362,6 +362,8 @@ The order of a pass, as the Cloud FinOps connector runs it
    **Has an MCP App** (it must stay unticked; on the Cloud FinOps listing it
    was found ticked again on 2026-11-11), and under **Tools & prompts** choose
    this account's connector, so that a fresh capture is attached. Save once.
+   (On 2026-11-22 there was no connector to choose any more, and a Save with
+   no field changed attached nothing: see the pass of that day, below.)
 4. Check that the Tools tab shows the new date.
 5. Email `mcp-review@anthropic.com` what changed on the server since the
    previous capture, release by release. The owner sends it.
@@ -379,19 +381,68 @@ with an answer, in three tools. One pass after 0.14.3 covers all of them: it
 was held back until then on purpose, so that the capture the reviewers read
 holds no such clause.
 
-### Draft of the email to mcp-review@anthropic.com, after 0.14.3
+### The pass of 2026-11-22, and what the portal did with it
 
-To be sent by the owner, from the address the listing's correspondence uses,
-once the pass above is saved. Subject: "AI Economics (optimnow-ai-economics):
-server changes since the November 19 capture".
+Made the evening 0.14.3 was deployed (production checked first: version,
+`check-connector` all pass, the tool definitions equal to
+`scripts/tools-fingerprint.json`). The portal had changed again since the
+Cloud FinOps pass of 2026-11-11, and **the capture was not refreshed**.
+
+- Step 2 worked as written: Refresh tools list answered "Tools list refreshed".
+- The full editor has no connector to choose any more. On opening, the page
+  itself reads the live server through the account's connector, and
+  "Tools & prompts" offers one button, **Sync from server**: "Replaces the tool
+  names below with your server's current list (8 tools) and refreshes the
+  annotation summary reviewers see". It sends nothing: it copies what the page
+  already read into the form.
+- "Has an MCP App" was unticked and the authentication was None, as left on
+  2026-11-19.
+- **Save, with no field changed, submits nothing.** The page said "Changes
+  saved." and the listing "updated just now". But the Review tab read "Nothing
+  to do. The listing is live and no edits are waiting", with no pending
+  change, and the Tools tab still read "its own tool list dated November 19,
+  2026". The record behind the page says the same: its stored snapshot is
+  still the one captured on 2026-11-19, of server 0.11.1 (no `idempotentHint`,
+  input schemas that accept undeclared arguments, the three clauses 0.14.3
+  reworded, two descriptions that link optimnow.io). The eight names and the
+  annotation summary had not changed, so the form held no difference to send.
+- The Edit tab's section editor for Tools holds the names only.
+
+So on this portal a fresh capture travels with an edit that goes to review,
+as it did for Cloud FinOps on 2026-11-11 (a new one-liner and description went
+with it), or is refreshed by the directory team. No field of this listing
+needed a change, and the owner chose not to make one for the purpose: the
+email below asks for the capture to be refreshed. Until it is, a reviewer who
+opens the listing reads the definitions of 0.11.1.
+
+For the next pass: if the listing itself has an edit to make (a count in the
+description, the empty "Permissions summary"), make it in the full editor in
+the same Save, then read the Tools tab for the new date; if it has none, the
+email is the pass.
+
+### The email to mcp-review@anthropic.com, after the pass of 2026-11-22
+
+To be sent by the owner, from the address the listing's correspondence uses.
+Subject: "AI Economics (optimnow-ai-economics): server changes since the
+November 19 capture, and a capture to refresh".
 
 ```text
 Hello,
 
 AI Economics (claude.ai/directory/optimnow-ai-economics, server
 https://optimtoken-mcp.optimnow.io/mcp) was approved on November 19, 2026, on
-the tool list of version 0.11.1. I have refreshed the capture in the portal.
-The server changes since then, release by release:
+the tool list of version 0.11.1. The server now serves 0.14.3, and I am
+writing to report what changed, as the directory policy asks.
+
+One request first. The portal still holds the tool list it captured on
+November 19: the Tools tab reads "tool list dated November 19, 2026". On
+November 22 I refreshed the tools list of my account's connector, opened the
+full editor, used "Sync from server" and saved. No field of the listing had
+changed, so nothing went to review and the capture kept its date. Could you
+refresh the capture from the live server, or tell me how to do it from the
+portal?
+
+The server changes since that capture, release by release:
 
 - 0.11.2 and 0.11.3: tool descriptions reworded (an instance name in the
   break-even examples; requests for alternatives pointed to recommend-llm-model,
