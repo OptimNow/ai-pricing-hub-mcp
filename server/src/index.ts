@@ -967,6 +967,11 @@ function errorMessage(error: unknown): string {
  *  on a long-lived instance: it is declared once here and registered on each. */
 const tools: ((server: McpServer) => void)[] = [];
 
+/** A Zod schema, as opposed to a raw shape of them (`{ name: z.string() }`). */
+function isZodSchema(value: unknown): boolean {
+  return typeof (value as { safeParse?: unknown } | null)?.safeParse === "function";
+}
+
 /** Declare a tool. Same parameters as `McpServer.registerTool`, so the handler's
  *  arguments are inferred from `inputSchema` exactly as they would be there. */
 function tool<
@@ -989,13 +994,24 @@ function tool<
   // portal reads it from the annotations (where 2025-03-26 put it) and flagged
   // all eight tools "Missing title annotation" on 2026-11-19. The spec keeps
   // both fields, so carrying the one title in both costs nothing.
-  const annotations: ToolAnnotations = { title: config.title, ...config.annotations };
+  // Every tool only reads, so calling it twice changes nothing: idempotent, as
+  // the Cloud FinOps connector declares its own. A tool may still say otherwise.
+  const annotations: ToolAnnotations = { title: config.title, idempotentHint: true, ...config.annotations };
+  // An argument this tool does not declare is refused, not dropped (0.14.0).
+  // The SDK's default object strips unknown keys before the handler runs, so a
+  // call that named `model` where the tool takes `modelName` was answered as if
+  // no model had been named: estimate-llm-cost costed the first eight catalogue
+  // entries, with no error (seen on 2026-11-22). Refused, the call comes back
+  // as an error that names the key, and the model can retry.
+  const inputSchema = (config.inputSchema !== undefined && !isZodSchema(config.inputSchema)
+    ? z.strictObject(config.inputSchema as ZodRawShapeCompat)
+    : config.inputSchema) as InputArgs;
   // Every successful answer closes with the source to name (lib/citation.ts):
   // one place, so a ninth tool gets it without anyone remembering.
   const handler = ((...args: unknown[]) =>
     Promise.resolve((cb as (...a: unknown[]) => unknown)(...args)).then(closeWithSource)) as unknown as ToolCallback<InputArgs>;
   tools.push(server => {
-    server.registerTool(name, { ...config, annotations }, handler);
+    server.registerTool(name, { ...config, inputSchema, annotations }, handler);
   });
 }
 
@@ -1017,7 +1033,7 @@ tool(
       "keeps the first rows of that order. " +
       "For a single PICK under a budget use recommend-llm-model; to weigh 2-4 NAMED models against " +
       "each other use compare-models-side-by-side. " +
-      "Prices come from optimtoken.optimnow.io where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
+      "Prices come from OptimToken where reachable; the response's `provenance` says which tier served them and whether they are vendor-verified. Filter by provider, price tier (category), openness, " +
       "capability, price range, or minimum ELO score. Optionally enrich with business metrics for a use case. " +
       "Price tier and openness are independent: a model can be Frontier-priced and open-weight at once. " +
       "Reports both list-price cost and the optimized cost achievable with prompt caching and the batch API. " +
@@ -2597,7 +2613,7 @@ tool(
               : "") +
             (incomplete ? ` ${incomplete}` : "");
         } else if (providers.length > 1) {
-          fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: say which with provider.`;
+          fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: the provider argument picks one.`;
         } else {
           instance = matches[0];
           rates = rateOptions(instance, computeProvenance.priceTypes);
@@ -2881,7 +2897,7 @@ tool(
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     description:
       "What moved. Every other tool here quotes today's price; this one says whether it has just changed, " +
-      "from the price archive optimtoken.optimnow.io keeps (its first day is `provenance.trackingStart`). " +
+      "from the price archive OptimToken keeps (its first day is `provenance.trackingStart`). " +
       "Without `models` it returns the moves of the last 7 days across the catalogue: each model whose " +
       "quoted price moved by 1% or more, with the price before and after and what the move does to a " +
       "workload's monthly bill. With `models` (1-4 names) it returns each model's quoted price since " +

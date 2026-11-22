@@ -84,6 +84,8 @@ const atLeast = (version, floor) => {
   return true;
 };
 const expectSourceLine = atLeast(expectedVersion, "0.12.1");
+/** Since 0.14.0 every tool declares idempotentHint and refuses undeclared arguments. */
+const expectStrictInputs = atLeast(expectedVersion, "0.14.0");
 /** How a tool says the site could not be read: an outage, not a defect here. */
 const SITE_UNREADABLE = /could not be read|could not be reached|did not answer|answered HTTP \d+/i;
 
@@ -168,6 +170,8 @@ async function runChecks() {
       // from the top-level field, and flags a tool without it.
       tool.annotations?.title === tool.title ? "" : `annotations.title is ${JSON.stringify(tool.annotations?.title)}`,
       tool.annotations?.readOnlyHint === true ? "" : "readOnlyHint is not true",
+      !expectStrictInputs || tool.annotations?.idempotentHint === true ? "" : "idempotentHint is not true",
+      !expectStrictInputs || tool.inputSchema?.additionalProperties === false ? "" : "inputSchema accepts undeclared arguments",
       tool.outputSchema?.$schema === JSON_SCHEMA_2020_12 ? "" : `outputSchema dialect ${tool.outputSchema?.$schema}`,
       tool._meta && Object.keys(tool._meta).length > 0 ? `carries _meta ${JSON.stringify(tool._meta)}` : "",
       tool.name.length <= 64 ? "" : "name over 64 characters",
