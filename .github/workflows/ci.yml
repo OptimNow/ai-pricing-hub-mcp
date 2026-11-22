@@ -7,13 +7,22 @@ on:
   # Lets a deploy be re-run by hand from the Actions tab.
   workflow_dispatch:
 
+# Every action is pinned to a commit, with its release beside it, as in the
+# Cloud FinOps connector's workflows: a tag can be moved to other code, a
+# commit cannot. The deploy job hands these steps the Fly.io deploy token's
+# environment. To upgrade, read the action's release notes and change the
+# commit and the comment together.
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # Matches the engines field in package.json.
           node-version: "24"
@@ -52,17 +61,27 @@ jobs:
       github.ref == 'refs/heads/master' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    # A rollout that hangs would otherwise hold the deploy lock for six hours.
+    timeout-minutes: 30
     # One deploy at a time, and never cancel one halfway through a rollout.
+    # deploy-tag.yml takes the same group.
     concurrency:
       group: fly-deploy
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history, so the next step can diff against the live commit.
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: superfly/flyctl-actions/setup-flyctl@1.6
+      # flyctl pinned too: without `version` the action installs whatever was
+      # released that morning, on the run that holds the deploy token. 0.5.14
+      # is the version that deployed 0.12.1 on 2026-11-21. deploy-tag.yml pins
+      # the same one: change both together.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        with:
+          version: 0.5.14
 
       # Skips the rollout when only documentation changed since the commit that
       # is live. Every deploy labels its image with the commit SHA (below), and
@@ -107,36 +126,63 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      # A deploy that exits 0 has not necessarily put this commit live. Ask the
-      # server which version it runs and compare it with the one this commit
-      # declares. The first call can also pay a machine start (scale-to-zero),
-      # hence the retries. It also runs when the deploy was skipped: the
-      # version lives in files the skip never covers, so it must still match.
-      - name: Check the live server runs this commit's version
+      # A deploy that exits 0 has not necessarily put this commit live, and the
+      # version cannot tell: most merges do not change it, so the version check
+      # below passes as well on the previous image. Every deploy labels its
+      # image with its commit; every machine must now report this one.
+      - name: Check every machine runs this commit's image
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          expected=$(grep -oP '^\s*version: "\K[^"]+' server/src/index.ts)
-          for attempt in 1 2 3 4 5 6; do
-            actual=$(curl -sS -m 30 -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json, text/event-stream' \
-              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-check","version":"0"}}}' \
-              | grep -oP '"serverInfo":\{"name":"[^"]*","version":"\K[^"]+' || true)
-            echo "attempt $attempt: live=${actual:-none} expected=$expected"
-            [ "$actual" = "$expected" ] && exit 0
-            sleep 10
-          done
-          echo "::error::Live server reports '${actual:-no answer}', expected '$expected'"
-          exit 1
+          set -euo pipefail
+          tags=$(flyctl machine list --app ai-pricing-hub-mcp --json | jq -r '[.[].image_ref.tag] | unique | join(" ")')
+          echo "Machines run: ${tags:-nothing readable}; this commit: $GITHUB_SHA"
+          if [ "$tags" != "$GITHUB_SHA" ]; then
+            echo "::error title=Not this commit's image::The machines run '${tags:-nothing readable}', not $GITHUB_SHA."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      # Then call it, as a user's client would: the version this commit
+      # declares, the eight tools and their schemas, one answer from each tool
+      # with its source line, eight calls at once, /healthz
+      # (scripts/check-connector.mjs, which says what each check holds). The
+      # first call can pay a machine start (scale-to-zero), hence the attempts.
+      # It also runs when the deploy was skipped: the version lives in files the
+      # skip never covers, so it must still match.
+      #
+      # The registry publish and the GitHub release wait for this step. Exit 2
+      # means the server passed and optimtoken.optimnow.io could not be read
+      # (answers from the snapshot): a warning, not a reason to hold a release
+      # that is live and correct. The daily production-check.yml keeps asking.
+      - name: Check the live connector
+        run: |
+          set +e
+          node scripts/check-connector.mjs https://ai-pricing-hub-mcp.fly.dev/mcp \
+            --attempts 6 --delay 10 --output "$RUNNER_TEMP/connector-check.md"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/connector-check.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          case "$code" in
+            0) ;;
+            2) echo "::warning title=Site not read::The connector passed; optimtoken.optimnow.io could not be read during the check." ;;
+            *) exit 1 ;;
+          esac
 
   # Publishes server.json to the MCP registry once `deploy` has put this commit
-  # live and checked the version it announces. The job is publish-registry.yml,
+  # live and checked what it serves. The job is publish-registry.yml,
   # which can also be started by hand; its head says what it refuses and why.
   # On most pushes it publishes nothing, because the registry already holds the
   # version. The push that changes the version in server.json publishes it,
   # and a published version can never be edited.
   #
   # Skipped whenever `deploy` is skipped or fails: a pull request, a fork, a
-  # rollout that failed, a live server that announces another version.
+  # rollout that failed, machines on another image, a live server that
+  # announces another version or answers a tool wrongly.
   #
   # `id-token: write` is granted to this job alone. It is the credential the
   # registry accepts as this repository's, and `check` runs `npm ci` and the
@@ -187,7 +233,7 @@ jobs:
     permissions:
       contents: write # creates the tag and the release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 

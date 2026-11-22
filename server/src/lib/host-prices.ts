@@ -16,6 +16,8 @@
  * this server's own.
  */
 
+import { isSiteLabel } from "./site-text.js";
+
 // ── Ported from the site ─────────────────────────────────────────────
 
 /** One host's entry price for a model, per 1M tokens. */
@@ -176,12 +178,14 @@ const finite = (v: unknown): v is number => typeof v === "number" && Number.isFi
 export function coerceHostOffer(value: unknown): HostOffer | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const o = value as Record<string, unknown>;
-  if (typeof o.host !== "string" || !o.host) return undefined;
+  // A host name is written by whoever lists on OpenRouter: one that is not a
+  // label is no offer (lib/site-text.ts).
+  if (!isSiteLabel(o.host)) return undefined;
   if (!finite(o.input) || !finite(o.output) || o.input < 0 || o.output < 0) return undefined;
   // Optional parts are set only when present, so an offer carries no
   // `undefined` keys: it is compared and serialised as upstream sent it.
   const offer: HostOffer = { host: o.host, input: o.input, output: o.output };
-  if (typeof o.quantization === "string" && o.quantization) offer.quantization = o.quantization;
+  if (isSiteLabel(o.quantization)) offer.quantization = o.quantization;
   if (finite(o.discount) && o.discount > 0 && o.discount < 1) offer.discount = o.discount;
   return offer;
 }

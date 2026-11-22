@@ -1,0 +1,125 @@
+# Calls the published connector every morning, as a user's client would, and
+# opens an issue when it answers wrongly.
+#
+# WHY. The connector was checked when it was deployed and not again until the
+# next deploy. Between two merges, nothing noticed a server that had stopped
+# answering a tool, a machine that no longer started, or a version that was not
+# master's because a deploy had failed. The Cloud FinOps connector runs its
+# weekly checks this way (OptimNow/cloud-finops-skills, price-drift.yml and
+# companion-tools.yml); this is the same pattern, daily, because this server
+# reads a live site.
+#
+# WHAT IT RUNS. scripts/check-connector.mjs against the URL server.json
+# publishes, expecting the version master declares: initialize, the eight tools
+# and their schemas, one answer from each tool with its source line, eight calls
+# at once, /healthz. The script's head says what each check holds.
+#
+# WHAT IT DOES WITH THE RESULT, by the script's exit code:
+#   0  all passed. An open issue this workflow opened is closed.
+#   1  the server is wrong. One issue labelled `connector-check` is opened or
+#      updated with the report, and the run fails, so it shows red.
+#   2  the server passed and optimtoken.optimnow.io could not be read (answers
+#      from the snapshot, the price archive unreadable). A warning and a green
+#      run, and the issue is left as it is: an outage of the site is not a
+#      defect of this connector, and a red run for one teaches everyone to
+#      ignore this job. The site has its own monitoring.
+#
+# It never deploys, edits or re-runs anything. No secret: the connector is
+# public and takes no credential.
+
+name: Production check
+
+on:
+  schedule:
+    # 06:15 UTC every day: 07:15 in Paris in winter, 08:15 in summer.
+    - cron: "15 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    if: github.repository == 'OptimNow/ai-pricing-hub-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      # The published URL, with attempts: the machine scales to zero overnight,
+      # so the first call pays its start.
+      - name: Check the published connector
+        id: check
+        run: |
+          set +e
+          node scripts/check-connector.mjs --attempts 3 --delay 15 --output connector-check.md
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f connector-check.md ]; then
+            cat connector-check.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "check-connector wrote no report (exit $code)" > connector-check.md
+          fi
+          echo "check-connector exited $code"
+
+      - name: Open or update the connector-check issue
+        if: steps.check.outputs.exit_code != '0' && steps.check.outputs.exit_code != '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXIT_CODE: ${{ steps.check.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create connector-check --force --color B60205 \
+            --description "The published connector answered the daily check wrongly"
+          today="$(date -u +%Y-%m-%d)"
+          title="Connector check failed - $today"
+          {
+            echo "The daily call of the published connector found the server itself wrong ([run]($RUN_URL), exit code $EXIT_CODE)."
+            echo
+            echo "Nothing has been changed. If the version differs from master's, the last deploy did not go through: read the deploy job of the last CI run on master, and re-run it from Actions -> CI -> Run workflow. If a release misbehaves, deploy the previous tag with Actions -> Deploy a release tag. This issue closes on the next run that passes."
+            echo
+            cat connector-check.md
+          } > issue-body.md
+          existing="$(gh issue list --label connector-check --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file issue-body.md
+            echo "Updated issue #$existing"
+          else
+            gh issue create --title "$title" --label connector-check --body-file issue-body.md
+          fi
+
+      - name: Close the issue once the connector passes
+        if: steps.check.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --label connector-check --state open --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "The published connector passes again ([run]($RUN_URL))."
+            echo "Closed issue #$existing"
+          else
+            echo "No open connector-check issue."
+          fi
+
+      - name: Warn when the site could not be read
+        if: steps.check.outputs.exit_code == '2'
+        run: echo "::warning::The connector passed, and optimtoken.optimnow.io could not be read during the check. See the run summary."
+
+      - name: Fail the run when the connector is wrong
+        if: steps.check.outputs.exit_code != '0' && steps.check.outputs.exit_code != '2'
+        run: |
+          echo "::error::check-connector exited ${{ steps.check.outputs.exit_code }}; see the connector-check issue"
+          exit 1

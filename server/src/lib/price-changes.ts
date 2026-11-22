@@ -27,6 +27,7 @@
  */
 import { UpstreamFetchError, fetchOptimtokenJson, optimtokenUrl } from "./optimtoken-api.js";
 import { noteSiteSchema } from "./site-schema.js";
+import { siteLabel } from "./site-text.js";
 
 /** The archive is a file the site serves from the edge: a slow answer is a
  *  fault, and nothing else in the response waits on it. */
@@ -112,7 +113,8 @@ export interface PriceHistory {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-const text = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+/** A name from the archive reaches the answer: a label, or left out (lib/site-text.ts). */
+const text = (v: unknown): string | undefined => siteLabel(v);
 const day = (v: unknown): string | undefined => (typeof v === "string" && ISO_DATE.test(v) ? v : undefined);
 const record = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;

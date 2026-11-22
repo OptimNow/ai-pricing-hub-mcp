@@ -22,6 +22,7 @@ import { UpstreamFetchError, fetchOptimtokenJson, optimtokenUrl } from "./optimt
 import { coerceHostOffer } from "./host-prices.js";
 import type { HostOffer } from "./host-prices.js";
 import { noteSiteSchema } from "./site-schema.js";
+import { siteLabel } from "./site-text.js";
 
 /** The site answers 400 beyond this many ids. */
 export const MAX_MODEL_HOST_IDS = 4;
@@ -71,8 +72,9 @@ export interface ModelHostsResult {
   meta: ModelHostsMeta;
 }
 
-const text = (value: unknown): string | undefined =>
-  typeof value === "string" && value.trim() ? value.trim() : undefined;
+/** Every string this endpoint sends reaches the answer, so each is a label or
+ *  is left out (lib/site-text.ts). */
+const text = (value: unknown): string | undefined => siteLabel(value);
 
 const textList = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;

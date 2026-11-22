@@ -3,7 +3,7 @@ import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
+import { closeModelNames, fetchLLMModels, filterModels, hostPricingKey, matchModels, resolveModel } from "./lib/llm-models.js";
 import {
   blendPair,
   buildsOf,
@@ -105,6 +105,7 @@ import {
 import type { PriceChangesWindow, PriceMove } from "./lib/price-changes.js";
 import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./lib/model-hosts.js";
 import { SERVER_INSTRUCTIONS } from "./lib/server-instructions.js";
+import { SERVER_VERSION } from "./lib/version.js";
 import { closeWithSource } from "./lib/citation.js";
 import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
@@ -917,7 +918,8 @@ function resolveNames(
   for (const query of requested) {
     const r = resolveModel(allModels, query);
     if (!r.matched) {
-      resolution.push({ query, status: "not-found", alternatives: [], totalMatches: 0 });
+      // `alternatives` on a miss: the closest names, none of them used.
+      resolution.push({ query, status: "not-found", alternatives: r.alternatives, totalMatches: 0 });
       continue;
     }
     const resolved = `${r.matched.provider} ${r.matched.model}`;
@@ -937,7 +939,9 @@ function resolveNames(
  *  tool's answer (a "column", an "entry"), so a miss can say it earned none. */
 function describeResolution(r: ResolutionEntry, slot: string): string {
   switch (r.status) {
-    case "not-found": return `"${r.query}" matched no model — no ${slot} for it.`;
+    case "not-found":
+      return `"${r.query}" matched no model — no ${slot} for it.` +
+        (r.alternatives.length > 0 ? ` Close names in the catalogue: ${r.alternatives.join(", ")}.` : "");
     case "duplicate": return `"${r.query}" resolved to ${r.resolved}, already selected by an earlier name — no extra ${slot}.`;
     case "ambiguous": {
       const undisclosed = r.totalMatches - 1 - r.alternatives.length;
@@ -1232,6 +1236,10 @@ tool(
       if (modelName) {
         targetModels = matchModels(allModels, modelName, 5);
         if (targetModels.length === 0) {
+          const close = closeModelNames(allModels, modelName);
+          const message =
+            `No models found matching "${modelName}".` +
+            (close.length > 0 ? ` Close names in the catalogue: ${close.join(", ")}.` : "");
           return {
             structuredContent: {
               ...emptyOutput,
@@ -1239,9 +1247,9 @@ tool(
               eloAsOf,
               dataAsOf,
               provenance,
-              error: `No models found matching "${modelName}".`,
+              error: message,
             },
-            content: [{ type: "text", text: `No models found matching "${modelName}".` }],
+            content: [{ type: "text", text: message }],
             isError: true,
           };
         }
@@ -3355,7 +3363,7 @@ function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "ai-pricing-hub",
-      version: "0.12.1",
+      version: SERVER_VERSION,
     },
     // Said once per connection: what the server is for and how to repeat its
     // figures. The tools' own texts carry the same rules, answer by answer.

@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 /**
  * The server's version is written in four places: package.json, its lockfile,
  * server.json (what the MCP registry lists) and the version the server announces
- * to a client when it connects (index.ts). Nothing at runtime compares them, so
- * a bump that misses one ships a registry entry and a server that disagree.
+ * to a client when it connects and sends the site as its User-Agent
+ * (lib/version.ts). Nothing at runtime compares them, so a bump that misses one
+ * ships a registry entry and a server that disagree.
  */
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
@@ -15,7 +16,9 @@ test("every place that states the version states the same one", () => {
   const pkg = JSON.parse(read("../../package.json")).version;
   const lock = JSON.parse(read("../../package-lock.json"));
   const registry = JSON.parse(read("../../server.json")).version;
-  const announced = /\bversion: "([^"]+)"/.exec(read("./index.ts"))?.[1];
+  const announced = /\bSERVER_VERSION = "([^"]+)"/.exec(read("./lib/version.ts"))?.[1];
+  // index.ts announces that constant, not a copy of it.
+  assert.match(read("./index.ts"), /\bversion: SERVER_VERSION,/);
 
   assert.match(pkg, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(

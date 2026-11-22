@@ -50,6 +50,7 @@ import {
   OPTIMTOKEN_BASE_URL,
 } from "./optimtoken-api.js";
 import { noteSiteSchema } from "./site-schema.js";
+import { isSiteLabel } from "./site-text.js";
 
 /** Regions the site's `?region=` parameter accepts. */
 export const PRICING_REGIONS = ["us-east", "us-west", "europe", "asia-pacific"] as const;
@@ -378,7 +379,7 @@ function coerceSiteInstance(row: unknown): ComputeInstance | null {
   const i = row as Record<string, unknown>;
 
   if (typeof i.provider !== "string" || !KNOWN_PROVIDERS.has(i.provider)) return null;
-  if (typeof i.instanceType !== "string" || !i.instanceType) return null;
+  if (!isSiteLabel(i.instanceType)) return null;
   if (typeof i.vCPUs !== "number" || !Number.isFinite(i.vCPUs)) return null;
   if (typeof i.memory !== "number" || !Number.isFinite(i.memory)) return null;
 

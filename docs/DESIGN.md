@@ -267,6 +267,39 @@ instance" is then chosen without it. Four things hold it now, all in
   refresh: every call past the TTL used to start one). Past the 12-hour stale
   window the cold path takes what the site has, and says it is incomplete.
 
+### What this server takes from the site (0.13.0)
+
+Taken from the Cloud FinOps connector's `get_live_figures`, which checks the
+file it fetches before relaying it (`live_figures.py` in
+`OptimNow/cloud-finops-skills`). Four rules, all in `lib/optimtoken-api.ts` and
+`lib/site-text.ts`:
+
+- **A free-text value is a label or it is refused.** Model and provider names,
+  host names, replacement names and instance types reach the site from
+  OpenRouter and the cloud price lists, so from whoever lists a model or a host
+  there, and from here they land in a model's context. `siteLabel()` and
+  `isSiteLabel()` accept one printable line of at most 200 characters, with no
+  angle bracket and no link; control characters, invisible format characters
+  (zero-width spaces, direction overrides, tag characters) and line breaks are
+  refused. A row whose name fails is dropped by its parser, an optional value is
+  left out, and the refusal is logged once. It checks shape, not truth. Measured
+  on 2026-11-22 against every value it applies to (316 models, 948 host offers,
+  6,782 instances in four regions, 31 price moves): the longest was 48
+  characters and none was refused. `site-text.test.ts` also holds the static
+  snapshot to the rule, and `refresh-fallback.yml` runs the tests before it
+  pushes a new snapshot, so a refused value cannot reach the fallback either.
+- **A redirect is followed only on the site's own origin**, three at most.
+  The listing says the server calls `optimtoken.optimnow.io` and nothing else;
+  a redirect elsewhere is a failed read (`kind: "redirect"`), not a request to
+  another host.
+- **A body over 16 MiB is refused before it is parsed** (`kind: "too-large"`),
+  from its `content-length` or as it streams. The largest endpoint sent 439 KB
+  that day. A cut body is never parsed.
+- **Every request names the server**: `User-Agent: ai-pricing-hub-mcp/<version>
+  (+https://github.com/OptimNow/ai-pricing-hub-mcp)`. Node's fetch sent "node",
+  which the site's logs could not tell from any other script, so MCP traffic
+  had no number. The version comes from `lib/version.ts`.
+
 ### Project Structure
 
 ```
@@ -277,7 +310,9 @@ ai-pricing-hub-mcp/
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
-│       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch/timeout discipline
+│       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch: timeout, redirects, size cap, User-Agent
+│       │   ├── site-text.ts          # The label rule every free-text value from the site passes
+│       │   ├── version.ts            # SERVER_VERSION: announced to clients, sent to the site
 │       │   ├── public-url.ts         # PUBLIC_MCP_URL, the one published URL
 │       │   ├── compute-pricing.ts    # /api/pricing fetch, region, per-column provenance
 │       │   ├── compute-rates.ts      # A compute row's rates as text, and what each saves on on-demand
@@ -307,9 +342,12 @@ ai-pricing-hub-mcp/
 │   ├── refresh-llm-fallback.mjs      # Re-snapshots the static model list
 │   ├── refresh-compute-fallback.mjs  # Re-reads the figures of the 137 static compute rows
 │   ├── check-site-parity.mjs         # Manual: run this server's logic and the site's over the live catalogue
-│   ├── check-connector.mjs           # Manual: call a deployed connector: tools, tier, eight calls at once
+│   ├── check-connector.mjs           # Call a deployed connector: version, tools, each tool once, eight calls at once (CI, daily, by hand)
 │   └── check-serialisation-precision.mjs  # Manual: walk a live server for float noise
-├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly
+├── .github/workflows/ci.yml          # typecheck + test + build on every PR; deploys master to Fly and checks it
+├── .github/workflows/publish-registry.yml  # After a deploy: the version to the MCP registry, once
+├── .github/workflows/deploy-tag.yml  # By hand: deploy an earlier release tag, or only check one
+├── .github/workflows/production-check.yml  # Daily: call the published connector, issue on a defect
 ├── .github/workflows/refresh-fallback.yml  # Mondays: re-snapshots both fallbacks, tests them, pushes to master
 ├── Dockerfile                        # Image for Fly.io (two-stage build)
 ├── fly.toml                          # Fly.io app config (cdg, scale-to-zero)
@@ -341,7 +379,8 @@ npm run start      # node dist/server/src/index.js (serves /mcp on $PORT, defaul
 ```
 
 `.github/workflows/ci.yml` runs typecheck, test and build on every PR, and on
-every push to `master` deploys to Fly.io once those pass (see below).
+every push to `master` deploys to Fly.io once those pass, then checks what the
+live server serves (see Deployment).
 
 The port comes from `PORT` (Fly sets 8080), default 3000. `npm run build`
 deletes `dist/` first, so a stale file from an earlier build cannot be started
@@ -405,13 +444,28 @@ closing source line, and a sentence in the side-by-side result itself that
 sends "better or cheaper" to `recommend-llm-model`. Through the harness, the
 same three probes went from 2 of 9 to 9 of 9 with the text half alone and no
 instructions, and stayed 8 of 8 on the JSON half.
+
+Third cycle, manual, on claude.ai with production 0.12.1 the same day: the two
+failed probes passed 4 of 4. The French break-even named OptimToken with the
+date both times, and the demo question called `recommend-llm-model` after the
+side-by-side both times.
+
+Three things the Cloud FinOps battery learned on claude.ai, and which hold for
+a manual pass here (its `docs/DESIGN.md`, "Skills inject, MCP tools decide"):
+claude.ai's memory can recall an earlier chat into a probe, so a fresh chat is
+not a clean room; a connector switched off for a test is off for the whole
+account until it is switched back; and the host's answer to its tool search
+(the "Searched available tools" step of a chat) says which tools it offered and
+whether any sat behind an opt-in, which is the first thing to read when a probe
+calls no tool.
 The cycle log is in the battery's README.
 
 ### Deployment
 
 ```bash
 fly deploy    # by hand, from the repo root; master normally deploys itself
-              # (`npm run deploy` runs the same)
+              # (`npm run deploy` runs the same). To go back to a release,
+              # use deploy-tag.yml instead: it checks what it deployed.
 ```
 
 The connector URL is **`https://optimtoken-mcp.optimnow.io/mcp`**. That is the
@@ -426,11 +480,35 @@ Locally, `npm run start` serves the same `/mcp` path.
 
 **Releases deploy themselves.** The `deploy` job in `ci.yml` runs
 `flyctl deploy --remote-only` on every push to `master`, after the `check` job
-has passed, then asks the live server for its `serverInfo.version` and fails
-unless it matches the `version` in `server/src/index.ts`. It needs the
-`FLY_API_TOKEN` repository secret (`fly tokens create deploy --app
-ai-pricing-hub-mcp`). It was added because the manual step was forgotten: see
-the 0.3.0 deploy below.
+has passed. It needs the `FLY_API_TOKEN` repository secret (`fly tokens create
+deploy --app ai-pricing-hub-mcp`). It was added because the manual step was
+forgotten: see the 0.3.0 deploy below.
+
+**A deploy is checked on what it serves (0.13.0).** Until 0.12.1 the job only
+compared `serverInfo.version` with the commit's. Most merges do not change the
+version, so that check passed as well on the previous image, and nothing
+looked at the tools. Since 0.13.0, as the Cloud FinOps connector's release
+chain does with `scripts/check-hosted-connector.py`:
+
+1. Every machine must report the image labelled with this commit
+   (`image_ref.tag`), when the deploy ran.
+2. `scripts/check-connector.mjs` then calls the fly.dev host as a client
+   would: the version this commit declares (`server.json`, held equal to
+   `lib/version.ts` by `version.test.ts`), the eight tools with their titles,
+   annotations and 2020-12 schemas, no resource, one answer from each tool
+   with `structuredContent` and its closing source line, eight calls at once,
+   `/healthz`. Six attempts, ten seconds apart: the first call pays a machine
+   start.
+3. Exit 1, the server is wrong: the job fails, and the registry publish and
+   the GitHub release, which wait for it, do not run. Exit 2, the server
+   passed and `optimtoken.optimnow.io` could not be read (answers from the
+   snapshot, the price archive unreadable): a warning. A release that is live
+   and correct is not held for the site's outage.
+
+flyctl is pinned (0.5.14, the version that deployed 0.12.1), and every action
+is pinned to a commit with its release in a comment: a tag can be moved to
+other code, a commit cannot, and these steps run beside the deploy token.
+`workflows.test.ts` holds the pins, the check and its exit codes.
 
 Dependabot merges do **not** trigger it. Auto-merge is queued with
 `GITHUB_TOKEN`, and GitHub starts no workflow from a push made with that token.
@@ -487,15 +565,44 @@ curl -s -X POST https://ai-pricing-hub-mcp.fly.dev/mcp \
   | grep -o '"serverInfo":{[^}]*}'
 ```
 
-**Verify by calling, not by reading.** `node scripts/check-connector.mjs` runs
-`initialize` and `tools/list` against the published URL (or a URL you pass),
-checks each tool's title, annotations and schema dialect, checks that no
-`ui://` resource is offered, calls `compare-llm-models` and checks
-`provenance.tier` is 1, sends eight tool calls at once and expects eight
-answers, and reads `/healthz`. Run it after every deploy and before touching
-the registry entry or the directory listing. Against 0.4.2 in production it
-fails on purpose: the widget resources are still listed, and the eight
-concurrent calls are not all answered.
+**Verify by calling, not by reading.** `node scripts/check-connector.mjs`
+checks the published URL (or a URL you pass) as listed above, and says which
+check failed. Options: `--expect-version` (default: `server.json`),
+`--attempts` and `--delay`, `--output` for a Markdown report. It runs in the
+`deploy` job, in `production-check.yml` and in `deploy-tag.yml`; run it by
+hand before touching the registry entry or the directory listing. Against
+0.4.2 in production it fails on purpose: the widget resources are still
+listed, and the eight concurrent calls are not all answered. For a tag before
+0.12.1, which closed no answer with a source line, it does not ask for one.
+
+#### Going back to an earlier release (0.13.0)
+
+Taken from the Cloud FinOps connector's `deploy-hosted.yml`. Actions →
+`Deploy a release tag` → Run workflow, or
+`gh workflow run deploy-tag.yml -f tag=v0.12.1`. It builds the tag's own
+Dockerfile and fly.toml on Fly's builder, labels the image with the tag's
+commit (so the next CI run diffs against what is really live), checks that
+every machine runs it, and runs `check-connector.mjs` against the version the
+tag declares. `-f verify_only=true` deploys nothing and only checks. It takes
+the same deploy lock as `ci.yml` and publishes nothing: the registry already
+lists that version, and a published one cannot be edited.
+
+**A rollback lasts until the next push to `master`**, which deploys `master`
+again. Use the time it buys to merge the fix or the revert. The tags exist for
+every version deployed since 0.11.0 (`github-release`).
+
+#### The daily production check (0.13.0)
+
+`production-check.yml` runs `check-connector.mjs` against the published URL
+every day at 06:15 UTC, expecting the version `master` declares. Exit 1 opens
+one issue labelled `connector-check`, or updates it, and fails the run; the
+next run that passes closes it. Exit 2 (the site not read) is a warning and a
+green run, and touches no issue: an outage of the site is not a defect here,
+and a red run for one teaches everyone to ignore the job. Before it, nothing
+called the connector between two merges: a server that had stopped answering
+a tool, or a failed deploy that left production behind `master`, waited for
+the next merge or for a user. It is the pattern of the Cloud FinOps
+connector's weekly `price-drift.yml` and `companion-tools.yml`.
 
 Three things about Fly that matter here:
 
@@ -548,13 +655,15 @@ releases had gone by without the manual step. The manifest was revised in
 publishing, deprecation warnings included.
 
 The version lives in four places — `package.json`, `package-lock.json`,
-`server.json`, and `version:` in `server/src/index.ts` — and `version.test.ts`
+`server.json`, and `SERVER_VERSION` in `server/src/lib/version.ts` (since
+0.13.0; before, `version:` in `server/src/index.ts`) — and `version.test.ts`
 fails if they disagree. Release order:
 
 1. Merge the bump. The `deploy` job in `ci.yml` deploys `master` and fails
-   unless the live server announces the version this commit declares, so green
-   means the new version is live. Publishing first would list a version the
-   endpoint does not serve yet.
+   unless the machines run this commit's image and the live server announces
+   the version this commit declares and answers every tool, so green means the
+   new version is live. Publishing first would list a version the endpoint
+   does not serve yet.
 2. Nothing to do: the `publish-registry` job follows `deploy` in the same run.
    It asks the registry whether it holds the version (the address of that one
    version: 200 or 404). Held: a notice, and it stops; that is every push that
@@ -639,7 +748,7 @@ Where a version shows, and what moves it:
 | The live server (`serverInfo.version`) | `deploy`, on every push to `master` that changes more than documentation |
 | The MCP registry | `publish-registry`, after `deploy`, when the registry does not hold the version |
 | GitHub releases | `github-release`, after `deploy`, when the version has no release |
-| The Claude directory listing | nothing in this repository: the portal reads the live server |
+| The Claude directory listing | nothing in this repository: a fresh tool capture in the portal, by hand, after a release that changes a tool (`docs/claude-directory-listing.md`, "Keeping the listing current") |
 
 Both jobs ask "is this version there" with a retried request. With `--retry`,
 curl 8.5 exits 23 at its first retry when the output is `/dev/null`, so the
@@ -847,6 +956,22 @@ the OpenRouter tier this server then had kept a name match ("-pro", "thinking",
 different set depending on which tier answered. That tier is gone since 0.11.0:
 the tag is the site's on every row this server serves.
 
+### The other direction: who reads this server
+
+Two OptimNow jobs read this connector from outside this repository, so a
+change here shows up there:
+
+- **cloud-finops-skills, `companion-tools.yml`, every Saturday**, compares the
+  tools its `INSTALLATION.md` lists for this connector (names, parameters and
+  which are optional) with this server's `tools/list`, and opens an issue
+  labelled `companion-tools` when they differ. Its `DEPENDENCIES.md` names the
+  pricing tool calls its references make. A pull request here that adds,
+  renames or removes a tool or a parameter means a docs pull request there;
+  without one, the issue opens the following Saturday.
+- **cloud-finops-skills, `scripts/check-family-jobs.py`, the Monday routine**,
+  reads this repository's scheduled runs, its open alarm issues and the version
+  this server announces.
+
 ---
 
 ## Data Flow
@@ -865,6 +990,29 @@ Note the ordering on the LLM path: `enrichModels()` runs over the **full**
 catalogue before `filterModels()`, because the efficiency score and the FinOps
 badge are percentile ranks. Filtering first would make the badge mean something
 different depending on which filters the caller happened to pass.
+
+### Model names, as typed (0.13.0)
+
+Every tool that takes a free-text model name goes through `matchModels()` and
+`resolveModel()` in `lib/llm-models.ts`. Until 0.12.1 they compared names as
+typed, and on 2026-11-22 production answered "matched no model" to `gpt 5.5`,
+`GPT5.5` and `Llama-3.3-70B`, with nothing else to go on: the model could only
+give up or guess. Two changes, neither in a tool's definition:
+
+- **One name, however it is typed.** `normaliseModelName()` lowers the case,
+  splits words where a letter meets a digit, and reads every separator but the
+  version dot as one space, on both sides of the comparison. Measured against
+  the snapshot: 2,987 queries (every name, provider, word, two-word run and
+  prefix), no match lost, 689 gained.
+- **A miss names what is close.** On `not-found`, `alternatives` carries up to
+  three catalogue names by Sørensen-Dice similarity (at least 0.6, against any
+  run of as many words in the name), and the text says "Close names in the
+  catalogue: …". None of them is used: `matched` stays empty and
+  `totalMatches` 0. `estimate-llm-cost` says the same in its error. The Cloud
+  FinOps connector answers a miss this way (up to three string-distance
+  matches), so the model can retry with an exact name. `compare-models-side-by-side`
+  and the others used to send `alternatives: []` on a miss; the field is
+  declared, so its schema is unchanged.
 
 ### Table order in `compare-llm-models` (0.6.0)
 
