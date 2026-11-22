@@ -14,6 +14,17 @@
  * It names no tool, so a new tool does not make it stale. A new label does:
  * add it here when a text starts printing it. server-instructions.test.ts
  * holds the labels quoted here to the ones the texts print.
+ *
+ * ONE ORDER, AND ONLY ONE (0.14.0). Everything here is a statement of what the
+ * answers carry, except the sentence that names the source. The Claude
+ * directory review asked the Cloud FinOps connector to drop every order to the
+ * model from its instructions, descriptions and payloads, and the same rule is
+ * held here by conformance.test.ts. The source sentence is the measured
+ * exception: in Claude Code, which reads these instructions, a descriptive
+ * wording ("Every price in them is OptimToken's") left the source out of 5 of
+ * 6 answers, and a citation label ("Citation for every price:") out of 2 of 6,
+ * where the order named it in 6 of 6 (probe cycle c4, 2026-11-22). The
+ * break-even sentence lost its order in the same cycle and kept its effect.
  */
 export const SERVER_INSTRUCTIONS = [
   "OptimToken answers FinOps questions about AI spend from dated, sourced prices: what a workload costs " +
@@ -21,13 +32,14 @@ export const SERVER_INSTRUCTIONS = [
     "costs across providers, when renting capacity beats paying an API, and which prices just moved. " +
     "It is read-only and needs no account.",
   "",
-  "When you report its answers:",
+  "Name the source in every answer that gives a price: OptimToken (optimtoken.optimnow.io), with the " +
+    "date `provenance` gives. `upstreamSource` there is the feed OptimToken corrects, not a source to cite.",
+  "",
+  "What its answers carry:",
   "- Each answer comes as text and as `structuredContent` with the same facts; your host may show you " +
     "either. The JSON holds more rows than the text prints in places.",
-  "- Name the source in every answer that gives a price: OptimToken (optimtoken.optimnow.io), with the " +
-    "date `provenance` gives. `upstreamSource` there is the feed OptimToken corrects, not a source to cite. " +
-    "When an answer says it was served from a fallback, say so: those prices are older and carry fewer labels.",
-  "- Keep each label with the figure it qualifies: [promotional price], [outlier listing], a retirement " +
+  "- An answer served from a fallback says so: those prices are older and carry fewer labels.",
+  "- A label qualifies the figure it sits beside: [promotional price], [outlier listing], a retirement " +
     "notice, `static` on a compute rate, [quoted host changed] on a price move. The answer explains each " +
     "label it prints.",
   "- An optimized cost counts a batch or cache discount only where the answer says it applies. It is not " +
@@ -36,9 +48,9 @@ export const SERVER_INSTRUCTIONS = [
     "history is not thereby unsold, safe or unchanged, and an instance missing from a compute catalogue " +
     "the answer calls incomplete is not thereby unavailable. A failed read is an error, not an empty result.",
   "- A price move with no label is not established as a repricing by the model's maker.",
-  "- The break-even between an API and rented capacity assumes no throughput and no operations cost. Do " +
-    "not supply one for the user: give the throughput each break-even requires, or ask for a measured one.",
-  "- A figure you derive from these answers is your own arithmetic. Say so.",
+  "- The break-even between an API and rented capacity assumes no throughput and no operations cost: each " +
+    "break-even states the throughput it requires, and a measured throughput can be passed in.",
+  "- A figure derived from these answers is not one of OptimToken's: it is the arithmetic of whoever derived it.",
 ].join("\n");
 
 /**

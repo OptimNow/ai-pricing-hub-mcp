@@ -53,7 +53,7 @@ test("every tool's handler goes through it, and the output schemas are untouched
   const index = readFileSync(fileURLToPath(new URL("../index.ts", import.meta.url)), "utf8");
   // In tool(), the one place every registration passes through.
   assert.match(index, /\.then\(closeWithSource\)/);
-  assert.match(index, /server\.registerTool\(name, \{ \.\.\.config, annotations \}, handler\)/);
+  assert.match(index, /server\.registerTool\(name, \{ \.\.\.config, inputSchema, annotations \}, handler\)/);
   // No `citation` field: a schema change makes claude.ai ask every user who
   // chose "Always allow" to approve each changed tool again.
   assert.doesNotMatch(index, /^\s+citation:\s*z\./m);

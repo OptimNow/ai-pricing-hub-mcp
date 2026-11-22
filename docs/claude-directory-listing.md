@@ -372,7 +372,49 @@ output schemas (0.12.0) and the text every answer closes with (0.12.1), and no
 pass has been made. 0.13.0 changes no tool definition: its `tools/list` and
 `instructions` are byte-identical to 0.12.1's. Its answers differ (close names
 on a miss) and its requests to the site carry a User-Agent and are held to one
-origin. The next pass should cover all of them in one email.
+origin. 0.14.0 rewrites the model-facing text so that it gives one order only,
+and makes every input schema strict. One pass after 0.14.0 covers all of them.
+
+### Draft of the email to mcp-review@anthropic.com, after 0.14.0
+
+To be sent by the owner, from the address the listing's correspondence uses,
+once the pass above is saved. Subject: "AI Economics (optimnow-ai-economics):
+server changes since the November 19 capture".
+
+```text
+Hello,
+
+AI Economics (claude.ai/directory/optimnow-ai-economics, server
+https://optimtoken-mcp.optimnow.io/mcp) was approved on November 19, 2026, on
+the tool list of version 0.11.1. I have refreshed the capture in the portal.
+The server changes since then, release by release:
+
+- 0.11.2 and 0.11.3: tool descriptions reworded (an instance name in the
+  break-even examples; requests for alternatives pointed to recommend-llm-model,
+  a tool of this server).
+- 0.12.0: fields added to the output schemas of three tools, stating what an
+  optimized cost assumes (cache share, batch eligibility). No field removed.
+- 0.12.1: every answer's text closes with one line naming the source of its
+  figures (OptimToken, with the date of the prices).
+- 0.13.0: no definition change. A model name that matches nothing returns up
+  to three close catalogue names. Requests to optimtoken.optimnow.io, the only
+  host the server calls, now identify the server, follow no redirect to another
+  host, and refuse oversized bodies; text from that site is checked to be
+  short, single-line labels before it is relayed.
+- 0.14.0: the server instructions, descriptions and fixed answer texts were
+  rewritten as statements of what the tools return, with one exception kept on
+  purpose: the sentence asking that the source be named with the figures (in
+  the instructions, and as the closing line of each answer). Measured on
+  November 22, the source was named in all test answers with that sentence and
+  in 1 to 4 of 6 to 9 without it. Two descriptions no longer link
+  optimnow.io. Every tool now refuses an argument it does not declare, and
+  declares idempotentHint.
+
+The tools remain read-only, take no account and call one host, which OptimNow
+owns. Happy to adjust anything.
+
+<the owner's name>, OptimNow
+```
 
 ## Sources
 

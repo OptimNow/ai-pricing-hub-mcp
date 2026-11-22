@@ -573,7 +573,9 @@ check failed. Options: `--expect-version` (default: `server.json`),
 hand before touching the registry entry or the directory listing. Against
 0.4.2 in production it fails on purpose: the widget resources are still
 listed, and the eight concurrent calls are not all answered. For a tag before
-0.12.1, which closed no answer with a source line, it does not ask for one.
+0.12.1, which closed no answer with a source line, it does not ask for one;
+from 0.14.0 it also asks every tool for `idempotentHint` and an input schema
+that refuses undeclared arguments, and not before.
 
 #### Going back to an earlier release (0.13.0)
 
@@ -1385,6 +1387,68 @@ and say `upstreamSource` is the feed OptimToken corrects, not a source.
 server instructions reach Claude Code…" under Architecture). The sentence about
 the source is therefore repeated where claude.ai's model reads it, at the end
 of every answer's text, since 0.12.1.
+
+### One order to the model, measured (0.14.0)
+
+The Claude directory review of 2026-11-06 asked the Cloud FinOps connector to
+remove every sentence that told Claude how to behave beyond the tool's
+function, from its descriptions, its instructions and its response payloads
+("ALWAYS call this", "FIRST anyway", "say which day it is from"), and the
+portal's acknowledgement, ticked for this listing on 2026-11-19, reads "Tool
+descriptions contain no instructions about model behavior, other tools, or
+external instruction sources". This listing was approved by an automated
+review in ten minutes; a material change (policy 3.H) can bring a human one.
+Through 0.13.0 the instructions said "Do not supply one for the user", "Say so"
+twice and "Keep each label", every answer closed with "Source to name with any
+figure quoted from this answer", and two descriptions linked optimnow.io.
+
+**Measured before rewriting** (probe cycle c4, 2026-11-22, the battery's
+README): the source named in the answer, on the break-even and demo questions.
+
+| Wording of the source sentence | As claude.ai reads (text, no instructions) | As Claude Code reads (JSON, instructions) |
+|---|---|---|
+| An order: "Source to name with any figure quoted…", "Name the source in every answer…" | 9 of 9 | 6 of 6 |
+| A statement: "Source of these figures: …", "Every price in them is OptimToken's" | 2 of 9 | 1 of 6 |
+| A citation label: "Cite as: …", "Citation for every price: …" | 4 of 9 | 4 of 6 |
+
+Without the order the break-even answers dropped the source, and usually the
+date, in English and in French. The break-even sentence, rewritten as a
+statement ("each break-even states the throughput it requires"), kept its
+effect in every run.
+
+So since 0.14.0:
+
+- **The source sentence is the one order**, in the instructions (now their
+  first sentence, apart from the rest) and at the end of every answer. It is
+  about the provenance of the figures, which is the tools' function, and the
+  table above is why it is worded as it is.
+- **Everything else states what the answers carry**: a fallback says so, a
+  label qualifies the figure beside it, each break-even states the throughput
+  it requires, a derived figure is not OptimToken's. The compute note says a
+  static rate "is not a live rate"; the break-even names the argument that
+  picks a provider instead of saying "say which".
+- **No definition links optimnow.io**: two descriptions name OptimToken
+  instead. The answers keep the address, as data, as the Cloud FinOps
+  connector's `get_live_figures` returns its document's `url`.
+- `conformance.test.ts` holds all of it, from the source: no marker of an order
+  (ALWAYS, NEVER, MUST, FIRST, "do NOT"), none of the phrases the review quoted
+  or that script a reply, in a title, a description, a parameter, the
+  instructions or a fixed text of an answer; no optimnow.io in a definition;
+  and the two source sentences word for word, each in the one file it may live
+  in. On the 0.13.0 files it fails three of its tests.
+
+The same release makes two definition changes that wait for a release like
+this one, because each makes claude.ai ask every "Always allow" user to approve
+the tools again:
+
+- **An argument a tool does not declare is refused.** `tool()` wraps each raw
+  input shape in `z.strictObject`. The SDK's default object strips an unknown
+  key before the handler runs: on 2026-11-22 `estimate-llm-cost` called with
+  `model` (the break-even's name for it) instead of `modelName` costed the
+  first eight catalogue entries, with no error. It is now an error that names
+  the key, and the model retries.
+- **`idempotentHint: true`** on every tool, as the Cloud FinOps connector
+  declares its own: each only reads.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

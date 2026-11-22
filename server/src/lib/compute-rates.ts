@@ -168,7 +168,7 @@ export function ratesLegend(
   if (printsStatic(instances, priceTypes)) {
     lines.push(
       "static: a curated estimate carried from the site's built-in catalogue, not fetched from the provider " +
-      "this cycle. Do not quote it as a live rate.",
+      "this cycle. It is not a live rate.",
     );
   }
 
