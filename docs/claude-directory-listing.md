@@ -373,9 +373,13 @@ pass has been made. 0.13.0 changes no tool definition: its `tools/list` and
 `instructions` are byte-identical to 0.12.1's. Its answers differ (close names
 on a miss) and its requests to the site carry a User-Agent and are held to one
 origin. 0.14.0 rewrites the model-facing text so that it gives one order only,
-and makes every input schema strict. One pass after 0.14.0 covers all of them.
+and makes every input schema strict. 0.14.1 and 0.14.2 change no definition.
+0.14.3 rewords three clauses 0.14.0 had left, which told the model what to do
+with an answer, in three tools. One pass after 0.14.3 covers all of them: it
+was held back until then on purpose, so that the capture the reviewers read
+holds no such clause.
 
-### Draft of the email to mcp-review@anthropic.com, after 0.14.0
+### Draft of the email to mcp-review@anthropic.com, after 0.14.3
 
 To be sent by the owner, from the address the listing's correspondence uses,
 once the pass above is saved. Subject: "AI Economics (optimnow-ai-economics):
@@ -415,6 +419,10 @@ The server changes since then, release by release:
   (a name given with its provider, a "+" in a name, a short name matching
   inside a word), and a model name over 200 characters is refused. The compute
   answers say which place each provider's prices are from.
+- 0.14.3: three clauses that 0.14.0 had left, and that told the model what to
+  do with an answer, are reworded as statements: in the descriptions of
+  compare-model-hosts and track-llm-price-changes, and in one parameter of
+  compare-llm-models. No schema, argument or output changes.
 
 The tools remain read-only, take no account and call one host, which OptimNow
 owns. Happy to adjust anything.

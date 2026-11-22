@@ -1058,7 +1058,7 @@ tool(
       minElo: z.number().positive().optional().describe("Minimum Chatbot Arena ELO score. Typical range 1000-1500; ~1400 is roughly frontier-class. Models with no ELO score never satisfy this."),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload shape, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k, batch-eligible), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600, batch-eligible), callSummary (2k / 700, batch-eligible), agentWorkflow (6k / 3k). Default: supportTicket"),
       volumePreset: z.enum(["10k", "100k", "1m"]).optional().describe("Monthly request volume: 10k, 100k, or 1m. Default: 100k"),
-      sortBy: z.enum(LLM_SORT_KEYS).optional().describe("Order of the table, best first. elo: Arena ELO, highest first (default). efficiency: value score out of 100, highest first. cost: list-price cost per request for the use case, cheapest first. optimizedCost: the same after caching and batch. inputPrice / outputPrice: price per 1M tokens, cheapest first. A model missing the sorted figure comes last, and ties keep the ELO order. Cheapest first says nothing about quality: read the ELO beside each row."),
+      sortBy: z.enum(LLM_SORT_KEYS).optional().describe("Order of the table, best first. elo: Arena ELO, highest first (default). efficiency: value score out of 100, highest first. cost: list-price cost per request for the use case, cheapest first. optimizedCost: the same after caching and batch. inputPrice / outputPrice: price per 1M tokens, cheapest first. A model missing the sorted figure comes last, and ties keep the ELO order. Cheapest first says nothing about quality: the ELO is beside each row."),
       limit: z.number().min(1).max(50).optional().describe("Max models to return, counted after sorting (default: 15)"),
     },
     outputSchema: outputSchema(compareModelsOutputSchema),
@@ -2127,7 +2127,7 @@ tool(
       "listing, and what a workload costs per request and per month at each. Use it for 'where is Llama 3.3 " +
       "70B cheapest', 'is the price you quoted the maker's own', 'how much does the choice of host matter " +
       "for this model'. To cost a workload at the quoted price with caching and batch, use estimate-llm-cost. " +
-      "Read the caveats it returns: the cheapest host may serve a quantized build, which is not the same " +
+      "Its answer carries the caveats: the cheapest host may serve a quantized build, which is not the same " +
       "product, or a promotional rate that ends. It also lists every host with its rate, cheapest first, " +
       "the platforms the model is listed on (Direct API, AWS Bedrock, Azure AI Foundry, Google Vertex, " +
       "OpenRouter: a hand-kept estimate for the major models) and the AWS regions where Amazon Bedrock lists " +
@@ -2958,7 +2958,7 @@ tool(
       "workload's monthly bill. With `models` (1-4 names) it returns each model's quoted price since " +
       "tracking began, change by change. Use it for 'did any LLM price change this week', 'which models " +
       "got cheaper', 'has the price of X moved since the summer', 'is this price stable enough to budget " +
-      "on'. Read the flags: most models are sold by several hosts and one of them is quoted, so a move " +
+      "on'. Each move carries its flags: most models are sold by several hosts and one of them is quoted, so a move " +
       "flagged `hostSwitch` is a change of the host quoted, not a repricing, and `outlierHost` is an " +
       "outlier listing. The moves with no flag are returned apart, as `priceChanges`; no flag means none " +
       "was established, which is not proof that the model maker repriced. There is no fallback for this " +
@@ -2971,8 +2971,8 @@ tool(
         .max(4)
         .optional()
         .describe("1-4 model names, for each one's price history since tracking began, e.g. ['Llama 3.3 70B']. Leave out for the week's moves across the catalogue."),
-      direction: z.enum(["up", "down"]).optional().describe("Week's moves only: keep the rises (up) or the falls (down). Not accepted with `models`."),
-      provider: z.string().optional().describe("Week's moves only: keep one provider's models, by exact name (case-insensitive), e.g. OpenAI, Anthropic, Meta. Not accepted with `models`."),
+      direction: z.enum(["up", "down"]).optional().describe("Week's moves only: the rises (up) or the falls (down). Not accepted with `models`."),
+      provider: z.string().optional().describe("Week's moves only: one provider's models, by exact name (case-insensitive), e.g. OpenAI, Anthropic, Meta. Not accepted with `models`."),
       includeFlagged: z.boolean().optional().describe("Week's moves only: false leaves out the moves flagged as a change of quoted host or an outlier listing. Default: true, returned apart in `flaggedMoves`. Not accepted with `models`."),
       limit: z.number().min(1).max(50).optional().describe("Week's moves: max moves returned in each of the two groups, largest first. History: max changes printed per model, the most recent (structuredContent carries all). Default: 15"),
       useCasePreset: z.enum(USE_CASE_KEYS).optional().describe("Workload the monthly figures are computed for, which sets tokens per request: supportTicket (1.5k in / 500 out), knowledgeQA (2k / 800), meetingSummary (10k / 1.2k), marketingContent (2.5k / 1.8k), codingTask (3k / 2k), invoiceProcessing (1.5k / 600), callSummary (2k / 700), agentWorkflow (6k / 3k). Default: supportTicket"),

@@ -1630,6 +1630,35 @@ and dropping it would change the output schema, which makes claude.ai ask
 "Always allow" users to approve the tool again. The definitions of 0.14.1 are
 byte-identical to 0.14.0's. `conformance.test.ts` holds both halves of that.
 
+**Three orders the markers let through (0.14.3).** 0.14.0 left three clauses
+that told the model what to do with an answer: "Read the caveats it returns:"
+in the description of `compare-model-hosts`, "Read the flags:" in that of
+`track-llm-price-changes`, and "read the ELO beside each row" in the `sortBy`
+parameter of `compare-llm-models`. None holds a marker (ALWAYS, MUST) or a
+phrase the test listed, so the test passed. A review of 0.14.1 on 2026-11-22
+found the first two; a scan of every clause of every definition, by its first
+word, found the third. They now read as statements ("Its answer carries the
+caveats:", "Each move carries its flags:", "the ELO is beside each row"), and
+two parameters of `track-llm-price-changes` lose a "keep" that filtered
+nothing but read like one.
+
+`conformance.test.ts` now holds the form, not three sentences: no clause of a
+title, a description or a parameter description opens with a verb that tells
+the model what to do with an answer (read, check, note, say, quote, keep,
+treat, do not, and so on). It fails on the 0.14.2 definitions. The verbs that
+say what a tool does, when it applies or what an argument takes are not in the
+list, on purpose: "Compare", "Filter by", "Use it for", "Give this OR
+hourlyRate, not both", "Leave out for the week's moves". Rewording those would
+have changed two more definitions for no reader: a description is where a tool
+says when it applies and what it takes.
+
+Three definitions change, and claude.ai asks "Always allow" users to approve
+those three tools again. It is done before the directory capture is refreshed
+(`docs/claude-directory-listing.md`), so that the capture the reviewers read
+is the one this section describes. `scripts/tools-fingerprint.json` was
+rewritten with the release: the pull request check named the three tools
+before it was.
+
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent
 - codingTask, invoiceProcessing, callSummary, agentWorkflow
