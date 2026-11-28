@@ -6,3 +6,6 @@ dist/
 # MCP registry publisher CLI (downloaded locally, not part of the repo)
 mcp-publisher.exe
 mcp-publisher*.tar.gz
+
+# Local, uncommitted scripts and their output (replays against the server)
+scratch/

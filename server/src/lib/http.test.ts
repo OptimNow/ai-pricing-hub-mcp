@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createHttpServer, HEALTH_PATH, MAX_BODY_BYTES, MCP_PATH } from "./http.js";
+import type { ToolCallHooks } from "./http.js";
 
 /**
  * The HTTP layer, exercised over a real socket against a real MCP server.
@@ -35,8 +36,8 @@ function slowServerFactory(delayMs: number) {
   return { create, built: () => built };
 }
 
-async function listen(create: () => McpServer) {
-  const server = createHttpServer(create);
+async function listen(create: () => McpServer, hooks?: ToolCallHooks) {
+  const server = createHttpServer(create, hooks);
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
@@ -163,4 +164,95 @@ test("an oversized body is refused before any work is done", async (t) => {
   });
   assert.equal(response.status, 413);
   assert.equal(factory.built(), 0);
+});
+
+// ── Around a tool call ──────────────────────────────────────────────
+
+/** A server whose tools say what reached them, and one whose answer its own
+ *  output schema refuses. */
+function probeServer() {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  server.registerTool(
+    "double",
+    { description: "Twice a number.", inputSchema: { value: z.number() } },
+    async ({ value }, extra) => ({
+      content: [{ type: "text" as const, text: `${value * 2} ${JSON.stringify(extra._meta ?? {})}` }],
+    }),
+  );
+  server.registerTool(
+    "broken",
+    { description: "An answer its schema refuses.", inputSchema: {}, outputSchema: { n: z.number() } },
+    async () => ({ content: [{ type: "text" as const, text: "n" }], structuredContent: { n: "not a number" } }),
+  );
+  return server;
+}
+
+const callTool = (url: string, name: string, args: unknown, meta?: unknown) =>
+  fetch(url, {
+    method: "POST",
+    headers: MCP_HEADERS,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args, ...(meta ? { _meta: meta } : {}) } }),
+  }).then(rpcBody);
+
+test("a tool call's arguments are read before the SDK validates them", async (t) => {
+  const seen: [string, unknown][] = [];
+  const app = await listen(probeServer, {
+    readArguments: (tool, args) => {
+      seen.push([tool, args]);
+      const value = (args as { value?: unknown }).value;
+      return { arguments: { value: typeof value === "string" ? Number(value) : value }, meta: { "test/read": ["by the hook"] } };
+    },
+  });
+  t.after(app.close);
+
+  // A number sent as text: the schema would refuse it, the reading comes first.
+  const read = await callTool(app.url(MCP_PATH), "double", { value: "21" }, { "test/read": "sent by the client", other: 1 });
+  assert.equal(read.result?.isError, undefined);
+  // What the hook adds to `_meta` reaches the handler, over the client's own value under that key.
+  assert.equal(read.result?.content?.[0]?.text, '42 {"test/read":["by the hook"],"other":1}');
+  assert.deepEqual(seen, [["double", { value: "21" }]]);
+
+  // What the reading leaves unreadable is still the schema's to refuse.
+  const refused = await callTool(app.url(MCP_PATH), "double", { value: "many" });
+  assert.equal(refused.result?.isError, true);
+  assert.match(refused.result?.content?.[0]?.text, /Input validation error/);
+
+  // Only tools/call is read: initialize passes as it came.
+  const before = seen.length;
+  await fetch(app.url(MCP_PATH), {
+    method: "POST",
+    headers: MCP_HEADERS,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+  }).then(rpcBody);
+  assert.equal(seen.length, before);
+});
+
+test("a reading that throws changes nothing: the call goes on as it was sent", async (t) => {
+  const app = await listen(probeServer, {
+    readArguments: () => {
+      throw new Error("the reader is broken");
+    },
+  });
+  t.after(app.close);
+  const answer = await callTool(app.url(MCP_PATH), "double", { value: 4 });
+  assert.equal(answer.result?.content?.[0]?.text, "8 {}");
+});
+
+test("every tool call answered with an error is reported, the SDK's own included", async (t) => {
+  const reported: [string, string][] = [];
+  const app = await listen(probeServer, { onToolError: (tool, text) => reported.push([tool, text]) });
+  t.after(app.close);
+
+  // An answer its output schema refuses: no handler sees this error, and
+  // before 0.15.0 nothing recorded it.
+  const broken = await callTool(app.url(MCP_PATH), "broken", {});
+  assert.equal(broken.result?.isError, true);
+  await callTool(app.url(MCP_PATH), "double", { value: "x" });
+  await callTool(app.url(MCP_PATH), "double", { value: 1 });
+  await callTool(app.url(MCP_PATH), "absent", {});
+
+  assert.deepEqual(reported.map(([tool]) => tool), ["broken", "double", "absent"]);
+  assert.match(reported[0][1], /^MCP error -32602: Output validation error/);
+  assert.match(reported[1][1], /^MCP error -32602: Input validation error/);
+  assert.match(reported[2][1], /not found/);
 });

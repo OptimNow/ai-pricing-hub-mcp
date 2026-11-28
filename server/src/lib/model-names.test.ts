@@ -195,3 +195,77 @@ test("every tool that looks a name up refuses an over-long one first", () => {
   assert.ok(lookups >= 5, `found ${lookups} lookups`);
   assert.equal(refusals, lookups);
 });
+
+// ── 0.15.0 ────────────────────────────────────────────────────────────
+// From the replay of 2026-11-28 against production 0.14.3: a model named by
+// the identifier a developer passes to an API matched nothing, and came back
+// as a tool error.
+
+const ids: LLMModel[] = [
+  row("Anthropic", "Claude Sonnet 5.5"),
+  row("Anthropic", "Claude Sonnet 5"),
+  row("Anthropic", "Claude Sonnet 4.5"),
+  row("OpenAI", "GPT-4o"),
+  row("OpenAI", "GPT-4o-mini"),
+  row("OpenAI", "GPT-4.1"),
+  row("Meta", "Llama 3.3 70B Instruct"),
+  row("Meta", "Llama 3.1 70B Instruct"),
+  row("DeepSeek", "DeepSeek V3"),
+  row("DeepSeek", "DeepSeek V3.2"),
+  row("SKT", "A.X 4.0"),
+];
+
+test("a model is found by its API identifier: version hyphens, a router's prefix, a snapshot's date", () => {
+  for (const [query, expected] of [
+    // The version as an id writes it. On 0.14.3 each of these was not-found.
+    ["claude-sonnet-5-5", "Anthropic Claude Sonnet 5.5"],
+    ["claude-sonnet-4-5", "Anthropic Claude Sonnet 4.5"],
+    ["gpt-4-1", "OpenAI GPT-4.1"],
+    ["llama-3-3-70b-instruct", "Meta Llama 3.3 70B Instruct"],
+    // A router's organisation, which is not the catalogue's provider name.
+    ["meta-llama/llama-3.3-70b-instruct", "Meta Llama 3.3 70B Instruct"],
+    ["openrouter/anthropic/claude-sonnet-4.5", "Anthropic Claude Sonnet 4.5"],
+    // A dated snapshot, a variant tag, a cloud's id.
+    ["claude-sonnet-4-5-20250929", "Anthropic Claude Sonnet 4.5"],
+    ["gpt-4o-2024-08-06", "OpenAI GPT-4o"],
+    ["gpt-4o-mini@20240718", "OpenAI GPT-4o-mini"],
+    ["claude-sonnet-5-latest", "Anthropic Claude Sonnet 5"],
+    ["meta-llama/llama-3.3-70b-instruct:free", "Meta Llama 3.3 70B Instruct"],
+    ["us.anthropic.claude-sonnet-4-5-20250929-v1:0", "Anthropic Claude Sonnet 4.5"],
+    ["meta.llama3-3-70b-instruct-v1:0", "Meta Llama 3.3 70B Instruct"],
+  ] as const) {
+    assert.equal(label(resolveModel(ids, query).matched), expected, query);
+  }
+});
+
+test("an identifier with its date or its tag cut off is never an exact match", () => {
+  // The row is the model's entry in the catalogue. A dated snapshot can have
+  // had another price (gpt-4o in May and in August 2024), so the resolution
+  // does not claim the name was that row's own.
+  for (const query of ["gpt-4o-2024-08-06", "claude-sonnet-4-5-20250929", "meta-llama/llama-3.3-70b-instruct:free"]) {
+    assert.notEqual(resolveModel(ids, query).status, "exact", query);
+    assert.notEqual(resolveModel(ids, query).status, "not-found", query);
+  }
+  // Nothing cut off: the id is the name.
+  assert.equal(resolveModel(ids, "claude-sonnet-5-5").status, "exact");
+  assert.equal(resolveModel(ids, "meta-llama/llama-3.3-70b-instruct").status, "exact");
+});
+
+test("the second reading never replaces a match, and never finds a model that was not asked for", () => {
+  // A name that matches as typed is read no other way.
+  assert.equal(label(resolveModel(ids, "A.X 4.0").matched), "SKT A.X 4.0");
+  assert.equal(resolveModel(ids, "A.X 4.0").status, "exact");
+  assert.equal(label(resolveModel(ids, "DeepSeek-V3").matched), "DeepSeek DeepSeek V3");
+  assert.equal(resolveModel(ids, "DeepSeek-V3").status, "exact");
+  // A version that does not exist is not the family, and not its neighbour.
+  for (const query of [
+    "deepseek-v9", "Llama 3 70B", "llama-3-70b", "claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet", "GPT-4 Turbo",
+    "gpt-4-turbo-2024-04-09", "Claud Sonet 5.5", "claude-sonnet-6-latest",
+  ]) {
+    const r = resolveModel(ids, query);
+    assert.equal(r.status, "not-found", query);
+    assert.equal(r.matched, undefined, query);
+  }
+  // And such a miss still names what is close, for the caller to choose from.
+  assert.deepEqual(resolveModel(ids, "Llama 3 70B").alternatives.slice(0, 2), ["Meta Llama 3.3 70B Instruct", "Meta Llama 3.1 70B Instruct"]);
+});
