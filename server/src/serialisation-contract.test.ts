@@ -169,6 +169,37 @@ function structuredContentBlocks(): string[] {
   });
 }
 
+/**
+ * What a call to `refusal(…)` or `nothingFound(…)` hands the helper as
+ * `structuredContent`, when it is more than the bare `emptyOutput`.
+ *
+ * Since 0.15.0 an error and a lookup that found nothing are built by those two
+ * helpers, so their `structuredContent` is no longer a literal the scan above
+ * can see: it is the object in the call. A call that passes `emptyOutput`
+ * alone never reached upstream and owes no provenance.
+ */
+function helperCallBlocks(): string[] {
+  const blocks: string[] = [];
+  for (const m of source.matchAll(/(?<!function )\b(?:refusal|nothingFound)\(/g)) {
+    // The call, to its closing parenthesis.
+    let depth = 0;
+    let end = source.length;
+    for (let i = m.index! + m[0].length - 1; i < source.length; i++) {
+      if (source[i] === "(") depth++;
+      else if (source[i] === ")" && --depth === 0) { end = i; break; }
+    }
+    const call = source.slice(m.index!, end + 1);
+    const start = call.search(/\{\s*\.\.\.emptyOutput/);
+    if (start === -1) continue;
+    let braces = 0;
+    for (let i = start; i < call.length; i++) {
+      if (call[i] === "{") braces++;
+      else if (call[i] === "}" && --braces === 0) { blocks.push(call.slice(start, i + 1)); break; }
+    }
+  }
+  return blocks;
+}
+
 test("every tool declares provenance in its output schema", () => {
   for (const schema of [
     "compareModelsOutputSchema",
@@ -192,30 +223,33 @@ test("every tool declares provenance in its output schema", () => {
 });
 
 test("every structuredContent that reached upstream carries provenance", () => {
-  const blocks = structuredContentBlocks();
-  assert.ok(blocks.length > 0, "sanity: no structuredContent blocks found");
+  // The answers written out in full, without the two helpers' own bodies
+  // (`{ ...structured, error: message }`), which are what the calls below fill.
+  const literal = structuredContentBlocks().filter(b => !/^\{\s*\.\.\.structured,/.test(b.trim()));
+  assert.ok(literal.length > 0, "sanity: no structuredContent blocks found");
 
   // A block is allowed to omit provenance only when it never got an answer from
-  // upstream — those are the bare error returns, which spread emptyOutput and
-  // add nothing but `error`. Anything that reports data, or reports an error
-  // *after* a successful fetch, has provenance available and must forward it.
-  const reachedUpstream = blocks.filter(
-    b => !/^\{\s*\.\.\.emptyOutput,\s*error:[^,}]+\}$/.test(b.trim().replace(/\s+/g, " ")),
-  );
+  // upstream — those are the bare error returns, which hand `emptyOutput` to
+  // `refusal()` and add nothing but `error`. Anything that reports data, or
+  // reports a miss or an error *after* a successful fetch, has provenance
+  // available and must forward it.
+  const reachedUpstream = [...literal, ...helperCallBlocks()];
 
-  // 9 successes (track-llm-price-changes has two: the week's moves and a
-  // model's history), plus eight paths that fail *after* a good fetch and so
-  // still owe the caller provenance: estimate-llm-cost's no-match path,
-  // compare-models-side-by-side's "fewer than 2 names resolved",
-  // compare-model-hosts's "no name resolved",
-  // estimate-self-hosting-breakeven's "no model matched" and "no such
-  // instance", and track-llm-price-changes's "no name resolved", "catalogue on
-  // a fallback tier" and "no history could be read", which have the
-  // catalogue's provenance to give.
+  // 10 answers written in full: the 9 successes (track-llm-price-changes has
+  // two: the week's moves and a model's history) and the break-even with no
+  // fleet priced, which still carries the API side. Plus seven paths that end
+  // *after* a good fetch and so still owe the caller provenance, built by
+  // `nothingFound()` or `refusal()`: estimate-llm-cost's no-match,
+  // compare-models-side-by-side's and compare-model-hosts's "no name
+  // resolved", estimate-self-hosting-breakeven's "no model matched", and
+  // track-llm-price-changes's "no name resolved", "catalogue on a fallback
+  // tier" and "no history could be read", which have the catalogue's
+  // provenance to give.
+  assert.equal(literal.length, 10, `expected 10 answers written in full, saw ${literal.length}`);
   assert.equal(
     reachedUpstream.length,
     17,
-    `expected 17 upstream-backed outputs (9 successes + 8 post-fetch failures), saw ${reachedUpstream.length}`,
+    `expected 17 upstream-backed outputs (10 answers + 7 post-fetch misses and failures), saw ${reachedUpstream.length}`,
   );
   for (const block of reachedUpstream) {
     assert.match(

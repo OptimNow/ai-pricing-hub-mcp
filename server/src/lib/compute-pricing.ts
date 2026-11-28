@@ -366,6 +366,32 @@ const KNOWN_PROVIDERS = new Set<string>([
   "AWS", "Azure", "GCP", "DigitalOcean", "OCI", "OVH", "Alibaba",
 ]);
 
+/** What a provider is also called, spelled in lower-case letters and digits. */
+const PROVIDER_ALIASES: Record<string, string> = {
+  amazon: "AWS", amazonwebservices: "AWS", ec2: "AWS", amazonec2: "AWS",
+  microsoft: "Azure", microsoftazure: "Azure",
+  google: "GCP", googlecloud: "GCP", googlecloudplatform: "GCP", gce: "GCP", googlecomputeengine: "GCP",
+  oracle: "OCI", oraclecloud: "OCI", oraclecloudinfrastructure: "OCI",
+  do: "DigitalOcean",
+  ovhcloud: "OVH",
+  alibabacloud: "Alibaba", aliyun: "Alibaba",
+};
+
+/**
+ * The catalogue's name for a provider, from a name a caller gave it: "Google"
+ * and "google cloud" are GCP, "Amazon" is AWS. A name that is none of the
+ * seven comes back as given, and matches nothing.
+ *
+ * The provider filter compares names exactly. On 0.14.3 "Amazon" answered "0
+ * instances match" with no error, and the break-even answered "No instance
+ * named a2-highgpu-1g at Google ... It exists at GCP".
+ */
+export function computeProviderNamed(name: string): string {
+  const spelled = name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  for (const known of KNOWN_PROVIDERS) if (known.toLowerCase() === spelled) return known;
+  return PROVIDER_ALIASES[spelled] ?? name.trim();
+}
+
 /**
  * Validate one instance row from the site.
  *

@@ -161,6 +161,22 @@ test("every tool refuses an argument it does not declare, and says it only reads
   }
 });
 
+test("an error is built in one place, where it is given a kind and logged", () => {
+  // The directory portal counts results with `isError: true`, and until 0.15.0
+  // a handler that returned one wrote no log line: on 2026-11-26 the portal
+  // showed 7 errors in 49 calls and nothing said which tool. `refusal()` takes
+  // the kind of error and `tool()` logs it. A handler that writes
+  // `isError: true` itself is an error nobody will be able to count.
+  const code = index.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+  const written = [...code.matchAll(/isError: true/g)].length;
+  // The helper, and the two refusals of tool() itself: an argument the tool
+  // does not declare, and a handler that threw past its own handling.
+  assert.equal(written, 3, `${written} results are built with isError: true outside refusal()`);
+  assert.match(index, /if \(result\.isError\) logToolError\(name, errorCategories\.get\(result\) \?\? "internal"\);/);
+  // A lookup that finds nothing is an answer, and says so in both halves.
+  assert.match(index, /function nothingFound\(message: string, structured: Record<string, unknown>\): CallToolResult \{\s+return \{\s+structuredContent: \{ \.\.\.structured, error: message \},\s+content: \[\{ type: "text", text: message \}\],\s+isError: false,/);
+});
+
 test("no answer's text links another OptimNow product", () => {
   // The ROI calculator link left the recommend-llm-model text in 0.14.1 (the
   // owner's decision of 2026-11-22). The JSON keeps `roiCalculatorUrl`, a

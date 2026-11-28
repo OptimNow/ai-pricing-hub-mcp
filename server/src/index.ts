@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   closeModelNames,
@@ -95,6 +95,7 @@ import type { ApiBaseline, OptionResult, RateOption } from "./lib/self-hosting.j
 import {
   PRICING_REGIONS,
   DEFAULT_PRICING_REGION,
+  computeProviderNamed,
   fetchComputeInstances,
   incompleteCatalogueCaveat,
 } from "./lib/compute-pricing.js";
@@ -116,6 +117,17 @@ import { MAX_MODEL_HOST_IDS, describeHostListFailure, fetchModelHosts } from "./
 import { SERVER_INSTRUCTIONS } from "./lib/server-instructions.js";
 import { SERVER_VERSION } from "./lib/version.js";
 import { closeWithSource } from "./lib/citation.js";
+import {
+  UNREAD_ARGUMENTS_META,
+  argumentSpec,
+  printableArgumentNames,
+  readToolArguments,
+  unreadArgumentsOf,
+} from "./lib/tool-arguments.js";
+import type { ArgumentSpec } from "./lib/tool-arguments.js";
+import { TOOL_ARGUMENT_RULES, describeUnreadArguments } from "./lib/tool-argument-rules.js";
+import { logToolError, sdkErrorCategory } from "./lib/tool-errors.js";
+import type { ToolErrorCategory } from "./lib/tool-errors.js";
 import type { ModelHostsDetail, ModelHostsResult } from "./lib/model-hosts.js";
 
 // ─── Output schemas ─────────────────────────────────────────────────
@@ -967,6 +979,52 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The kind of error each error result is logged as, kept beside the result
+ *  and not in it: `structuredContent` is a contract (decision 3d). */
+const errorCategories = new WeakMap<object, ToolErrorCategory>();
+
+/**
+ * A call that is refused, or that failed: `isError: true`, with the kind of
+ * error it is logged as (lib/tool-errors.ts). For arguments that contradict
+ * each other, for a read of the site that has no fallback, and for a handler
+ * that threw. Not for a lookup that found nothing: that is `nothingFound`.
+ */
+function refusal(
+  category: ToolErrorCategory,
+  message: string,
+  structured: Record<string, unknown>,
+  text: string = message,
+): CallToolResult {
+  const result: CallToolResult = {
+    structuredContent: { ...structured, error: message },
+    content: [{ type: "text", text }],
+    isError: true,
+  };
+  errorCategories.set(result, category);
+  return result;
+}
+
+/**
+ * A lookup that found nothing: an answer, not an error.
+ *
+ * "No model of that name in the catalogue, the closest are X and Y" is a fact
+ * about the catalogue, and the caller asked a question that has it for an
+ * answer. Until 0.15.0 it came back with `isError: true`, and the directory
+ * portal counts those: 14 of the 84 errors of the replay of 2026-11-28 were a
+ * retired model, a dated API id or a misspelling, each already answered with
+ * the close names. The message goes in the text and in `error`, the one field
+ * every output schema has for it, so a host that hands the model the JSON
+ * alone (decision 1b) still reads why the lists are empty. `isError` stays
+ * for a call that could not be read or could not be served.
+ */
+function nothingFound(message: string, structured: Record<string, unknown>): CallToolResult {
+  return {
+    structuredContent: { ...structured, error: message },
+    content: [{ type: "text", text: message }],
+    isError: false,
+  };
+}
+
 // ─── Tools ──────────────────────────────────────────────────────────
 // (serialisation-contract.test.ts reads the output schemas as everything above
 // this heading, so keep the heading where the schemas end.)
@@ -975,6 +1033,17 @@ function errorMessage(error: unknown): string {
  *  per request (see lib/http.ts for why), so a tool cannot be registered once
  *  on a long-lived instance: it is declared once here and registered on each. */
 const tools: ((server: McpServer) => void)[] = [];
+
+/** What each tool declares, for the reading of a call's arguments that
+ *  happens before the SDK validates them (`readCallArguments`). */
+const toolArguments = new Map<
+  string,
+  {
+    spec: ArgumentSpec;
+    declared: string[];
+    schema: { safeParse(value: unknown): { success: boolean; error?: { issues: { path: PropertyKey[]; code: string }[] } } };
+  }
+>();
 
 /** A Zod schema, as opposed to a raw shape of them (`{ name: z.string() }`). */
 function isZodSchema(value: unknown): boolean {
@@ -1015,10 +1084,37 @@ function tool<
   const inputSchema = (config.inputSchema !== undefined && !isZodSchema(config.inputSchema)
     ? z.strictObject(config.inputSchema as ZodRawShapeCompat)
     : config.inputSchema) as InputArgs;
-  // Every successful answer closes with the source to name (lib/citation.ts):
-  // one place, so a ninth tool gets it without anyone remembering.
-  const handler = ((...args: unknown[]) =>
-    Promise.resolve((cb as (...a: unknown[]) => unknown)(...args)).then(closeWithSource)) as unknown as ToolCallback<InputArgs>;
+  const shape =
+    config.inputSchema !== undefined && !isZodSchema(config.inputSchema) ? (config.inputSchema as Record<string, unknown>) : {};
+  const declared = Object.keys(shape);
+  toolArguments.set(name, {
+    spec: argumentSpec(shape, { ignorable: TOOL_ARGUMENT_RULES[name]?.ignorable }),
+    declared,
+    schema: inputSchema as unknown as z.ZodType,
+  });
+  const handler = (async (...args: unknown[]): Promise<CallToolResult> => {
+    // An argument the tool does not declare, and that read as none it does
+    // (lib/tool-arguments.ts), refuses the call with what the tool takes.
+    const unread = unreadArgumentsOf(args[args.length - 1]);
+    if (unread.length > 0) {
+      logToolError(name, "unknown-argument", { arguments: unread });
+      return { content: [{ type: "text", text: describeUnreadArguments(name, unread, declared) }], isError: true };
+    }
+    let result: CallToolResult;
+    try {
+      result = await (cb as (...a: unknown[]) => CallToolResult | Promise<CallToolResult>)(...args);
+    } catch (error) {
+      // Each handler catches its own failures; this is for what it did not.
+      console.error(`[${name}] failed outside its own handling:`, error);
+      logToolError(name, "internal");
+      return { content: [{ type: "text", text: `Error in ${name}: ${errorMessage(error)}` }], isError: true };
+    }
+    // One line per error, with its kind: nothing else records a refusal.
+    if (result.isError) logToolError(name, errorCategories.get(result) ?? "internal");
+    // Every successful answer closes with the source to name (lib/citation.ts):
+    // one place, so a ninth tool gets it without anyone remembering.
+    return closeWithSource(result);
+  }) as unknown as ToolCallback<InputArgs>;
   tools.push(server => {
     server.registerTool(name, { ...config, inputSchema, annotations }, handler);
   });
@@ -1080,11 +1176,7 @@ tool(
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const vol = (volumePreset || "100k") as VolumePreset;
@@ -1179,11 +1271,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[compare-llm-models] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error comparing models: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error comparing models: ${message}`);
     }
   },
 );
@@ -1238,31 +1326,19 @@ tool(
         "cacheHitRate and batchEligible describe a custom workload, so they need both " +
         "customInputTokens and customOutputTokens alongside them. The use-case presets carry " +
         "their own cache-hit and batch assumptions and cannot be overridden.";
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: message }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", message, emptyOutput);
     }
 
     const overlong = overlongModelName([modelName]);
     if (overlong) {
-      return {
-        structuredContent: { ...emptyOutput, error: overlong },
-        content: [{ type: "text", text: overlong }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", overlong, emptyOutput);
     }
 
     try {
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       // Find matching models
@@ -1272,20 +1348,11 @@ tool(
         if (targetModels.length === 0) {
           const close = closeModelNames(allModels, modelName);
           const message =
-            `No models found matching "${modelName}".` +
-            (close.length > 0 ? ` Close names in the catalogue: ${close.join(", ")}.` : "");
-          return {
-            structuredContent: {
-              ...emptyOutput,
-              source,
-              eloAsOf,
-              dataAsOf,
-              provenance,
-              error: message,
-            },
-            content: [{ type: "text", text: message }],
-            isError: true,
-          };
+            `No model in the catalogue of ${allModels.length} matches "${modelName}", so no cost was estimated.` +
+            (close.length > 0
+              ? ` Closest names in the catalogue: ${close.join(", ")}. None of them was costed in its place.`
+              : ` No name in the catalogue is close to it.`);
+          return nothingFound(message, { ...emptyOutput, source, eloAsOf, dataAsOf, provenance });
         }
       } else {
         targetModels = allModels.slice(0, 8);
@@ -1427,11 +1494,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[estimate-llm-cost] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error estimating costs: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error estimating costs: ${message}`);
     }
   },
 );
@@ -1485,36 +1548,28 @@ tool(
 
     const overlong = overlongModelName(requested);
     if (overlong) {
-      return {
-        structuredContent: { ...emptyOutput, error: overlong },
-        content: [{ type: "text", text: overlong }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", overlong, emptyOutput);
     }
 
     try {
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const { selected, resolution } = resolveNames(allModels, requested);
       const describe = (r: ResolutionEntry): string => describeResolution(r, "column");
 
-      if (selected.length < 2) {
+      // No name resolved: there is nothing to cost, and saying so with the
+      // close names is the answer. One name resolved: its column is costed and
+      // the text says nothing stands beside it. Until 0.15.0 both were errors,
+      // so one retired model among two names threw the other's figures away.
+      if (selected.length === 0) {
         const message =
-          `Need at least 2 distinct models to compare, resolved ${selected.length}. ` +
+          `None of the ${requested.length} names matched a model in the catalogue, so there is nothing to compare. ` +
           resolution.map(describe).join(" ");
-        return {
-          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        return nothingFound(message, { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance });
       }
 
       // Raw floats drive the arithmetic; rounding happens once, on the way out.
@@ -1590,7 +1645,10 @@ tool(
             text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
               `Data source: ${provenance.label}` +
               (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
-              `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n` +
+              (withCosts.length === 1
+                ? `Only one of the ${requested.length} names resolved to a distinct model, so there is one column and ` +
+                  `nothing beside it to compare, at ${volume.toLocaleString()} requests/month.\n\n`
+                : `Side-by-side comparison of ${withCosts.length} models at ${volume.toLocaleString()} requests/month.\n\n`) +
               `Name resolution:\n${resolution.map(r => `  ${describe(r)}`).join("\n")}\n\n` +
               `${header.join("\n")}${listingLegend(withCosts, provenance.deprecationsVerifiedAt)}\n\n${rows.join("\n\n")}\n\n` +
               // In the result as well as the description: on claude.ai on
@@ -1607,11 +1665,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[compare-models-side-by-side] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error comparing models: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error comparing models: ${message}`);
     }
   },
 );
@@ -1682,11 +1736,7 @@ tool(
       const { models: allModels, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const enriched = enrichModels(allModels, vol, ucKey);
@@ -1938,11 +1988,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[recommend-llm-model] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error recommending a model: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error recommending a model: ${message}`);
     }
   },
 );
@@ -1998,8 +2044,12 @@ tool(
       );
       const enriched = servableCatalogue(catalogue);
 
+      // The catalogue's own name for the provider: "Amazon" is AWS, "Google
+      // Cloud" is GCP. A name that is none of the seven matches nothing.
+      const wantedProvider = provider ? computeProviderNamed(provider) : undefined;
+
       const filtered = enriched.filter(inst => {
-        if (provider && inst.provider.toLowerCase() !== provider.toLowerCase()) return false;
+        if (wantedProvider && inst.provider.toLowerCase() !== wantedProvider.toLowerCase()) return false;
         if (category && inst.category.toLowerCase() !== category.toLowerCase()) return false;
         if (minVCPUs !== undefined && inst.vCPUs < minVCPUs) return false;
         if (maxVCPUs !== undefined && inst.vCPUs > maxVCPUs) return false;
@@ -2036,7 +2086,7 @@ tool(
       // it serves that provider's few static rows under HTTP 200, and "Azure,
       // 64 vCPUs or more" then matches nothing out of 18 rows where the live
       // catalogue holds hundreds.
-      const incomplete = filtered.length === 0 ? incompleteCatalogueCaveat(provenance, provider) : null;
+      const incomplete = filtered.length === 0 ? incompleteCatalogueCaveat(provenance, wantedProvider) : null;
       const subsetCaveat =
         provenance.tier === 2 && filtered.length === 0
           ? `\nNOTE: this is the ${enriched.length}-row static snapshot, not the ~5,800-instance ` +
@@ -2092,11 +2142,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[compare-compute-pricing] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error comparing compute pricing: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error comparing compute pricing: ${message}`);
     }
   },
 );
@@ -2166,34 +2212,24 @@ tool(
 
     const overlong = overlongModelName(requested);
     if (overlong) {
-      return {
-        structuredContent: { ...emptyOutput, error: overlong },
-        content: [{ type: "text", text: overlong }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", overlong, emptyOutput);
     }
 
     try {
       const { models: allModels, hostPricing, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const { selected, resolution } = resolveNames(allModels, requested);
       const describe = (r: ResolutionEntry): string => describeResolution(r, "entry");
 
       if (selected.length === 0) {
-        const message = `No requested name matched a model. ${resolution.map(describe).join(" ")}`;
-        return {
-          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        const message =
+          `No requested name matched a model in the catalogue, so no host was looked up. ` +
+          resolution.map(describe).join(" ");
+        return nothingFound(message, { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance });
       }
 
       // Raw floats drive the arithmetic; rounding happens once, on the way out.
@@ -2481,11 +2517,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[compare-model-hosts] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error comparing model hosts: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error comparing model hosts: ${message}`);
     }
   },
 );
@@ -2584,7 +2616,9 @@ tool(
 
     // Refused rather than guessed at: each of these would otherwise change the
     // answer without the caller knowing which reading was taken.
-    const refusal = halfCustom
+    // No fleet at all is not among them since 0.15.0: the API side of the
+    // comparison still answers, and says what the fleet side is missing.
+    const refused = halfCustom
       ? "customInputTokens and customOutputTokens describe one workload and must be given together."
       : leversSupplied && !customTokens
         ? "cacheHitRate and batchEligible describe a custom workload, so they need both customInputTokens and " +
@@ -2592,97 +2626,28 @@ tool(
         : instanceType !== undefined && hourlyRate !== undefined
           ? "Give instanceType (a catalogue instance, costed at every rate it lists) or hourlyRate (a rate of " +
             "your own), not both: they are two different fleets."
-          : instanceType === undefined && hourlyRate === undefined
-            ? "Nothing to rent: give instanceType (a catalogue instance, e.g. 'g6e.12xlarge'; find one with " +
-              "compare-compute-pricing, category 'GPU / Accelerated') or hourlyRate (USD per hour for one instance)."
-            : overlongModelName([modelName]);
-    if (refusal) {
-      const message = refusal;
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: message }],
-        isError: true,
-      };
+          : overlongModelName([modelName]);
+    if (refused) {
+      return refusal("invalid-arguments", refused, emptyOutput);
     }
 
     try {
       const { models: allModels, hostPricing, source, eloAsOf, dataAsOf, provenance } = await fetchLLMModels();
 
       if (allModels.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const { selected, resolution } = resolveNames(allModels, [modelName]);
       const describe = (r: ResolutionEntry): string => describeResolution(r, "estimate");
 
       if (selected.length === 0) {
-        const message = `No model matched. ${resolution.map(describe).join(" ")}`;
-        return {
-          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        const message =
+          `No model in the catalogue matched, so there is no API price to hold a fleet against and no break-even. ` +
+          resolution.map(describe).join(" ");
+        return nothingFound(message, { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance });
       }
       const m = selected[0];
-
-      // ── The fleet: a catalogue instance at every rate it lists, or the
-      //    caller's own hourly rate.
-      let instance: EnrichedComputeInstance | null = null;
-      let computeProvenance: ComputeProvenance | undefined;
-      let rates: RateOption[] = [];
-      let fleetError: string | null = null;
-
-      if (instanceType !== undefined) {
-        const compute = await fetchComputeInstances((region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION);
-        computeProvenance = compute.provenance;
-        const catalogue = servableCatalogue(compute.instances);
-        const wanted = instanceType.trim().toLowerCase();
-        const named = catalogue.filter(inst => inst.instanceType.toLowerCase() === wanted);
-        const matches = provider ? named.filter(inst => inst.provider.toLowerCase() === provider.toLowerCase()) : named;
-        const providers = [...new Set(matches.map(inst => inst.provider))];
-
-        if (matches.length === 0) {
-          const incomplete = incompleteCatalogueCaveat(computeProvenance, provider);
-          const near = catalogue
-            .filter(inst => inst.instanceType.toLowerCase().includes(wanted) || wanted.includes(inst.instanceType.toLowerCase()))
-            .slice(0, 5)
-            .map(inst => `${inst.provider} ${inst.instanceType}`);
-          fleetError =
-            `No instance named "${instanceType}"` + (provider ? ` at ${provider}` : "") +
-            ` in the ${computeProvenance.region} catalogue (${catalogue.length} Linux instances).` +
-            (named.length > 0 ? ` It exists at ${[...new Set(named.map(inst => inst.provider))].join(", ")}.` : "") +
-            (near.length > 0 ? ` Close names: ${near.join(", ")}.` : "") +
-            ` Instance names are matched exactly; list candidates with compare-compute-pricing ` +
-            `(category "GPU / Accelerated"), or pass hourlyRate for hardware the catalogue does not carry.` +
-            (computeProvenance.tier === 2 && computeProvenance.catalogueIsSubset
-              ? ` This is the static snapshot, a subset of the live catalogue, so "no match" does not mean no such instance exists.`
-              : "") +
-            (incomplete ? ` ${incomplete}` : "");
-        } else if (providers.length > 1) {
-          fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: the provider argument picks one.`;
-        } else {
-          instance = matches[0];
-          rates = rateOptions(instance, computeProvenance.priceTypes);
-          if (rates.length === 0) {
-            fleetError = `${instance.provider} ${instance.instanceType} lists no price in the ${computeProvenance.region} catalogue.`;
-          }
-        }
-      } else {
-        rates = [callerRateOption(hourlyRate!)];
-      }
-
-      if (fleetError) {
-        const message = fleetError;
-        return {
-          structuredContent: { ...emptyOutput, resolution, source, eloAsOf, dataAsOf, provenance, computeProvenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
-      }
 
       // ── The API: list, optimized, and the cheapest host when one is known
       //    to undercut the quoted price. Raw floats; rounded on the way out.
@@ -2706,16 +2671,7 @@ tool(
         ...(cheaperHost ? [{ basis: "cheapestHost" as const, costPerRequest: cheaperHost.cost }] : []),
       ];
 
-      const capacity = outputTokensPerSecond !== undefined ? fleetCapacity(outputTokensPerSecond, count, workload) : null;
-      const canServe = capacity === null ? null : volume <= capacity;
-      const needed = outputTokensPerSecond !== undefined ? instancesNeeded(volume, outputTokensPerSecond, workload) : null;
-      const volumeThroughput = throughputForVolume(volume, workload);
-
-      const results: OptionResult[] = rates.map(option =>
-        evaluateOption(option, { instanceCount: count, monthlyOperationsCost: operations, workload, volume, capacity, baselines }),
-      );
-
-      // ── Text ──
+      // ── The model and the API side, as text and as JSON ──
       const openness = opennessOf(m.license);
       const selfHostable = openness === "Open source" || openness === "Open weights" ? true : openness === "Proprietary" ? false : null;
       const weightsLine =
@@ -2756,6 +2712,156 @@ tool(
             : `  Cheapest host: no per-host pricing for this model.`,
       ];
 
+      const modelOut = {
+        provider: m.provider,
+        model: m.model,
+        parameters: m.parameters,
+        eloScore: m.eloScore,
+        license: m.license,
+        openness,
+        selfHostable,
+        inputPricePer1M: m.inputPricePer1M,
+        outputPricePer1M: m.outputPricePer1M,
+        outlierListing: m.outlierListing,
+        promotionalListing: m.promotionalListing,
+        deprecation: m.deprecation,
+      };
+      const apiOut = [
+        {
+          basis: "list" as const,
+          label: API_BASIS_LABELS.list,
+          inputPricePer1M: m.inputPricePer1M,
+          outputPricePer1M: m.outputPricePer1M,
+          perRequest: roundPerRequestCost(listCost),
+          monthly: roundMonthlyCost(listCost * volume),
+        },
+        {
+          basis: "optimized" as const,
+          label: API_BASIS_LABELS.optimized,
+          perRequest: roundPerRequestCost(optimizedCost),
+          monthly: roundMonthlyCost(optimizedCost * volume),
+          savingsPct: saving,
+          ...levers,
+        },
+        ...(cheaperHost
+          ? [{
+              basis: "cheapestHost" as const,
+              label: API_BASIS_LABELS.cheapestHost,
+              inputPricePer1M: cheaperHost.offer.input,
+              outputPricePer1M: cheaperHost.offer.output,
+              host: cheaperHost.offer.host,
+              quantization: cheaperHost.offer.quantization,
+              discount: cheaperHost.offer.discount,
+              perRequest: roundPerRequestCost(cheaperHost.cost),
+              monthly: roundMonthlyCost(cheaperHost.cost * volume),
+            }]
+          : []),
+      ];
+
+      // ── The fleet: a catalogue instance at every rate it lists, or the
+      //    caller's own hourly rate.
+      let instance: EnrichedComputeInstance | null = null;
+      let computeProvenance: ComputeProvenance | undefined;
+      let rates: RateOption[] = [];
+      let fleetError: string | null = null;
+
+      // The catalogue's own name for the provider: "Google" is GCP.
+      const wantedProvider = provider ? computeProviderNamed(provider) : undefined;
+
+      if (instanceType !== undefined) {
+        const compute = await fetchComputeInstances((region as PricingRegion | undefined) ?? DEFAULT_PRICING_REGION);
+        computeProvenance = compute.provenance;
+        const catalogue = servableCatalogue(compute.instances);
+        const wanted = instanceType.trim().toLowerCase();
+        const named = catalogue.filter(inst => inst.instanceType.toLowerCase() === wanted);
+        const matches = wantedProvider
+          ? named.filter(inst => inst.provider.toLowerCase() === wantedProvider.toLowerCase())
+          : named;
+        const providers = [...new Set(matches.map(inst => inst.provider))];
+
+        if (matches.length === 0) {
+          const incomplete = incompleteCatalogueCaveat(computeProvenance, wantedProvider);
+          const near = catalogue
+            .filter(inst => inst.instanceType.toLowerCase().includes(wanted) || wanted.includes(inst.instanceType.toLowerCase()))
+            .slice(0, 5)
+            .map(inst => `${inst.provider} ${inst.instanceType}`);
+          fleetError =
+            `No instance named "${instanceType}"` + (wantedProvider ? ` at ${wantedProvider}` : "") +
+            ` in the ${computeProvenance.region} catalogue (${catalogue.length} Linux instances).` +
+            (named.length > 0 ? ` It exists at ${[...new Set(named.map(inst => inst.provider))].join(", ")}.` : "") +
+            (near.length > 0 ? ` Close names: ${near.join(", ")}.` : "") +
+            ` Instance names are matched exactly; list candidates with compare-compute-pricing ` +
+            `(category "GPU / Accelerated"), or pass hourlyRate for hardware the catalogue does not carry.` +
+            (computeProvenance.tier === 2 && computeProvenance.catalogueIsSubset
+              ? ` This is the static snapshot, a subset of the live catalogue, so "no match" does not mean no such instance exists.`
+              : "") +
+            (incomplete ? ` ${incomplete}` : "");
+        } else if (providers.length > 1) {
+          fleetError = `"${instanceType}" is an instance name at ${providers.join(" and ")}: the provider argument picks one.`;
+        } else {
+          instance = matches[0];
+          rates = rateOptions(instance, computeProvenance.priceTypes);
+          if (rates.length === 0) {
+            fleetError = `${instance.provider} ${instance.instanceType} lists no price in the ${computeProvenance.region} catalogue.`;
+          }
+        }
+      } else if (hourlyRate !== undefined) {
+        rates = [callerRateOption(hourlyRate)];
+      } else {
+        fleetError =
+          `No fleet was named. A break-even needs what the fleet costs per hour: instanceType, an instance of the ` +
+          `compute catalogue such as 'g6e.12xlarge' (compare-compute-pricing lists them under the category ` +
+          `"GPU / Accelerated"), or hourlyRate, USD per hour for one instance. No instance is assumed.`;
+      }
+
+      // No fleet could be priced: the API side still answers. What the
+      // workload costs per token at this volume is the figure any fleet is
+      // held against, and the reason no break-even follows is given with it.
+      // Until 0.15.0 each of these was an error that carried no figure.
+      if (fleetError) {
+        const message = fleetError;
+        return {
+          structuredContent: {
+            ...emptyOutput,
+            model: modelOut,
+            api: apiOut,
+            resolution,
+            source,
+            eloAsOf,
+            dataAsOf,
+            provenance,
+            computeProvenance,
+            error: message,
+          },
+          content: [
+            {
+              type: "text",
+              text: (provenance.notice ? `⚠️ ${provenance.notice}\n\n` : "") +
+                `Data source: ${provenance.label}` +
+                (provenance.upstreamTimestamp ? ` (as of ${provenance.upstreamTimestamp})` : "") + `.\n` +
+                `Name resolution: ${resolution.map(describe).join(" ")}\n\n` +
+                `API or own capacity — ${m.provider} ${m.model} for ${profile.label} (${profile.inputTokens} in + ` +
+                `${profile.outputTokens} out tokens) at ${volume.toLocaleString()} requests/month.\n` +
+                `${weightsLine}${retirementLine}\n\n` +
+                `Paying per token:\n${apiLines.join("\n")}\n\n` +
+                `No fleet was priced, so no break-even is given. ${message}` +
+                listingLegend([m], provenance.deprecationsVerifiedAt),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      const capacity = outputTokensPerSecond !== undefined ? fleetCapacity(outputTokensPerSecond, count, workload) : null;
+      const canServe = capacity === null ? null : volume <= capacity;
+      const needed = outputTokensPerSecond !== undefined ? instancesNeeded(volume, outputTokensPerSecond, workload) : null;
+      const volumeThroughput = throughputForVolume(volume, workload);
+
+      const results: OptionResult[] = rates.map(option =>
+        evaluateOption(option, { instanceCount: count, monthlyOperationsCost: operations, workload, volume, capacity, baselines }),
+      );
+
+      // ── Text: the fleet ──
       const fleetName = instance
         ? `${count} × ${instance.provider} ${instance.instanceType} (${instance.vCPUs} vCPUs, ${instance.memory} GiB, ` +
           `${instance.processor}), ${computeProvenance?.region ?? DEFAULT_PRICING_REGION}`
@@ -2814,51 +2920,8 @@ tool(
       return {
         structuredContent: {
           ...emptyOutput,
-          model: {
-            provider: m.provider,
-            model: m.model,
-            parameters: m.parameters,
-            eloScore: m.eloScore,
-            license: m.license,
-            openness,
-            selfHostable,
-            inputPricePer1M: m.inputPricePer1M,
-            outputPricePer1M: m.outputPricePer1M,
-            outlierListing: m.outlierListing,
-            promotionalListing: m.promotionalListing,
-            deprecation: m.deprecation,
-          },
-          api: [
-            {
-              basis: "list" as const,
-              label: API_BASIS_LABELS.list,
-              inputPricePer1M: m.inputPricePer1M,
-              outputPricePer1M: m.outputPricePer1M,
-              perRequest: roundPerRequestCost(listCost),
-              monthly: roundMonthlyCost(listCost * volume),
-            },
-            {
-              basis: "optimized" as const,
-              label: API_BASIS_LABELS.optimized,
-              perRequest: roundPerRequestCost(optimizedCost),
-              monthly: roundMonthlyCost(optimizedCost * volume),
-              savingsPct: saving,
-              ...levers,
-            },
-            ...(cheaperHost
-              ? [{
-                  basis: "cheapestHost" as const,
-                  label: API_BASIS_LABELS.cheapestHost,
-                  inputPricePer1M: cheaperHost.offer.input,
-                  outputPricePer1M: cheaperHost.offer.output,
-                  host: cheaperHost.offer.host,
-                  quantization: cheaperHost.offer.quantization,
-                  discount: cheaperHost.offer.discount,
-                  perRequest: roundPerRequestCost(cheaperHost.cost),
-                  monthly: roundMonthlyCost(cheaperHost.cost * volume),
-                }]
-              : []),
-          ],
+          model: modelOut,
+          api: apiOut,
           fleet: {
             provider: instance?.provider ?? null,
             instanceType: instance?.instanceType ?? null,
@@ -2929,11 +2992,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[estimate-self-hosting-breakeven] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error estimating the self-hosting break-even: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error estimating the self-hosting break-even: ${message}`);
     }
   },
 );
@@ -3007,20 +3066,12 @@ tool(
       const message =
         "direction, provider and includeFlagged filter the week's moves across the catalogue. They do not " +
         "apply to a named model's history: leave them out, or leave `models` out.";
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: message }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", message, emptyOutput);
     }
 
     const overlong = overlongModelName(requested ?? []);
     if (overlong) {
-      return {
-        structuredContent: { ...emptyOutput, error: overlong },
-        content: [{ type: "text", text: overlong }],
-        isError: true,
-      };
+      return refusal("invalid-arguments", overlong, emptyOutput);
     }
 
     // Raw floats drive the arithmetic; rounding happens once, on the way out.
@@ -3054,12 +3105,9 @@ tool(
           window = await fetchPriceChanges();
         } catch (error) {
           console.warn("[track-llm-price-changes] archive unavailable:", describeUpstreamFailure(error).summary);
-          const message = noArchive(error);
-          return {
-            structuredContent: { ...emptyOutput, error: message },
-            content: [{ type: "text", text: message }],
-            isError: true,
-          };
+          // An error on purpose, and one of the few left: an empty list here
+          // would read as a quiet week (decision 12).
+          return refusal("upstream-unavailable", noArchive(error), emptyOutput);
         }
 
         // The catalogue adds the retirement notice and today's quoted price to
@@ -3213,23 +3261,17 @@ tool(
       // ── Named models: the quoted price since tracking began ──
       const catalogue = await fetchLLMModels();
       if (catalogue.models.length === 0) {
-        return {
-          structuredContent: { ...emptyOutput, error: "Failed to fetch LLM models." },
-          content: [{ type: "text", text: "Failed to fetch LLM models." }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", "Failed to fetch LLM models.", emptyOutput);
       }
 
       const { selected, resolution } = resolveNames(catalogue.models, requested);
       const describe = (r: ResolutionEntry): string => describeResolution(r, "history");
 
       if (selected.length === 0) {
-        const message = `No requested name matched a model. ${resolution.map(describe).join(" ")}`;
-        return {
-          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        const message =
+          `No requested name matched a model in the catalogue, so no price history was read. ` +
+          `That is not "the price never changed". ${resolution.map(describe).join(" ")}`;
+        return nothingFound(message, { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance });
       }
 
       if (catalogue.provenance.tier !== 1) {
@@ -3237,11 +3279,7 @@ tool(
           `A model's price history is asked by its upstream id, which only optimtoken.optimnow.io's catalogue ` +
           `carries. The catalogue came from a fallback tier, so no history can be read. That is not "the price ` +
           `never changed".`;
-        return {
-          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", message, { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance });
       }
 
       const fetched = await Promise.all(
@@ -3265,11 +3303,7 @@ tool(
         const message =
           `Price history is served by optimtoken.optimnow.io only, and ${fetched[0].reason}. No history is ` +
           `reported: that is not "the price never changed".`;
-        return {
-          structuredContent: { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance, error: message },
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
+        return refusal("upstream-unavailable", message, { ...emptyOutput, resolution, catalogueProvenance: catalogue.provenance });
       }
 
       const point = (date: string, pair: Pair, blendedPct: number | null, flags: string[]) => ({
@@ -3422,11 +3456,7 @@ tool(
     } catch (error) {
       const message = errorMessage(error);
       console.error("[track-llm-price-changes] failed:", error);
-      return {
-        structuredContent: { ...emptyOutput, error: message },
-        content: [{ type: "text", text: `Error tracking price changes: ${message}` }],
-        isError: true,
-      };
+      return refusal("internal", message, emptyOutput, `Error tracking price changes: ${message}`);
     }
   },
 );
@@ -3453,7 +3483,46 @@ function createServer(): McpServer {
   return server;
 }
 
-const httpServer = createHttpServer(createServer);
+/**
+ * A call's arguments as its tool is to receive them, read before the SDK
+ * validates them (lib/tool-arguments.ts, and lib/http.ts for why there).
+ *
+ * The arguments no reading could place travel to the tool in the call's
+ * `_meta`, always written, so a client cannot set the key itself. What the SDK
+ * is about to refuse is logged here, where the refused argument is still known
+ * by name: the SDK's own refusal leaves no trace anywhere.
+ */
+function readCallArguments(tool: string, args: unknown): { arguments: unknown; meta: Record<string, unknown> } {
+  const known = toolArguments.get(tool);
+  if (!known) {
+    // The name asked for is the client's text, so the log does not repeat it.
+    logToolError("(unknown)", "unknown-tool");
+    return { arguments: args, meta: { [UNREAD_ARGUMENTS_META]: [] } };
+  }
+  const read = readToolArguments(known.spec, args);
+  const checked = known.schema.safeParse(read.arguments ?? {});
+  if (!checked.success) {
+    const issues = checked.error?.issues ?? [];
+    logToolError(tool, "input-validation", {
+      arguments: printableArgumentNames([...new Set(issues.map(issue => issue.path[0]).filter(key => typeof key === "string"))]),
+      issues: [...new Set(issues.map(issue => issue.code))].slice(0, 5),
+    });
+  }
+  return { arguments: read.arguments, meta: { [UNREAD_ARGUMENTS_META]: read.unread } };
+}
+
+/** An error result the SDK built itself and that nothing above has logged:
+ *  in practice an answer its output schema refused, which is a defect here. */
+function reportSdkError(tool: string, text: string): void {
+  const category = sdkErrorCategory(text);
+  if (category) logToolError(toolArguments.has(tool) ? tool : "(unknown)", category);
+}
+
+const httpServer = createHttpServer(createServer, { readArguments: readCallArguments, onToolError: reportSdkError });
+
+// For the tests that call the real tools over HTTP (tool-calls.test.ts). The
+// server still listens on import: PORT=0 gives such a test a free port.
+export { httpServer };
 
 // Fly sets PORT (fly.toml), and a container must listen on all interfaces,
 // which is Node's default when no host is given.

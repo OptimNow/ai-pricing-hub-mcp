@@ -310,6 +310,9 @@ ai-pricing-hub-mcp/
 │       ├── serialisation-contract.test.ts  # Source-level guard: rounding + provenance
 │       ├── lib/
 │       │   ├── http.ts               # node:http: POST /mcp on a per-request MCP server, /healthz
+│       │   ├── tool-arguments.ts     # A call's arguments, read before the SDK validates them
+│       │   ├── tool-argument-rules.ts # Per tool: what an undeclared argument is dropped or refused with
+│       │   ├── tool-errors.ts        # One log line per tool error: the tool and the kind
 │       │   ├── optimtoken-api.ts     # Base URL constant + shared fetch: timeout, redirects, size cap, User-Agent
 │       │   ├── site-text.ts          # The label rule every free-text value from the site passes
 │       │   ├── version.ts            # SERVER_VERSION: announced to clients, sent to the site
@@ -1658,6 +1661,126 @@ those three tools again. It is done before the directory capture is refreshed
 is the one this section describes. `scripts/tools-fingerprint.json` was
 rewritten with the release: the pull request check named the three tools
 before it was.
+
+### What is a tool error, and what is read before one (0.15.0)
+
+**What was seen.** On 2026-11-26 the directory portal showed, over 30 days,
+49 calls and a 14.3% error rate (7 errors; 15.9% over 7 days), against a
+threshold of 5% above which a listing shows as degraded. All were tool errors:
+results with `isError: true`, no request error, no 4xx, no 5xx. The calls were
+those of 20, 21 and 22 November (3, 29 and 10), one account a day. The portal
+does not say which tool failed, Fly keeps about an hour of logs, and a refused
+call wrote no line anyway: the SDK answers a call its schema refuses with a
+result, not a JSON-RPC error, and logs nothing.
+
+**What was measured.** A replay against production 0.14.3 on 2026-11-28: 137
+calls, one a second, each classed before it was sent. The same script against
+a local build of 0.15.0, reading the same site:
+
+| Class of call | Calls | `isError` on 0.14.3 | `isError` on 0.15.0 |
+|---|---|---|---|
+| Well-formed | 28 | 0 | 0 |
+| What a model plausibly sends | 79 | 60 | 0 |
+| Asks what the tool does not do, or has no single reading | 23 | 23 | 23 |
+| Invalid | 7 | 7 | 7 |
+
+No timeout (slowest answer 23.5 s, a cold region of the compute catalogue),
+no answer over 43 KB, no failed read of the site, no answer its output schema
+refused, no arithmetic error. Every error was an input refused: by the schema
+before any handler ran (a preset in another case, a provider's region code, a
+sibling tool's argument name, a number as text, a limit above the most), or by
+a handler (a name that matched no model, a model without a fleet).
+
+The names that failed on 20 to 22 November are mostly fixed already. The
+lookup of 0.12.1, live on the 21st, and of 0.13.0 were run on the same names:
+the label every answer prints ("OpenAI GPT-5.5") matched nothing on either,
+and "GPT5.5", "gpt 5.5" and "Llama-3.3-70B" matched nothing on 0.12.1. A model
+that copied a name from one answer into the next call got an error. 0.13.0 and
+0.14.2 fixed those; the portal's 30-day figure still counts them.
+
+**Arguments are read before they are validated** (`lib/tool-arguments.ts`,
+called from `lib/http.ts`). Only a reading with one meaning is taken: an
+option of a closed list in another case, with other separators, in the plural
+or as the label an answer prints ("Support Ticket"); a provider's region code
+as the region group it belongs to (`eu-west-1` is europe, and the answer names
+the place it priced); a number, a yes or no, or a list sent as text; null or
+an empty string for an optional argument as "not given"; a `limit` above the
+most as the most; `cacheHitRate` above 1 as a percentage. What has two
+readings is left as it came and refused as before: `sortBy: "price"` is three
+sort keys, `500k` is no preset.
+
+It runs in front of the schemas, not in them, because the schema that
+validates is the schema that is published: `z.preprocess` in a shape publishes
+that argument as accepting anything, and any change to a definition makes
+claude.ai ask "Always allow" users to approve the tool again (decision 1b).
+`tools/list` on 0.15.0 is byte-identical to 0.14.3's, the fingerprints are
+untouched, and `tool-calls.test.ts` compares the two in `npm test`. A strict
+client validates against the schemas and never sends what this reads; a model
+that does is answered.
+
+**An argument the tool does not declare** is read as the tool's own when it is
+that argument under another name: `model`, `modelName` and `models` are one
+family, `useCase` is `useCasePreset` on a tool that has no `useCase`,
+`volumePreset: "1m"` is `monthlyVolume: 1000000` and the reverse for the
+three volumes a preset stands for. It is dropped when it cannot change the
+answer (`useCasePreset` on the side-by-side, which costs every use case;
+`os: "Linux"`). Otherwise the call is refused, as since 0.14.0 and for the
+same reason, but by `tool()` and with a sentence: what was not read, what the
+tool takes, and a statement about the argument when it is a known one
+(`lib/tool-argument-rules.ts`: "The week's moves cover the last 7 days and the
+window is fixed"). The names travel from the HTTP layer to the tool in the
+call's `_meta`, under a key the server always writes.
+
+**A lookup that finds nothing is an answer** (`nothingFound()` in `index.ts`).
+"No model of that name in the catalogue of 314, the closest are X and Y, none
+was costed in its place" is a fact about the catalogue. It came back as
+`isError: true` in five tools; it now comes back as an answer whose lists are
+empty, with the sentence in the text and in `error`, the one field every
+output schema already has for it (decision 1b: a host that hands the model
+the JSON alone still reads why). Two answers gained from it: the side-by-side
+costs the name that resolved when the other did not (one retired model among
+two names used to lose both), and the break-even with no fleet named, or an
+instance not in the catalogue, gives the API side of the comparison and the
+reason no break-even follows. No instance is assumed (decision 11).
+
+**A model is found by its API identifier** (`nameReadings()` in
+`lib/llm-models.ts`): `claude-sonnet-5-5`, `meta-llama/llama-3.3-70b-instruct`,
+`claude-sonnet-4-5-20250929`, `us.anthropic.claude-…-v1:0`. The second reading
+is tried only when the name as typed matches no row, so nothing that resolved
+before resolves differently. A name with its date or tag cut off is never
+`exact`: the row is the model's entry, not a statement about one snapshot. A
+close name is still never taken for the one asked: "GPT-4 Turbo" is not
+GPT-4o, "Llama 3 70B" is not Llama 3.3 70B, and each answers as a miss.
+
+**A compute provider is found by any of its names** (`computeProviderNamed()`):
+"Amazon" answered "0 instances match" with no error, which reads as "Amazon
+sells none".
+
+**What stays an error**, each logged as one JSON line with the tool and one
+of eight categories (`lib/tool-errors.ts`): a value the schema refuses after
+the reading (`input-validation`), an argument the tool does not have
+(`unknown-argument`), arguments that contradict each other
+(`invalid-arguments`), a read of the site with no fallback
+(`upstream-unavailable`, decision 12), a handler that threw (`internal`), an
+answer the tool's own output schema refused (`output-validation`), a tool
+that does not exist (`unknown-tool`), anything else the SDK refuses
+(`protocol`). A line holds the name of a refused argument and the kind of
+refusal, never a value, a model name, a header or an address. Three places
+write it, each the only one that can: the reading (it knows the argument), the
+wrapper in `tool()` (it has the handler's result), and the transport's `send`
+(the only place an answer the SDK built is visible).
+
+**Not done, on purpose.** No retry on a read of the site: none failed in 268
+calls, and the measurement against retrying the compute rebuild stands. No
+definition change. Three things a model asked for that need one, for the next
+grouped definition release: an exact `monthlyVolume` on the tools that take
+presets, a filter by instance name on `compare-compute-pricing`, and a
+declared field for what was read differently from what was sent.
+
+**The portal's figure.** The seven errors stay in the 30-day window until 20
+to 22 December whatever this release does: with 49 calls each weighs two
+points, and it takes more than 140 calls without an error to pass under 5%
+before then.
 
 ### Use Case Profiles (for cost estimation)
 - supportTicket, knowledgeQA, meetingSummary, marketingContent

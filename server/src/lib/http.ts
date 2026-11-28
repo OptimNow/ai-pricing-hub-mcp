@@ -76,10 +76,59 @@ async function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
   }
 }
 
+/**
+ * What the server that owns the tools does around a `tools/call`, in the one
+ * place every call passes through before the SDK has it.
+ */
+export interface ToolCallHooks {
+  /**
+   * The arguments as the tool is to receive them, and what to add to the
+   * call's `_meta` for its handler. Called before the SDK validates, which is
+   * the only moment an argument can still be read rather than refused: the
+   * schema that validates is the schema that is published, so a tolerance
+   * written into it would change the tool's definition (lib/tool-arguments.ts).
+   * `meta` replaces whatever the client sent under the same keys.
+   */
+  readArguments?: (tool: string, args: unknown) => { arguments: unknown; meta?: Record<string, unknown> };
+  /** A `tools/call` was answered with `isError: true`: the tool asked for and the answer's text. */
+  onToolError?: (tool: string, text: string) => void;
+}
+
+/**
+ * Apply `readArguments` to every `tools/call` in a parsed body, and note which
+ * tool each request id asked for. The body is this server's own parsed copy,
+ * so it is rewritten in place. A hook that throws changes nothing: the call
+ * goes on as it came.
+ */
+function prepareToolCalls(body: unknown, hooks: ToolCallHooks): Map<string | number, string> {
+  const asked = new Map<string | number, string>();
+  for (const message of Array.isArray(body) ? body : [body]) {
+    if (message === null || typeof message !== "object") continue;
+    const { method, params, id } = message as { method?: unknown; params?: unknown; id?: unknown };
+    if (method !== "tools/call" || params === null || typeof params !== "object") continue;
+    const call = params as { name?: unknown; arguments?: unknown; _meta?: unknown };
+    if (typeof call.name !== "string") continue;
+    if (typeof id === "string" || typeof id === "number") asked.set(id, call.name);
+    if (!hooks.readArguments) continue;
+    try {
+      const read = hooks.readArguments(call.name, call.arguments);
+      if (read.arguments !== undefined) call.arguments = read.arguments;
+      if (read.meta) {
+        const sent = call._meta !== null && typeof call._meta === "object" ? (call._meta as Record<string, unknown>) : {};
+        call._meta = { ...sent, ...read.meta };
+      }
+    } catch (error) {
+      console.error("[http] reading a tool call's arguments failed; passing them on as sent:", error);
+    }
+  }
+  return asked;
+}
+
 async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   createMcpServer: () => McpServer,
+  hooks: ToolCallHooks,
 ): Promise<void> {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
@@ -116,8 +165,33 @@ async function handle(
     return;
   }
 
+  const asked = prepareToolCalls(parsed.body, hooks);
+
   const server = createMcpServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+
+  // Every answer leaves through `send`, the SDK's own included: a call it
+  // refuses, or an answer its output schema refuses, comes back as a result
+  // with `isError` that no handler ever saw and nothing logged.
+  const { onToolError } = hooks;
+  if (onToolError && asked.size > 0) {
+    const send = transport.send.bind(transport);
+    transport.send = (message, options) => {
+      try {
+        const { id, result } = message as { id?: unknown; result?: { isError?: unknown; content?: unknown } };
+        const tool = typeof id === "string" || typeof id === "number" ? asked.get(id) : undefined;
+        if (tool !== undefined && result?.isError === true) {
+          const blocks = Array.isArray(result.content) ? (result.content as { type?: unknown; text?: unknown }[]) : [];
+          const text = blocks.find(block => block?.type === "text" && typeof block.text === "string")?.text;
+          onToolError(tool, typeof text === "string" ? text : "");
+        }
+      } catch (error) {
+        console.error("[http] observing a tool error failed:", error);
+      }
+      return send(message, options);
+    };
+  }
+
   res.on("close", () => {
     void transport.close();
     void server.close();
@@ -136,11 +210,12 @@ async function handle(
  * The HTTP server, not yet listening.
  *
  * `createMcpServer` must return a NEW server on every call: see the note at
- * the head of this file.
+ * the head of this file. `hooks` is what the owner of the tools does around a
+ * tool call; without it every call reaches the SDK as it was sent.
  */
-export function createHttpServer(createMcpServer: () => McpServer): http.Server {
+export function createHttpServer(createMcpServer: () => McpServer, hooks: ToolCallHooks = {}): http.Server {
   return http.createServer((req, res) => {
-    void handle(req, res, createMcpServer).catch((error: unknown) => {
+    void handle(req, res, createMcpServer, hooks).catch((error: unknown) => {
       console.error("[http] unhandled error:", error);
       sendRpcError(res, 500, -32603, "Internal server error.");
     });

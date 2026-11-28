@@ -51,8 +51,10 @@ test("the line closes a successful answer's text, and never an error", () => {
 
 test("every tool's handler goes through it, and the output schemas are untouched", () => {
   const index = readFileSync(fileURLToPath(new URL("../index.ts", import.meta.url)), "utf8");
-  // In tool(), the one place every registration passes through.
-  assert.match(index, /\.then\(closeWithSource\)/);
+  // In tool(), the one place every registration passes through: the wrapper
+  // around every handler ends on it, and nothing else calls it.
+  assert.match(index, /^    return closeWithSource\(result\);\r?$/m);
+  assert.equal([...index.matchAll(/\bcloseWithSource\(/g)].length, 1);
   assert.match(index, /server\.registerTool\(name, \{ \.\.\.config, inputSchema, annotations \}, handler\)/);
   // No `citation` field: a schema change makes claude.ai ask every user who
   // chose "Always allow" to approve each changed tool again.

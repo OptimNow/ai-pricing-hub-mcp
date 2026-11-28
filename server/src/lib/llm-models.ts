@@ -519,10 +519,83 @@ function matchedNames(m: LLMModel): { model: string; label: string } {
   return { model: normaliseModelName(m.model), label: normaliseModelName(`${m.provider} ${m.model}`) };
 }
 
-/** Whether a row carries exactly this name, with or without its provider. */
-function isExactName(m: LLMModel, search: string): boolean {
-  const names = matchedNames(m);
-  return names.model === search || names.label === search;
+/**
+ * A model's API identifier, cut down to the name inside it.
+ *
+ * A model asked about is often named by the string a developer passes to an
+ * API: a router's id ("meta-llama/llama-3.3-70b-instruct"), a dated snapshot
+ * ("claude-sonnet-4-5-20250929"), a cloud's id ("us.anthropic.claude-…-v1:0").
+ * On 0.14.3 the first and the last matched nothing. `cut` says a date or a
+ * variant tag was taken off: the row found is then the model's entry in the
+ * catalogue, which is not a statement about that one snapshot's price.
+ */
+function nameInIdentifier(query: string): { name: string; cut: boolean } {
+  const whole = query.trim();
+  // A router or an organisation in front: everything up to the last slash.
+  let name = whole.slice(whole.lastIndexOf("/") + 1);
+  // A cloud's prefix: an optional region group, then the maker, each closed by
+  // a dot that a letter follows. A version dot is followed by a digit.
+  name = name.replace(/^(?:(?:us|eu|apac|global)\.)?[a-z][a-z0-9-]*\.(?=[a-z])/i, "");
+  const uncut = name;
+  // A cloud's version suffix, or a variant tag: "-v1:0", ":free".
+  name = name.replace(/-v\d+:\d+$/i, "").replace(/:[a-z][\w-]*$/i, "");
+  // A snapshot's date, or the alias for the newest one.
+  name = name.replace(/[-@_](?:\d{8}|\d{4}-\d{2}-\d{2}|latest)$/i, "");
+  return { name, cut: name !== uncut };
+}
+
+/** A matched name with its version dots read as spaces, the way an API id
+ *  writes a version: "claude-sonnet-5-5" for Claude Sonnet 5.5. */
+function withoutVersionDots(name: string): string {
+  return name.replace(/\./g, " ").replace(/\s+/g, " ").trim();
+}
+
+interface NameReading {
+  /** The query as it is compared. */
+  search: string;
+  /** What a row's names go through before they are compared with it. */
+  shape: (name: string) => string;
+  /** Whether a row carrying exactly this name counts as an exact match. */
+  canBeExact: boolean;
+}
+
+/**
+ * The ways a query is read, in the order they are tried. The second is tried
+ * only when the first matches no row, so a name that resolved before 0.15.0
+ * resolves to the same row: the name as typed, then the name as an API
+ * identifier spells it.
+ */
+function nameReadings(query: string): NameReading[] {
+  const readings: NameReading[] = [];
+  const typed = normaliseModelName(query);
+  if (typed) readings.push({ search: typed, shape: (name) => name, canBeExact: true });
+  const identifier = nameInIdentifier(query);
+  const spelled = withoutVersionDots(normaliseModelName(identifier.name));
+  if (spelled) readings.push({ search: spelled, shape: withoutVersionDots, canBeExact: !identifier.cut });
+  return readings;
+}
+
+/**
+ * The rows a free-text name matches, exact ones first, and how many of them
+ * carry exactly that name. The one lookup behind `matchModels` and
+ * `resolveModel`.
+ */
+function lookUp<T extends LLMModel>(models: T[], query: string): { matches: T[]; exactCount: number } {
+  if (query.length > MAX_MODEL_NAME_LENGTH) return { matches: [], exactCount: 0 };
+  for (const reading of nameReadings(query)) {
+    const matches = models.filter((m) => ` ${reading.shape(matchedNames(m).label)}`.includes(` ${reading.search}`));
+    if (matches.length === 0) continue;
+    const isExact = (m: T): boolean => {
+      const names = matchedNames(m);
+      return reading.shape(names.model) === reading.search || reading.shape(names.label) === reading.search;
+    };
+    const exact = matches.filter(isExact);
+    return {
+      matches: [...exact, ...matches.filter((m) => !isExact(m))],
+      exactCount: reading.canBeExact ? exact.length : 0,
+    };
+  }
+  return { matches: [], exactCount: 0 };
 }
 
 /**
@@ -538,15 +611,13 @@ function isExactName(m: LLMModel, search: string): boolean {
  * server prints, matched no row. And a match starts at the start of a word:
  * before, it could start anywhere, so "o4" answered as Solar Pro 4 ("pr-o 4")
  * with the status `unique`, and "mini" matched every Gemini.
+ *
+ * Since 0.15.0 a name that matches nothing as typed is read once more as an
+ * API identifier (`nameReadings`). A close name is still never taken for the
+ * one asked: "GPT-4 Turbo" is not GPT-4o, and answers as a miss.
  */
 export function matchModels<T extends LLMModel>(models: T[], query: string, limit = 5): T[] {
-  if (query.length > MAX_MODEL_NAME_LENGTH) return [];
-  const search = normaliseModelName(query);
-  if (!search) return [];
-  const matches = models.filter((m) => ` ${matchedNames(m).label}`.includes(` ${search}`));
-  const exact = matches.filter((m) => isExactName(m, search));
-  if (exact.length === 0) return matches.slice(0, limit);
-  return [...exact, ...matches.filter((m) => !isExactName(m, search))].slice(0, limit);
+  return lookUp(models, query).matches.slice(0, limit);
 }
 
 /** Character pairs of a string, for the Sørensen-Dice similarity below. */
@@ -633,16 +704,13 @@ const MAX_ALTERNATIVES = 5;
 
 /** Resolve one free-text name to a single row, recording how confident that was. */
 export function resolveModel<T extends LLMModel>(models: T[], query: string): ModelResolution<T> {
-  const all = matchModels(models, query, Number.POSITIVE_INFINITY);
+  // Exact hits come first, and their count says whether "exact" is actually
+  // unambiguous. Two providers shipping the same model name is a real case, and
+  // picking the first silently is the bug.
+  const { matches: all, exactCount } = lookUp(models, query);
   if (all.length === 0) {
     return { query, status: "not-found", alternatives: closeModelNames(models, query), totalMatches: 0 };
   }
-
-  const search = normaliseModelName(query);
-  // Exact hits are promoted to the front by matchModels, so counting them here
-  // tells us whether "exact" is actually unambiguous. Two providers shipping the
-  // same model name is a real case, and picking the first silently is the bug.
-  const exactCount = all.filter((m) => isExactName(m, search)).length;
 
   const status: ResolutionStatus =
     exactCount === 1 ? "exact" : all.length > 1 ? "ambiguous" : "unique";
